@@ -35,11 +35,25 @@
             <div class="conflict-detail">
               <el-row :gutter="20">
                 <el-col :xs="24" :sm="24" :md="12">
-                  <h4>库存中已存在</h4>
+                  <h4>{{ row.conflict_type === 'KIKOERU_DUPLICATE' ? 'Kikoeru 服务器中已存在' : '库存中已存在' }}</h4>
                   <el-descriptions :column="1" border>
-                    <el-descriptions-item label="路径">
-                      <div class="path-text">{{ row.existing_path }}</div>
-                    </el-descriptions-item>
+                    <template v-if="row.conflict_type === 'KIKOERU_DUPLICATE'">
+                      <el-descriptions-item label="来源">
+                        <el-tag type="info" size="small">Kikoeru 远程服务器</el-tag>
+                      </el-descriptions-item>
+                      <template v-if="row.linked_works_info">
+                        <el-descriptions-item label="标题">{{ row.linked_works_info.title || '-' }}</el-descriptions-item>
+                        <el-descriptions-item label="社团">{{ row.linked_works_info.circle_name || '-' }}</el-descriptions-item>
+                        <el-descriptions-item label="标签" v-if="row.linked_works_info.tags?.length">
+                          <el-tag v-for="tag in row.linked_works_info.tags.slice(0, 5)" :key="tag" size="small" style="margin-right: 4px;">{{ tag }}</el-tag>
+                        </el-descriptions-item>
+                      </template>
+                    </template>
+                    <template v-else>
+                      <el-descriptions-item label="路径">
+                        <div class="path-text">{{ row.existing_path }}</div>
+                      </el-descriptions-item>
+                    </template>
                   </el-descriptions>
                 </el-col>
                 <el-col :xs="24" :sm="24" :md="12">
@@ -56,6 +70,15 @@
                   </el-descriptions>
                 </el-col>
               </el-row>
+              <el-alert
+                v-if="row.conflict_type === 'KIKOERU_DUPLICATE'"
+                type="info"
+                title="提示"
+                :closable="false"
+                style="margin-top: 12px;"
+              >
+                此作品在 Kikoeru 远程服务器中已存在。选择"保留新版"将处理并添加到本地库，选择"保留旧版"将跳过此作品。
+              </el-alert>
             </div>
           </template>
         </el-table-column>
@@ -76,9 +99,17 @@
           </template>
         </el-table-column>
         
-        <el-table-column prop="existing_path" label="已存在路径" min-width="200">
+        <el-table-column prop="existing_path" label="已存在位置" min-width="200">
           <template #default="{ row }">
-            <div class="path-cell" :title="row.existing_path">{{ row.existing_path }}</div>
+            <template v-if="row.conflict_type === 'KIKOERU_DUPLICATE'">
+              <el-tag type="info" size="small">Kikoeru 服务器</el-tag>
+              <span v-if="row.linked_works_info?.title" style="margin-left: 8px; color: #606266;">
+                {{ row.linked_works_info.title }}
+              </span>
+            </template>
+            <template v-else>
+              <div class="path-cell" :title="row.existing_path">{{ row.existing_path }}</div>
+            </template>
           </template>
         </el-table-column>
         
@@ -101,13 +132,19 @@
                 保留新版
               </el-button>
               <el-button size="small" @click="handleAction(row, 'KEEP_OLD')" :loading="processingIds.has(row.id)">
-                保留旧版
+                {{ row.conflict_type === 'KIKOERU_DUPLICATE' ? '跳过' : '保留旧版' }}
               </el-button>
-              <el-button size="small" type="warning" @click="handleAction(row, 'MERGE')" :loading="processingIds.has(row.id)">
+              <el-button
+                v-if="row.conflict_type !== 'KIKOERU_DUPLICATE'"
+                size="small"
+                type="warning"
+                @click="handleAction(row, 'MERGE')"
+                :loading="processingIds.has(row.id)"
+              >
                 合并
               </el-button>
               <el-button size="small" type="info" @click="handleAction(row, 'SKIP')" :loading="processingIds.has(row.id)">
-                跳过
+                删除
               </el-button>
             </el-button-group>
           </template>
@@ -155,6 +192,7 @@ async function fetchConflicts() {
 function getConflictTypeLabel(type) {
   const labels = {
     'DUPLICATE': '完全重复',
+    'KIKOERU_DUPLICATE': 'Kikoeru重复',
     'LANGUAGE_VARIANT': '多语言版本',
     'MULTIPLE_VERSIONS': '多版本'
   }
@@ -164,6 +202,7 @@ function getConflictTypeLabel(type) {
 function getConflictTypeType(type) {
   const types = {
     'DUPLICATE': 'danger',
+    'KIKOERU_DUPLICATE': 'warning',
     'LANGUAGE_VARIANT': 'warning',
     'MULTIPLE_VERSIONS': 'info'
   }
@@ -197,16 +236,29 @@ function formatDate(date) {
 }
 
 async function handleAction(conflict, action) {
+  const isKikoeru = conflict.conflict_type === 'KIKOERU_DUPLICATE'
+
   const actionLabels = {
     'KEEP_NEW': '保留新版',
-    'KEEP_OLD': '保留旧版',
+    'KEEP_OLD': isKikoeru ? '跳过（保留Kikoeru版本）' : '保留旧版',
     'MERGE': '合并',
-    'SKIP': '跳过'
+    'SKIP': '删除'
   }
-  
+
+  const actionDescriptions = {
+    'KEEP_NEW': isKikoeru
+      ? '将处理并添加此作品到本地库，Kikoeru 服务器中的版本不受影响'
+      : '将删除旧版本，保留新版本',
+    'KEEP_OLD': isKikoeru
+      ? '将跳过此作品，保持 Kikoeru 服务器中的版本'
+      : '将删除新版本，保留旧版本',
+    'MERGE': '将保留两个版本，新版本会添加编号后缀',
+    'SKIP': '将删除新版本文件'
+  }
+
   try {
     await ElMessageBox.confirm(
-      `确定要${actionLabels[action]}吗？`,
+      `${actionLabels[action]}：${actionDescriptions[action]}。确定继续吗？`,
       '确认操作',
       {
         confirmButtonText: '确定',

@@ -11,62 +11,116 @@ from ..core.task_engine import Task
 
 logger = logging.getLogger(__name__)
 
+# 冲突类型常量
+CONFLICT_TYPE_DUPLICATE = 'DUPLICATE'
+CONFLICT_TYPE_KIKOERU_DUPLICATE = 'KIKOERU_DUPLICATE'  # Kikoeru 服务器查重
+CONFLICT_TYPE_LINKED_WORK_ORIGINAL = 'LINKED_WORK_ORIGINAL'
+CONFLICT_TYPE_LINKED_WORK_TRANSLATION = 'LINKED_WORK_TRANSLATION'
+CONFLICT_TYPE_LANGUAGE_VARIANT = 'LANGUAGE_VARIANT'
+CONFLICT_TYPE_MULTIPLE_VERSIONS = 'MULTIPLE_VERSIONS'
+
 class SmartClassifier:
     """智能分类器"""
-    
+
     def __init__(self):
         self.config = get_config()
-    
+        self._kikoeru_service = None
+
+    def _get_kikoeru_service(self):
+        """懒加载 Kikoeru 查重服务"""
+        if self._kikoeru_service is None:
+            from .kikoeru_duplicate_service import KikoeruDuplicateService
+            self._kikoeru_service = KikoeruDuplicateService()
+        return self._kikoeru_service
+
     async def check_duplicate_before_extract(self, rjcode: str, task: Task, engine=None) -> bool:
         """
         在解压前检查是否重复（包括检查是否有其他任务正在处理）
         返回True表示存在重复或正在处理中，应该停止处理
         """
         logger.info(f"开始预检: 检查RJ号 {rjcode} 是否已存在或正在处理")
-        
+
         # 1. 检查是否已有其他任务正在处理这个RJ号
         if engine and engine.is_rjcode_processing(rjcode):
             logger.warning(f"RJ号 {rjcode} 正在被其他任务处理中，当前任务将等待")
             # 添加到问题作品表，标记为等待状态
             self._add_to_conflict_works(
-                task.id, 
-                rjcode, 
-                'DUPLICATE', 
-                "正在处理中", 
+                task.id,
+                rjcode,
+                CONFLICT_TYPE_DUPLICATE,
+                "正在处理中",
                 task.source_path,
                 {},
                 status='PENDING'
             )
             return True
-        
-        # 2. 检查库中是否已存在
+
+        # 2. 检查本地库中是否已存在
         existing = self._check_existing(rjcode)
-        
+
         if existing:
             # 强制使用DUPLICATE类型（预检阶段无法判断语言差异）
-            conflict_type = 'DUPLICATE'
-            
-            logger.info(f"预检发现重复: RJ={rjcode}, 类型={conflict_type}, 已存在={existing['path']}")
-            
+            conflict_type = CONFLICT_TYPE_DUPLICATE
+
+            logger.info(f"预检发现本地重复: RJ={rjcode}, 类型={conflict_type}, 已存在={existing['path']}")
+
             # 添加到问题作品表（不解压，只记录压缩包路径）
             self._add_to_conflict_works(
-                task.id, 
-                rjcode, 
-                conflict_type, 
-                existing['path'], 
+                task.id,
+                rjcode,
+                conflict_type,
+                existing['path'],
                 task.source_path,  # 压缩包路径
                 {}  # 尚无元数据
             )
-            
+
             logger.info(f"预检发现重复作品: {rjcode}, 已添加到问题列表等待手动处理")
             return True
-        
-        # 3. 标记RJ号正在处理（防止其他任务同时处理）
+
+        # 3. 检查 Kikoeru 服务器是否已存在（如果启用）
+        kikoeru_config = getattr(self.config, 'kikoeru_server', None)
+        if kikoeru_config and kikoeru_config.enabled:
+            logger.info(f"预检: 检查 Kikoeru 服务器是否已存在 {rjcode}")
+            try:
+                kikoeru_service = self._get_kikoeru_service()
+                kikoeru_result = await kikoeru_service.check_duplicate(rjcode)
+
+                if kikoeru_result.is_found:
+                    logger.info(f"预检发现 Kikoeru 服务器重复: RJ={rjcode}, 标题={kikoeru_result.title}")
+
+                    # 保存 Kikoeru 查重结果信息
+                    kikoeru_info = {
+                        'title': kikoeru_result.title,
+                        'circle_name': kikoeru_result.circle_name,
+                        'work_id': kikoeru_result.work_id,
+                        'tags': kikoeru_result.tags,
+                        'source': 'kikoeru_server'
+                    }
+
+                    # 添加到问题作品表，使用 KIKOERU_DUPLICATE 类型
+                    self._add_to_conflict_works(
+                        task.id,
+                        rjcode,
+                        CONFLICT_TYPE_KIKOERU_DUPLICATE,
+                        "Kikoeru 服务器",  # 远程服务器无本地路径
+                        task.source_path,
+                        {'kikoeru_info': kikoeru_info},
+                        linked_works_info=kikoeru_info
+                    )
+
+                    logger.info(f"预检发现 Kikoeru 服务器重复作品: {rjcode}, 已添加到问题列表")
+                    return True
+                else:
+                    logger.info(f"Kikoeru 服务器未找到: {rjcode}")
+            except Exception as e:
+                logger.warning(f"Kikoeru 服务器查重失败，跳过远程查重: {e}")
+
+        # 4. 标记RJ号正在处理（防止其他任务同时处理）
         if engine:
             engine.mark_rjcode_processing(rjcode)
             task.rjcode = rjcode  # 保存RJ号到任务，用于后续清理
-        
-        logger.info(f"预检完成: RJ号 {rjcode} 未在库中发现，继续解压")
+
+        logger.info(f"预检完成: RJ号 {rjcode} 未在本地库和 Kikoeru 服务器中发现，继续解压")
         return False
     
     async def classify_and_move(self, source_path: str, metadata: Dict, task: Task) -> str:
@@ -82,8 +136,8 @@ class SmartClassifier:
         
         if existing:
             # 使用DUPLICATE类型（解压后的重复检测，已有元数据但统一标记为重复）
-            conflict_type = 'DUPLICATE'
-            
+            conflict_type = CONFLICT_TYPE_DUPLICATE
+
             logger.info(f"解压后发现重复: RJ={rjcode}, 类型={conflict_type}, 已存在={existing['path']}")
             
             # 添加到问题作品表

@@ -137,6 +137,7 @@ def get_conflict_type_name(conflict_type: str) -> str:
     """获取冲突类型的中文名称"""
     names = {
         'DUPLICATE': '直接重复',
+        'KIKOERU_DUPLICATE': 'Kikoeru重复',
         'LINKED_WORK_ORIGINAL': '原作已存在',
         'LINKED_WORK_TRANSLATION': '翻译版已存在',
         'LINKED_WORK_CHILD': '子版本已存在',

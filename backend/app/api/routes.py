@@ -891,24 +891,29 @@ async def resolve_conflict(conflict_id: str, action: dict):
     from ..core.task_engine import Task, TaskType, TaskStatus, get_task_engine
     import shutil
     import re
-    
+
     db = next(get_db())
     try:
         conflict = db.query(ConflictWork).filter(ConflictWork.id == conflict_id).first()
         if not conflict:
             raise HTTPException(status_code=404, detail="问题作品不存在")
-        
+
         action_type = action.get("action")
         config = get_config()
-        
+
+        # 检查是否是 Kikoeru 服务器查重类型
+        is_kikoeru_duplicate = conflict.conflict_type == 'KIKOERU_DUPLICATE'
+
         # 检查new_path是否是压缩包（预检阶段的冲突）
         from ..core.watcher import ArchiveHandler
         temp_handler = ArchiveHandler(lambda x: None, lambda: set(), lambda: False, lambda x: None)
         is_archive = temp_handler._is_archive(conflict.new_path)
-        
+
         if action_type == "KEEP_NEW":
-            if os.path.exists(conflict.existing_path):
-                shutil.rmtree(conflict.existing_path)
+            # Kikoeru 查重没有本地旧版路径，直接处理新版
+            if not is_kikoeru_duplicate:
+                if os.path.exists(conflict.existing_path):
+                    shutil.rmtree(conflict.existing_path)
             
             if is_archive:
                 logger.info(f"保留新版：先解压压缩包 {conflict.new_path}")
