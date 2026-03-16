@@ -867,6 +867,7 @@ class AutoProcessConfig(BaseModel):
 | 类型 | 说明 | 推荐操作 |
 |------|------|---------|
 | `DUPLICATE` | 直接重复（相同RJ号） | 保留新版/保留旧版 |
+| `KIKOERU_DUPLICATE` | Kikoeru 服务器已存在 | 保留新版/跳过 |
 | `LINKED_WORK_ORIGINAL` | 原作已存在，当前是翻译版 | 保留两者 |
 | `LINKED_WORK_TRANSLATION` | 翻译版已存在，当前是原作 | 保留两者 |
 | `LINKED_WORK_CHILD` | 子版本已存在 | 保留两者 |
@@ -1110,6 +1111,12 @@ const useStore = defineStore('main', {
 ---
 
 ## 更新日志
+
+### v1.6.5 (2026-03)
+- 新增解压前 Kikoeru 服务器查重功能
+- 新增 `KIKOERU_DUPLICATE` 冲突类型
+- 修改 `check_duplicate_before_extract()` 支持 Kikoeru 服务器查重
+- 前端冲突页面适配 Kikoeru 查重类型显示
 
 ### v1.6.4 (2026-03)
 - 新增 `use_japanese_metadata` 配置，支持重命名模板使用日语元数据
