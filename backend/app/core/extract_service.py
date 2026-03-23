@@ -1159,7 +1159,7 @@ class ExtractService:
         """从压缩包路径提取RJ号并生成密码列表
 
         返回顺序: RJ号, RJ号+1, RJ号-1
-        例如: 对于RJ123456，返回 ['RJ123456', 'RJ123457', 'RJ123455']
+        例如: 对于RJ01573553，返回 ['RJ01573553', 'RJ01573554', 'RJ01573552']
         """
         passwords = []
         # 从文件名中提取RJ号 (例如: RJ123456)
@@ -1167,10 +1167,16 @@ class ExtractService:
         # 匹配 RJ 后跟 6-8 位数字
         match = re.search(r'RJ(\d{6,8})', filename, re.IGNORECASE)
         if match:
-            rj_number = int(match.group(1))
-            rj_code = f"RJ{rj_number}"
-            rj_plus_one = f"RJ{rj_number + 1}"
-            rj_minus_one = f"RJ{rj_number - 1}"
+            rj_digits = match.group(1)  # 保留原始数字字符串，包含前导零
+            digit_count = len(rj_digits)  # 记录位数
+            rj_number = int(rj_digits)
+
+            # 保留原始格式的 RJ 号作为密码
+            rj_code = f"RJ{rj_digits}"
+            # +1 和 -1 时保持原始位数，用 0 填充
+            rj_plus_one = f"RJ{str(rj_number + 1).zfill(digit_count)}"
+            rj_minus_one = f"RJ{str(max(0, rj_number - 1)).zfill(digit_count)}"
+
             passwords = [rj_code, rj_plus_one, rj_minus_one]
             logger.debug(f"从文件名提取RJ号生成密码: {passwords}")
         return passwords
