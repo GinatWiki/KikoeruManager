@@ -17,11 +17,22 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# 安装系统依赖（包括 7zip 和 opencc）
+# 安装系统依赖
+# 注意：p7zip-full 不支持 RAR5，需要安装官方 7zip 和 unrar
 RUN apt-get update && apt-get install -y \
     p7zip-full \
+    unrar \
+    xz-utils \
     libopencc-dev \
+    wget \
     && rm -rf /var/lib/apt/lists/*
+
+# 安装官方 7-Zip（支持 RAR5）
+RUN wget -q https://www.7-zip.org/a/7z2408-linux-x64.tar.xz -O /tmp/7z.tar.xz \
+    && tar -xf /tmp/7z.tar.xz -C /usr/local/bin \
+    && chmod +x /usr/local/bin/7zz \
+    && ln -sf /usr/local/bin/7zz /usr/local/bin/7z \
+    && rm /tmp/7z.tar.xz
 
 # 复制后端依赖
 COPY backend/requirements.txt .
