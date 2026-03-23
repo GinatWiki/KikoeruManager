@@ -555,27 +555,55 @@ async function handleImport() {
 async function importFromClipboard() {
   clipboardLoading.value = true
   try {
-    const text = await navigator.clipboard.readText()
-    if (!text || !text.trim()) {
-      ElMessage.warning('剪贴板为空或无有效内容')
+    // 尝试使用现代 Clipboard API（需要 HTTPS）
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      const text = await navigator.clipboard.readText()
+      if (!text || !text.trim()) {
+        ElMessage.warning('剪贴板为空或无有效内容')
+        return
+      }
+
+      if (importText.value.trim()) {
+        importText.value = importText.value.trim() + '\n' + text.trim()
+        ElMessage.success(`已从剪贴板追加内容（共 ${importText.value.split('\n').filter(l => l.trim()).length} 个密码）`)
+      } else {
+        importText.value = text.trim()
+        ElMessage.success(`已从剪贴板读取 ${importText.value.split('\n').filter(l => l.trim()).length} 个密码`)
+      }
       return
     }
 
-    // 如果已有内容，追加而不是覆盖
-    if (importText.value.trim()) {
-      importText.value = importText.value.trim() + '\n' + text.trim()
-      ElMessage.success(`已从剪贴板追加内容（共 ${importText.value.split('\n').filter(l => l.trim()).length} 个密码）`)
+    // HTTP 环境降级：使用隐藏 textarea + execCommand
+    const textarea = document.createElement('textarea')
+    textarea.style.position = 'fixed'
+    textarea.style.left = '-9999px'
+    textarea.style.top = '0'
+    document.body.appendChild(textarea)
+    textarea.focus()
+
+    // 尝试执行粘贴命令
+    const success = document.execCommand('paste')
+
+    // 给一点时间让粘贴完成
+    await new Promise(resolve => setTimeout(resolve, 100))
+
+    const text = textarea.value
+    document.body.removeChild(textarea)
+
+    if (success && text && text.trim()) {
+      if (importText.value.trim()) {
+        importText.value = importText.value.trim() + '\n' + text.trim()
+        ElMessage.success(`已从剪贴板追加内容（共 ${importText.value.split('\n').filter(l => l.trim()).length} 个密码）`)
+      } else {
+        importText.value = text.trim()
+        ElMessage.success(`已从剪贴板读取 ${importText.value.split('\n').filter(l => l.trim()).length} 个密码`)
+      }
     } else {
-      importText.value = text.trim()
-      ElMessage.success(`已从剪贴板读取 ${importText.value.split('\n').filter(l => l.trim()).length} 个密码`)
+      ElMessage.warning('请使用 Ctrl+V 粘贴到文本框，或检查浏览器是否允许访问剪贴板')
     }
   } catch (error) {
     console.error('读取剪贴板失败:', error)
-    if (error.name === 'NotAllowedError') {
-      ElMessage.error('无法访问剪贴板，请检查浏览器权限或手动粘贴')
-    } else {
-      ElMessage.error('读取剪贴板失败: ' + error.message)
-    }
+    ElMessage.warning('读取剪贴板失败，请使用 Ctrl+V 手动粘贴')
   } finally {
     clipboardLoading.value = false
   }
