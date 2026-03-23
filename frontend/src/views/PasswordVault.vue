@@ -308,14 +308,24 @@
           <p>系统会自动匹配RJ号，无需在导入时指定</p>
         </div>
       </el-alert>
-      
+
+      <div style="margin-bottom: 12px;">
+        <el-button type="primary" plain @click="importFromClipboard" :loading="clipboardLoading">
+          <el-icon><DocumentCopy /></el-icon>
+          从剪贴板导入
+        </el-button>
+        <span style="margin-left: 12px; font-size: 12px; color: #909399;">
+          点击后会自动读取剪贴板内容并填充到下方文本框
+        </span>
+      </div>
+
       <el-input
         v-model="importText"
         type="textarea"
         :rows="10"
         placeholder="在此粘贴密码列表（每行一个）...&#10;例如：&#10;password123&#10;password456&#10;password789"
       />
-      
+
       <template #footer>
         <el-button @click="showImportDialog = false">取消</el-button>
         <el-button type="primary" @click="handleImport" :loading="importing">
@@ -328,7 +338,7 @@
 
 <script setup>
 import { ref, onMounted, watch } from 'vue'
-import { Plus, Delete, Document, Search, View, Hide, Timer, Refresh, Setting, SortDown, SortUp } from '@element-plus/icons-vue'
+import { Plus, Delete, Document, DocumentCopy, Search, View, Hide, Timer, Refresh, Setting, SortDown, SortUp } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { passwordApi, cleanupApi } from '../api'
 
@@ -344,6 +354,7 @@ const showCleanupDialog = ref(false)
 const isEditing = ref(false)
 const submitting = ref(false)
 const importing = ref(false)
+const clipboardLoading = ref(false)
 const cleanupLoading = ref(false)
 const showPassword = ref({})
 const importText = ref('')
@@ -529,7 +540,7 @@ async function handleImport() {
     } else {
       ElMessage.success(`成功导入 ${imported} 个密码`)
     }
-    
+
     showImportDialog.value = false
     importText.value = ''
     loadPasswords()
@@ -538,6 +549,35 @@ async function handleImport() {
     ElMessage.error('导入失败: ' + (error.response?.data?.detail || error.message))
   } finally {
     importing.value = false
+  }
+}
+
+async function importFromClipboard() {
+  clipboardLoading.value = true
+  try {
+    const text = await navigator.clipboard.readText()
+    if (!text || !text.trim()) {
+      ElMessage.warning('剪贴板为空或无有效内容')
+      return
+    }
+
+    // 如果已有内容，追加而不是覆盖
+    if (importText.value.trim()) {
+      importText.value = importText.value.trim() + '\n' + text.trim()
+      ElMessage.success(`已从剪贴板追加内容（共 ${importText.value.split('\n').filter(l => l.trim()).length} 个密码）`)
+    } else {
+      importText.value = text.trim()
+      ElMessage.success(`已从剪贴板读取 ${importText.value.split('\n').filter(l => l.trim()).length} 个密码`)
+    }
+  } catch (error) {
+    console.error('读取剪贴板失败:', error)
+    if (error.name === 'NotAllowedError') {
+      ElMessage.error('无法访问剪贴板，请检查浏览器权限或手动粘贴')
+    } else {
+      ElMessage.error('读取剪贴板失败: ' + error.message)
+    }
+  } finally {
+    clipboardLoading.value = false
   }
 }
 

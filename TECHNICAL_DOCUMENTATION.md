@@ -1112,6 +1112,11 @@ const useStore = defineStore('main', {
 
 ## 更新日志
 
+### v1.6.6 (2026-03)
+- 修复 RJ 号密码前导零丢失问题（`_get_rj_passwords` 方法）
+- 新增密码库"从剪贴板导入"按钮，支持一键读取剪贴板内容
+- 更新前端版本号显示
+
 ### v1.6.5 (2026-03)
 - 新增解压前 Kikoeru 服务器查重功能
 - 新增 `KIKOERU_DUPLICATE` 冲突类型
