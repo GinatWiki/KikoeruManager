@@ -18,10 +18,9 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # 安装系统依赖
-# 注意：p7zip-full 不支持 RAR5，需要安装官方 7zip 和 unrar
+# 注意：p7zip-full 不支持 RAR5，需要安装官方 7zip
 RUN apt-get update && apt-get install -y \
     p7zip-full \
-    unrar \
     xz-utils \
     libopencc-dev \
     wget \
