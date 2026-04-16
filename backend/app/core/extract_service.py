@@ -442,8 +442,9 @@ class ExtractService:
                 self.seven_zip, 'x',
                 '-y',  # 自动确认
                 '-o' + output_path,  # 输出目录
-                archive_info.path
             ]
+            cmd.extend(self._get_7z_thread_args())
+            cmd.append(archive_info.path)
             
             if password:
                 cmd.append(f'-p{password}')
@@ -1374,8 +1375,9 @@ class ExtractService:
                 self.seven_zip, 'x',
                 '-y',  # 自动确认
                 '-o' + output_path,  # 输出目录
-                archive_info.path
             ]
+            cmd.extend(self._get_7z_thread_args())
+            cmd.append(archive_info.path)
             
             if password:
                 # Windows下使用 -p密码 格式（无空格）
@@ -1487,6 +1489,24 @@ class ExtractService:
                 else:
                     logger.error(f"清理解压目录失败: {output_path}, {e}")
     
+    def _get_7z_thread_args(self) -> List[str]:
+        """根据配置获取7z线程限制参数
+
+        7z 默认会使用所有 CPU 核心进行解压，即使只有一个任务也会占满 CPU。
+        通过 -mmt 参数限制 7z 的线程数，避免单个进程占满所有核心导致系统卡死。
+
+        max_workers=1 时：分配 cpu_count // 2 的线程（至少2个，保证基本速度）
+        max_workers=2 时：分配 cpu_count // 2 的线程
+        max_workers=4 时：分配 cpu_count // 4 的线程
+        """
+        max_workers = self.config.processing.max_workers
+        if max_workers and max_workers > 0:
+            cpu_count = os.cpu_count() or 4
+            # 根据并发数分配线程，至少 2 线程保证基本解压速度
+            threads = max(2, cpu_count // max_workers)
+            return [f'-mmt{threads}']
+        return []
+
     async def _run_7z_command(self, cmd: List[str]) -> subprocess.CompletedProcess:
         """运行7z命令"""
         # 记录命令（显示密码用于调试）

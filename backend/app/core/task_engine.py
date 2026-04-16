@@ -1597,5 +1597,7 @@ def get_task_engine() -> TaskEngine:
     """获取任务引擎实例"""
     global _task_engine
     if _task_engine is None:
-        _task_engine = TaskEngine()
+        from ..config.settings import get_config
+        config = get_config()
+        _task_engine = TaskEngine(max_concurrent=config.processing.max_workers)
     return _task_engine

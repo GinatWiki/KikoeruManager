@@ -1,6 +1,6 @@
 # KikoeruTool 技术文档
 
-> **版本**: v1.6.4
+> **版本**: v1.7.0
 > **更新日期**: 2026-03
 > **用途**: DLsite 音声作品自动整理工具完整技术参考
 
@@ -1111,6 +1111,10 @@ const useStore = defineStore('main', {
 ---
 
 ## 更新日志
+
+### v1.7.0 (2026-04)
+- 修复"最大并发数"配置未生效的问题（TaskEngine 未读取 processing.max_workers）
+- 7z 解压时根据并发数限制线程数（-mmt），避免单进程占满 CPU 导致系统卡死
 
 ### v1.6.9 (2026-03)
 - Docker 安装官方 7-Zip 支持 RAR5 格式
