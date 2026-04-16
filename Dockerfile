@@ -27,7 +27,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装官方 7-Zip（支持 RAR5）
-RUN wget -q https://www.7-zip.org/a/7z2408-linux-x64.tar.xz -O /tmp/7z.tar.xz \
+RUN wget -q https://github.com/ip7z/7zip/releases/download/26.00/7z2600-linux-x64.tar.xz -O /tmp/7z.tar.xz \
     && tar -xf /tmp/7z.tar.xz -C /usr/local/bin \
     && chmod +x /usr/local/bin/7zz \
     && ln -sf /usr/local/bin/7zz /usr/local/bin/7z \
