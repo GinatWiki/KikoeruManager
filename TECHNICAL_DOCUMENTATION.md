@@ -1,6 +1,6 @@
 # KikoeruTool 技术文档
 
-> **版本**: v1.7.2
+> **版本**: v1.7.3
 > **更新日期**: 2026-04
 > **用途**: DLsite 音声作品自动整理工具完整技术参考
 
@@ -1112,8 +1112,12 @@ const useStore = defineStore('main', {
 
 ## 更新日志
 
+### v1.7.3 (2026-04)
+- 版本更新发布
+
 ### v1.7.2 (2026-04)
 - 修复已存在文件夹处理任务失败：'ASMRSyncConfig' object has no attribute 'asmr_subtitle_path'
+- 问题作品页 Kikoeru 重复项添加跳转链接
 
 ### v1.7.1 (2026-04)
 - 添加 asmr.one API 作为备用元数据源（DLsite 获取失败时自动尝试）
