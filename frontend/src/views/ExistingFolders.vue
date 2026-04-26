@@ -42,6 +42,11 @@
         <el-checkbox v-model="autoClassify" style="margin-left: 20px;">
           自动分类移动到库
         </el-checkbox>
+        <el-tooltip content="点击行切换选中，Shift+点击选择范围" placement="top">
+          <el-tag type="info" size="small" style="margin-left: 10px; cursor: help;">
+            Shift+点击范围选择
+          </el-tag>
+        </el-tooltip>
         <el-checkbox v-model="checkDuplicates" style="margin-left: 20px;">
           扫描时检查重复
         </el-checkbox>
@@ -109,12 +114,16 @@
       />
       
       <el-table
+        ref="tableRef"
         v-if="folders.length > 0"
         :data="filteredFolders"
         style="width: 100%"
         empty-text="暂无文件夹"
         row-key="path"
         @selection-change="handleSelectionChange"
+        @row-click="handleRowClick"
+        @cell-click="handleCellClick"
+        :row-class-name="getRowClassName"
       >
         <el-table-column type="selection" width="55" />
         
@@ -375,7 +384,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { Refresh, RefreshRight, Search, Folder, VideoPlay, Warning, Check, InfoFilled, Loading, Clock, Delete } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
@@ -392,6 +401,28 @@ const searchQuery = ref('')
 const autoClassify = ref(true)
 const checkDuplicates = ref(true)
 const conflictCount = ref(0)
+
+// Shift+点击范围选择
+const tableRef = ref(null)
+const lastClickedIndex = ref(-1)
+const shiftPressed = ref(false)
+
+// 监听 Shift 键状态
+function handleKeyDown(e) {
+  if (e.key === 'Shift') shiftPressed.value = true
+}
+function handleKeyUp(e) {
+  if (e.key === 'Shift') shiftPressed.value = false
+}
+onMounted(() => {
+  document.addEventListener('keydown', handleKeyDown)
+  document.addEventListener('keyup', handleKeyUp)
+  refreshWithCache() // 默认使用缓存刷新
+})
+onUnmounted(() => {
+  document.removeEventListener('keydown', handleKeyDown)
+  document.removeEventListener('keyup', handleKeyUp)
+})
 
 // 结果对话框
 const resultDialogVisible = ref(false)
@@ -420,10 +451,6 @@ const filteredFolders = computed(() => {
   }
   
   return result
-})
-
-onMounted(() => {
-  refreshWithCache() // 默认使用缓存刷新
 })
 
 async function refreshFolders() {
@@ -605,6 +632,52 @@ async function refreshFoldersWithOptions(forceRefresh = false) {
 
 function handleSelectionChange(selection) {
   selectedFolders.value = selection
+}
+
+// Shift+点击范围选择
+function handleRowClick(row, column, event) {
+  // 如果点击的是复选框列本身，由 Element Plus 处理，不干预
+  if (column && column.type === 'selection') return
+
+  const currentIndex = filteredFolders.value.findIndex(f => f.path === row.path)
+  if (currentIndex === -1) return
+
+  if (shiftPressed.value && lastClickedIndex.value >= 0) {
+    // Shift+点击：选择范围
+    const start = Math.min(lastClickedIndex.value, currentIndex)
+    const end = Math.max(lastClickedIndex.value, currentIndex)
+    const rowsToSelect = filteredFolders.value.slice(start, end + 1)
+
+    // 先清空当前选择，再选中范围
+    tableRef.value.clearSelection()
+    rowsToSelect.forEach(r => {
+      tableRef.value.toggleRowSelection(r, true)
+    })
+  } else {
+    // 普通点击：切换当前行选中状态
+    tableRef.value.toggleRowSelection(row)
+  }
+
+  lastClickedIndex.value = currentIndex
+}
+
+// 阻止复选框列的 cell-click 事件冒泡（避免重复触发）
+function handleCellClick(row, column, cell, event) {
+  if (column.type === 'selection') {
+    // 复选框列点击时，更新 lastClickedIndex
+    const currentIndex = filteredFolders.value.findIndex(f => f.path === row.path)
+    if (currentIndex !== -1) {
+      lastClickedIndex.value = currentIndex
+    }
+  }
+}
+
+// 高亮选中行
+function getRowClassName({ row }) {
+  if (selectedFolders.value.some(f => f.path === row.path)) {
+    return 'selected-row'
+  }
+  return ''
 }
 
 async function handleProcess() {
@@ -1054,5 +1127,18 @@ async function handleProcessSingle(row) {
   padding: 12px;
   background-color: #f5f7fa;
   border-radius: 4px;
+}
+
+/* 选中行高亮 */
+:deep(.el-table .selected-row) {
+  background-color: #ecf5ff !important;
+}
+:deep(.el-table .selected-row:hover > td) {
+  background-color: #d9ecff !important;
+}
+
+/* 表格行可点击 */
+:deep(.el-table .el-table__row) {
+  cursor: pointer;
 }
 </style>

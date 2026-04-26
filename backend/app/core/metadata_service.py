@@ -63,23 +63,29 @@ class MetadataService:
         rjcode = self._extract_rjcode(path)
         if not rjcode:
             raise Exception(f"无法从路径中提取RJ号: {path}")
-        
+
         task.update_progress(65, f"获取元数据: {rjcode}")
-        
+
         # 检查缓存
         if self.config.metadata.cache_enabled:
             cached = self._get_cached_metadata(rjcode)
             if cached:
                 logger.info(f"使用缓存的元数据: {rjcode}")
                 return cached.to_dict()
-        
-        # 从DLsite获取
-        metadata = await self._fetch_from_dlsite(rjcode)
-        
+
+        # 从DLsite获取，失败时尝试 asmr.one 作为备用
+        try:
+            metadata = await self._fetch_from_dlsite(rjcode)
+        except Exception as e:
+            logger.warning(f"[{rjcode}] DLsite 获取元数据失败: {e}，尝试 asmr.one 备用源")
+            metadata = await self._fetch_from_asmr_one(rjcode)
+            if metadata is None:
+                raise Exception(f"从 DLsite 和 asmr.one 均未找到作品: {rjcode}")
+
         # 缓存到数据库
         if self.config.metadata.cache_enabled:
             self._cache_metadata(metadata)
-        
+
         return metadata.to_dict()
     
     def _extract_rjcode(self, path: str) -> Optional[str]:
@@ -306,6 +312,83 @@ class MetadataService:
             logger.error(f"请求DLsite失败: {e}")
             raise Exception(f"获取元数据失败: {e}")
     
+    async def _fetch_from_asmr_one(self, rjcode: str) -> Optional[WorkMetadata]:
+        """从 asmr.one API 获取元数据（DLsite 的备用源）"""
+        # 提取纯数字部分
+        rjcode_num = rjcode[2:] if rjcode.upper().startswith('RJ') else rjcode
+
+        api_bases = ["https://api.asmr-200.com/api", "https://api.asmr-100.com/api"]
+
+        for api_base in api_bases:
+            url = f"{api_base}/workInfo/{rjcode_num}"
+            try:
+                logger.info(f"[{rjcode}] 尝试 asmr.one 备用源: {url}")
+                response = self.session.get(url, timeout=(10, 30))
+                if response.status_code == 200:
+                    data = response.json()
+                    title = data.get('title', '')
+                    if not title:
+                        logger.warning(f"[{rjcode}] asmr.one 返回数据无标题，跳过")
+                        continue
+
+                    metadata = WorkMetadata()
+                    metadata.rjcode = rjcode
+                    metadata.work_name = title
+
+                    # 社团名
+                    circle = data.get('circle', {})
+                    if isinstance(circle, dict):
+                        metadata.maker_name = circle.get('name', '')
+                    else:
+                        metadata.maker_name = data.get('name', '')
+
+                    # 发布日期
+                    metadata.release_date = data.get('release', '')[:10] if data.get('release') else ''
+
+                    # 声优
+                    for va in data.get('vas', []):
+                        if isinstance(va, dict):
+                            metadata.cvs.append(va.get('name', ''))
+
+                    # 标签（优先使用中文名）
+                    for tag in data.get('tags', []):
+                        if isinstance(tag, dict):
+                            i18n = tag.get('i18n', {})
+                            zh_cn = i18n.get('zh-cn', {})
+                            tag_name = zh_cn.get('name') if isinstance(zh_cn, dict) else None
+                            metadata.tags.append(tag_name or tag.get('name', ''))
+                        elif isinstance(tag, str):
+                            metadata.tags.append(tag)
+
+                    # 年龄分级
+                    age_cat = data.get('age_category_string', '')
+                    if age_cat == 'adult':
+                        metadata.age_category = 'ADL'
+                    elif age_cat == 'r15':
+                        metadata.age_category = 'R15'
+                    else:
+                        metadata.age_category = 'GEN'
+
+                    # 封面
+                    metadata.cover_url = data.get('mainCoverUrl', '')
+
+                    logger.info(f"[{rjcode}] asmr.one 元数据获取成功: {metadata.work_name}")
+                    return metadata
+
+                elif response.status_code == 404:
+                    logger.info(f"[{rjcode}] asmr.one 未找到作品，尝试下一个服务器")
+                    continue
+                else:
+                    logger.warning(f"[{rjcode}] asmr.one 返回 HTTP {response.status_code}，尝试下一个服务器")
+                    continue
+
+            except Exception as e:
+                logger.warning(f"[{rjcode}] asmr.one 请求失败 ({api_base}): {e}，尝试下一个服务器")
+                continue
+
+        logger.warning(f"[{rjcode}] 所有 asmr.one 服务器均未找到作品")
+        return None
+
     async def _fetch_translated_title(self, rjcode: str, lang: str, validate_chinese: bool = True) -> Optional[str]:
         """获取指定语言的翻译标题
         

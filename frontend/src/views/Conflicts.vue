@@ -17,6 +17,9 @@
           <el-button size="small" type="info" @click="handleBatchAction('SKIP')">
             批量跳过
           </el-button>
+          <el-button size="small" type="danger" @click="handleBatchAction('DELETE')">
+            批量删除
+          </el-button>
         </el-button-group>
       </div>
     </div>
@@ -143,7 +146,7 @@
               >
                 合并
               </el-button>
-              <el-button size="small" type="info" @click="handleAction(row, 'SKIP')" :loading="processingIds.has(row.id)">
+              <el-button size="small" type="info" @click="handleAction(row, 'DELETE')" :loading="processingIds.has(row.id)">
                 删除
               </el-button>
             </el-button-group>
@@ -242,7 +245,8 @@ async function handleAction(conflict, action) {
     'KEEP_NEW': '保留新版',
     'KEEP_OLD': isKikoeru ? '跳过（保留Kikoeru版本）' : '保留旧版',
     'MERGE': '合并',
-    'SKIP': '删除'
+    'SKIP': '跳过',
+    'DELETE': '删除'
   }
 
   const actionDescriptions = {
@@ -253,7 +257,8 @@ async function handleAction(conflict, action) {
       ? '将跳过此作品，保持 Kikoeru 服务器中的版本'
       : '将删除新版本，保留旧版本',
     'MERGE': '将保留两个版本，新版本会添加编号后缀',
-    'SKIP': '将删除新版本文件'
+    'SKIP': '将跳过此作品，不进行任何处理',
+    'DELETE': '将删除新版本文件'
   }
 
   try {
@@ -295,7 +300,8 @@ async function handleBatchAction(action) {
   const actionLabels = {
     'KEEP_NEW': '保留新版',
     'KEEP_OLD': '保留旧版',
-    'SKIP': '跳过'
+    'SKIP': '跳过',
+    'DELETE': '删除'
   }
   
   if (selectedConflicts.value.length === 0) {

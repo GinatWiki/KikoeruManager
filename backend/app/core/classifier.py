@@ -33,6 +33,12 @@ class SmartClassifier:
             self._kikoeru_service = KikoeruDuplicateService()
         return self._kikoeru_service
 
+    async def close(self):
+        """关闭 Kikoeru 查重服务的 HTTP Session"""
+        if self._kikoeru_service is not None:
+            await self._kikoeru_service.close()
+            self._kikoeru_service = None
+
     async def check_duplicate_before_extract(self, rjcode: str, task: Task, engine=None) -> bool:
         """
         在解压前检查是否重复（包括检查是否有其他任务正在处理）
@@ -81,6 +87,7 @@ class SmartClassifier:
         kikoeru_config = getattr(self.config, 'kikoeru_server', None)
         if kikoeru_config and kikoeru_config.enabled:
             logger.info(f"预检: 检查 Kikoeru 服务器是否已存在 {rjcode}")
+            kikoeru_service = None
             try:
                 kikoeru_service = self._get_kikoeru_service()
                 kikoeru_result = await kikoeru_service.check_duplicate(rjcode)
@@ -114,6 +121,11 @@ class SmartClassifier:
                     logger.info(f"Kikoeru 服务器未找到: {rjcode}")
             except Exception as e:
                 logger.warning(f"Kikoeru 服务器查重失败，跳过远程查重: {e}")
+            finally:
+                # 关闭 aiohttp session 防止资源泄漏
+                if kikoeru_service and kikoeru_service._session and not kikoeru_service._session.closed:
+                    await kikoeru_service.close()
+                    self._kikoeru_service = None
 
         # 4. 标记RJ号正在处理（防止其他任务同时处理）
         if engine:

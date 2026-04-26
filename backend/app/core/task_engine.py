@@ -437,9 +437,14 @@ class TaskEngine:
                 logger.debug(f"[{rjcode}] 步骤1: 获取元数据")
                 if config.process_existing.fetch_metadata:
                     task.update_progress(30, "获取元数据")
-                    metadata = await metadata_service.fetch(extracted_path, task)
-                    logger.debug(f"[{rjcode}] 元数据: {metadata.get('work_name', '未知')}")
-                    task.task_metadata = metadata
+                    try:
+                        metadata = await metadata_service.fetch(extracted_path, task)
+                        logger.debug(f"[{rjcode}] 元数据: {metadata.get('work_name', '未知')}")
+                        task.task_metadata = metadata
+                    except Exception as e:
+                        logger.warning(f"[{rjcode}] 获取元数据失败，使用基本元数据继续处理: {e}")
+                        metadata = {'rjcode': rjcode, 'work_name': os.path.basename(extracted_path)}
+                        task.task_metadata = metadata
                 else:
                     logger.info(f"[{rjcode}] 步骤[获取元数据]已禁用，跳过")
                     metadata = {'rjcode': rjcode}
@@ -606,6 +611,12 @@ class TaskEngine:
             # 清除RJ号处理标记
             if task.rjcode:
                 self.unmark_rjcode_processing(task.rjcode)
+            # 关闭 classifier 的 Kikoeru aiohttp session（防止资源泄漏）
+            if 'classifier' in locals():
+                try:
+                    await classifier.close()
+                except Exception:
+                    pass
             await self._notify_progress(task)
     
     async def _worker(self):

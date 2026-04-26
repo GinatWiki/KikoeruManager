@@ -442,10 +442,11 @@ class ExtractService:
                 self.seven_zip, 'x',
                 '-y',  # 自动确认
                 '-o' + output_path,  # 输出目录
+                '-mcp=65001',  # 强制 UTF-8 编码，支持中文密码
             ]
             cmd.extend(self._get_7z_thread_args())
             cmd.append(archive_info.path)
-            
+
             if password:
                 cmd.append(f'-p{password}')
             else:
@@ -1230,7 +1231,7 @@ class ExtractService:
     
     async def _list_archive_contents(self, archive_path: str, password: str = "") -> Optional[List[Dict]]:
         """列出压缩包内容，自动检测最佳编码"""
-        cmd = [self.seven_zip, 'l', '-ba', archive_path]
+        cmd = [self.seven_zip, 'l', '-ba', '-mcp=65001', archive_path]
         if password:
             # Windows下使用 -p密码 格式（无空格），与7z官方用法一致
             cmd.append(f'-p{password}')
@@ -1375,10 +1376,11 @@ class ExtractService:
                 self.seven_zip, 'x',
                 '-y',  # 自动确认
                 '-o' + output_path,  # 输出目录
+                '-mcp=65001',  # 强制 UTF-8 编码，支持中文密码
             ]
             cmd.extend(self._get_7z_thread_args())
             cmd.append(archive_info.path)
-            
+
             if password:
                 # Windows下使用 -p密码 格式（无空格）
                 cmd.append(f'-p{password}')

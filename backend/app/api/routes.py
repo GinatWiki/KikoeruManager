@@ -1173,12 +1173,7 @@ async def resolve_conflict(conflict_id: str, action: dict):
             conflict.status = "MERGE"
             
         elif action_type == "SKIP":
-            # 跳过，删除新版本
-            if os.path.exists(conflict.new_path):
-                if os.path.isfile(conflict.new_path):
-                    os.remove(conflict.new_path)
-                else:
-                    shutil.rmtree(conflict.new_path)
+            # 跳过，不处理，保留原样
             # 更新 ProcessedArchive 状态为 completed（用户选择跳过，任务结束）
             if is_archive:
                 filename = os.path.basename(conflict.new_path)
@@ -1190,8 +1185,29 @@ async def resolve_conflict(conflict_id: str, action: dict):
                     archive_record.processed_at = datetime.utcnow()
                     db.commit()
                     logger.info(f"冲突解决后更新 ProcessedArchive 状态为 completed (SKIP): {filename}")
-            
+
             conflict.status = "SKIP"
+
+        elif action_type == "DELETE":
+            # 删除，删除新版本文件
+            if os.path.exists(conflict.new_path):
+                if os.path.isfile(conflict.new_path):
+                    os.remove(conflict.new_path)
+                else:
+                    shutil.rmtree(conflict.new_path)
+            # 更新 ProcessedArchive 状态为 completed（用户选择删除，任务结束）
+            if is_archive:
+                filename = os.path.basename(conflict.new_path)
+                archive_record = db.query(ProcessedArchive).filter(
+                    ProcessedArchive.filename == filename
+                ).first()
+                if archive_record:
+                    archive_record.status = 'completed'
+                    archive_record.processed_at = datetime.utcnow()
+                    db.commit()
+                    logger.info(f"冲突解决后更新 ProcessedArchive 状态为 completed (DELETE): {filename}")
+
+            conflict.status = "DELETE"
         
         # 更新关联任务的状态
         if conflict.task_id:
