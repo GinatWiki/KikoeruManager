@@ -496,8 +496,8 @@ class TaskEngine:
 
                 # 步骤4.5: 从 Subtitles 目录导入 LRC 字幕（如果存在且启用）
                 subtitle_folder = None
-                if config.process_existing.import_lrc and hasattr(config, 'asmr_sync') and config.asmr_sync.asmr_subtitle_path:
-                    subtitle_base = config.asmr_sync.asmr_subtitle_path
+                if config.process_existing.import_lrc and config.storage.asmr_subtitle_path:
+                    subtitle_base = config.storage.asmr_subtitle_path
                     if os.path.exists(subtitle_base) and rjcode:
                         # 查找匹配 RJ 号的字幕文件夹
                         from .subtitle_sync_service import get_subtitle_sync_service
