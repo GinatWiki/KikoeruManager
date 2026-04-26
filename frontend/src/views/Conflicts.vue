@@ -106,7 +106,15 @@
           <template #default="{ row }">
             <template v-if="row.conflict_type === 'KIKOERU_DUPLICATE'">
               <el-tag type="info" size="small">Kikoeru 服务器</el-tag>
-              <span v-if="row.linked_works_info?.title" style="margin-left: 8px; color: #606266;">
+              <a
+                v-if="kikoeruUrl && row.rjcode"
+                :href="`${kikoeruUrl}/work/${row.rjcode}`"
+                target="_blank"
+                class="kikoeru-link"
+              >
+                {{ row.linked_works_info?.title || row.rjcode }}
+              </a>
+              <span v-else-if="row.linked_works_info?.title" style="margin-left: 8px; color: #606266;">
                 {{ row.linked_works_info.title }}
               </span>
             </template>
@@ -170,6 +178,7 @@ const loadingText = ref('加载中...')
 const selectedConflicts = ref([])
 const conflictsTable = ref(null)
 const processingIds = ref(new Set())
+const kikoeruUrl = ref('')
 let intervalId = null
 
 onMounted(async () => {
@@ -187,6 +196,9 @@ async function fetchConflicts() {
   try {
     const data = await conflictApi.list()
     conflicts.value = data.conflicts || []
+    if (data.kikoeru_url) {
+      kikoeruUrl.value = data.kikoeru_url
+    }
   } catch (error) {
     console.error('获取问题作品失败:', error)
   }
@@ -538,5 +550,15 @@ async function handleBatchAction(action) {
 
 :deep(.el-table__fixed-right-patch) {
   background-color: #f5f7fa;
+}
+
+.kikoeru-link {
+  margin-left: 8px;
+  color: #409eff;
+  text-decoration: none;
+}
+.kikoeru-link:hover {
+  text-decoration: underline;
+  color: #66b1ff;
 }
 </style>

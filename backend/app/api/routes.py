@@ -862,6 +862,9 @@ async def get_conflicts():
     db = next(get_db())
     try:
         conflicts = db.query(ConflictWork).filter(ConflictWork.status == 'PENDING').all()
+        # 获取 Kikoeru 服务器 URL
+        config = get_config()
+        kikoeru_url = config.kikoeru_server.server_url if config.kikoeru_server and config.kikoeru_server.enabled else ""
         return {
             "conflicts": [
                 {
@@ -871,11 +874,13 @@ async def get_conflicts():
                     "existing_path": c.existing_path,
                     "new_path": c.new_path,
                     "new_metadata": c.new_metadata,
+                    "linked_works_info": c.linked_works_info,
                     "status": c.status,
                     "created_at": c.created_at.isoformat() if c.created_at else None
                 }
                 for c in conflicts
-            ]
+            ],
+            "kikoeru_url": kikoeru_url
         }
     finally:
         db.close()
