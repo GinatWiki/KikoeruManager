@@ -436,38 +436,44 @@ class ExtractService:
                 password_list.append((pwd, "通用密码"))
         
         logger.info(f"开始尝试解压嵌套压缩包，共 {len(password_list)} 个密码")
-        
-        for password, source in password_list:
-            cmd = [
-                self.seven_zip, 'x',
-                '-y',  # 自动确认
-                '-o' + output_path,  # 输出目录
-                '-mcp=65001',  # 强制 UTF-8 编码，支持中文密码
-            ]
-            cmd.extend(self._get_7z_thread_args())
-            cmd.append(archive_info.path)
 
-            if password:
-                cmd.append(f'-p{password}')
-            else:
-                cmd.append('-p')  # 空密码
-            
-            try:
-                logger.info(f"尝试解压嵌套压缩包使用: {source} ({password or '无密码'})")
-                result = await self._run_7z_command(cmd)
-                
-                if result.returncode == 0:
-                    logger.info(f"嵌套压缩包解压成功，使用: {source} ({password or '无密码'})")
-                    # 更新archive_info中的密码，用于传递给下一层
-                    archive_info.password = password
-                    return True, password
+        # 先不带 -mcp=65001 尝试，若全部失败再使用 -mcp=65001 重试
+        for use_mcp in [False, True]:
+            if use_mcp:
+                logger.info(f"不带 -mcp 解压失败，使用 -mcp=65001 重试嵌套压缩包")
+
+            for password, source in password_list:
+                cmd = [
+                    self.seven_zip, 'x',
+                    '-y',  # 自动确认
+                    '-o' + output_path,  # 输出目录
+                ]
+                if use_mcp:
+                    cmd.append('-mcp=65001')  # 强制 UTF-8 编码，支持中文密码
+                cmd.extend(self._get_7z_thread_args())
+                cmd.append(archive_info.path)
+
+                if password:
+                    cmd.append(f'-p{password}')
                 else:
-                    logger.warning(f"密码 {source} ({password or '无密码'}) 解压失败")
-                
-            except Exception as e:
-                logger.warning(f"嵌套压缩包解压尝试失败: {e}")
-                continue
-        
+                    cmd.append('-p')  # 空密码
+
+                try:
+                    logger.info(f"尝试解压嵌套压缩包使用: {source} ({password or '无密码'})")
+                    result = await self._run_7z_command(cmd)
+
+                    if result.returncode == 0:
+                        logger.info(f"嵌套压缩包解压成功，使用: {source} ({password or '无密码'})")
+                        # 更新archive_info中的密码，用于传递给下一层
+                        archive_info.password = password
+                        return True, password
+                    else:
+                        logger.warning(f"密码 {source} ({password or '无密码'}) 解压失败")
+
+                except Exception as e:
+                    logger.warning(f"嵌套压缩包解压尝试失败: {e}")
+                    continue
+
         logger.error(f"嵌套压缩包解压失败，已尝试所有 {len(password_list)} 个密码")
         return False, None
     
@@ -633,10 +639,14 @@ class ExtractService:
         if rj_match:
             return rj_match.group(0).upper()
         
-        # 匹配纯数字，8位优先于6位
-        num_match = re.search(r'(\d{8}|\d{6})(?!\d)', filename)
+        # 匹配纯数字，8位优先于7位、6位
+        num_match = re.search(r'(\d{8}|\d{7}|\d{6})(?!\d)', filename)
         if num_match:
-            return f"RJ{num_match.group(1)}"
+            digits = num_match.group(1)
+            # 7位数字补充前导零到8位（6位保持不变）
+            if len(digits) == 7:
+                digits = digits.zfill(8)
+            return f"RJ{digits}"
         
         return filename
     
@@ -1230,10 +1240,26 @@ class ExtractService:
         return None
     
     async def _list_archive_contents(self, archive_path: str, password: str = "") -> Optional[List[Dict]]:
-        """列出压缩包内容，自动检测最佳编码"""
-        cmd = [self.seven_zip, 'l', '-ba', '-mcp=65001', archive_path]
+        """列出压缩包内容，自动检测最佳编码
+
+        优先不使用 -mcp=65001，若失败则使用 -mcp=65001 重试
+        """
+        # 先尝试不带 -mcp=65001
+        result = await self._try_list_archive(archive_path, password, use_mcp=False)
+        if result is not None:
+            return result
+
+        # 失败后使用 -mcp=65001 重试
+        logger.info(f"[7z] 不带 -mcp 列出失败，使用 -mcp=65001 重试: {archive_path}")
+        return await self._try_list_archive(archive_path, password, use_mcp=True)
+
+    async def _try_list_archive(self, archive_path: str, password: str, use_mcp: bool) -> Optional[List[Dict]]:
+        """尝试列出压缩包内容"""
+        cmd = [self.seven_zip, 'l', '-ba']
+        if use_mcp:
+            cmd.append('-mcp=65001')
+        cmd.append(archive_path)
         if password:
-            # Windows下使用 -p密码 格式（无空格），与7z官方用法一致
             cmd.append(f'-p{password}')
         else:
             cmd.append('-p')  # 空密码
@@ -1370,51 +1396,57 @@ class ExtractService:
             if pwd not in seen:
                 seen.add(pwd)
                 unique_passwords.append(pwd)
-        
-        for password in unique_passwords:
-            cmd = [
-                self.seven_zip, 'x',
-                '-y',  # 自动确认
-                '-o' + output_path,  # 输出目录
-                '-mcp=65001',  # 强制 UTF-8 编码，支持中文密码
-            ]
-            cmd.extend(self._get_7z_thread_args())
-            cmd.append(archive_info.path)
 
-            if password:
-                # Windows下使用 -p密码 格式（无空格）
-                cmd.append(f'-p{password}')
-            else:
-                cmd.append('-p')  # 空密码
-            
-            try:
-                # 判断密码来源
-                if password in rj_passwords:
-                    password_source = "RJ号"
-                elif password in vault_passwords:
-                    password_source = "密码库"
-                elif password == archive_info.password:
-                    password_source = "已知"
-                elif password == "":
-                    password_source = "无"
+        # 先不带 -mcp=65001 尝试，若全部失败再使用 -mcp=65001 重试
+        for use_mcp in [False, True]:
+            if use_mcp:
+                logger.info("不带 -mcp 解压失败，使用 -mcp=65001 重试")
+
+            for password in unique_passwords:
+                cmd = [
+                    self.seven_zip, 'x',
+                    '-y',  # 自动确认
+                    '-o' + output_path,  # 输出目录
+                ]
+                if use_mcp:
+                    cmd.append('-mcp=65001')  # 强制 UTF-8 编码，支持中文密码
+                cmd.extend(self._get_7z_thread_args())
+                cmd.append(archive_info.path)
+
+                if password:
+                    # Windows下使用 -p密码 格式（无空格）
+                    cmd.append(f'-p{password}')
                 else:
-                    password_source = "默认"
-                task.update_progress(40, f"尝试解压 (密码来源: {password_source})")
-                result = await self._run_7z_command(cmd)
-                
-                if result.returncode == 0:
-                    # 记录成功使用的密码
-                    if password and password in vault_passwords:
-                        await self._record_password_usage(password, archive_info.path)
-                    # 更新 archive_info 中的密码，用于传递给嵌套压缩包
-                    archive_info.password = password
-                    logger.info(f"解压成功，使用{password_source}密码: {password or '无密码'}")
-                    return True, password
-                
-            except Exception as e:
-                logger.warning(f"解压尝试失败: {e}")
-                continue
-        
+                    cmd.append('-p')  # 空密码
+
+                try:
+                    # 判断密码来源
+                    if password in rj_passwords:
+                        password_source = "RJ号"
+                    elif password in vault_passwords:
+                        password_source = "密码库"
+                    elif password == archive_info.password:
+                        password_source = "已知"
+                    elif password == "":
+                        password_source = "无"
+                    else:
+                        password_source = "默认"
+                    task.update_progress(40, f"尝试解压 (密码来源: {password_source})")
+                    result = await self._run_7z_command(cmd)
+
+                    if result.returncode == 0:
+                        # 记录成功使用的密码
+                        if password and password in vault_passwords:
+                            await self._record_password_usage(password, archive_info.path)
+                        # 更新 archive_info 中的密码，用于传递给嵌套压缩包
+                        archive_info.password = password
+                        logger.info(f"解压成功，使用{password_source}密码: {password or '无密码'}")
+                        return True, password
+
+                except Exception as e:
+                    logger.warning(f"解压尝试失败: {e}")
+                    continue
+
         return False, None
     
     async def _verify_extraction(self, archive_info: ArchiveInfo, output_path: str) -> bool:
