@@ -312,7 +312,12 @@ class FileProcessor:
 
         # 对于没有后缀名或后缀名不在列表中的文件，尝试通过魔数检测
         if not ext or ext not in archive_extensions:
-            return self._detect_archive_by_magic(file_path)
+            if self._detect_archive_by_magic(file_path):
+                return True
+            # 检测是否包含嵌入的压缩包（polyglot 文件，如 MP4 内嵌 RAR/ZIP/7z）
+            return self._detect_embedded_archive(file_path) is not None
+
+        return False
 
     def detect_volume_set(self, file_path: str) -> Optional[VolumeSet]:
         """检测分卷组
@@ -615,6 +620,52 @@ class FileProcessor:
         except Exception as e:
             logger.warning(f"[FileProcessor] 魔数检测失败: {path}, 错误: {e}")
             return False
+
+    def _detect_embedded_archive(self, path: str) -> Optional[str]:
+        """检测文件中是否嵌入了压缩包（扫描非零偏移的魔数）
+
+        用于检测 polyglot 文件（如 MP4 文件内嵌 RAR/ZIP/7z 压缩包）。
+        这类文件的文件头是媒体格式（如 ftyp），但压缩包的魔数在文件的后面部分。
+
+        Args:
+            path: 文件路径
+
+        Returns:
+            检测到的压缩包类型（'zip', 'rar', '7z'），未检测到返回 None
+        """
+        magic_bytes = [
+            (b'PK\x03\x04', 'zip'),
+            (b'PK\x05\x06', 'zip'),  # 空zip
+            (b'PK\x07\x08', 'zip'),  # zip64
+            (b'Rar!', 'rar'),
+            (b'7z\xBC\xAF\x27\x1C', '7z'),
+        ]
+
+        try:
+            if not os.path.exists(path) or not os.path.isfile(path):
+                return None
+
+            file_size = os.path.getsize(path)
+            if file_size < 8192:  # 太小的文件不可能包含嵌入的压缩包
+                return None
+
+            with open(path, 'rb') as f:
+                # 跳过前 4KB（文件头部通常是格式标识，不是压缩数据）
+                f.seek(4096)
+                # 扫描最多 10MB
+                scan_size = min(10 * 1024 * 1024, file_size - 4096)
+                data = f.read(scan_size)
+
+                for magic, file_type in magic_bytes:
+                    if magic in data:
+                        logger.info(f"[FileProcessor] 检测到嵌入的压缩包: {path} (类型: {file_type})")
+                        return file_type
+        except (PermissionError, IOError) as e:
+            logger.debug(f"[FileProcessor] 嵌入压缩包检测文件访问失败: {path}, 错误: {e}")
+        except Exception as e:
+            logger.debug(f"[FileProcessor] 嵌入压缩包检测失败: {path}, 错误: {e}")
+
+        return None
 
 
 # 全局 FileProcessor 实例

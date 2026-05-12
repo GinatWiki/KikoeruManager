@@ -89,24 +89,25 @@ class ExtractService:
         # 首先检查 7z 是否可用
         if not self._check_7z_available():
             raise Exception("找不到 7z 可执行文件。请安装 7-Zip 并确保它在 PATH 中，或在配置中指定正确路径。")
-        
+
         archive_path = task.source_path
-        
+        polyglot_temp_path = None  # 用于跟踪 polyglot 文件的临时文件
+
         # 检查是否被取消
         if task.is_cancelled():
             logger.info(f"任务 {task.id} 已被取消，跳过解压")
             return None
-        
+
         # 1. 等待文件稳定
         task.update_progress(5, "等待文件写入完成")
         await self._wait_file_stable(archive_path, task)
-        
+
         # 检查暂停和取消
         await task.wait_if_paused()
         if task.is_cancelled():
             logger.info(f"任务 {task.id} 在等待文件稳定后被取消")
             return None
-        
+
         # 2. 修复后缀名
         task.update_progress(10, "检测文件类型")
         archive_path = await self._repair_extension(archive_path)
@@ -115,7 +116,7 @@ class ExtractService:
         if archive_path != task.source_path:
             logger.info(f"[Extract] 文件路径已更新: {task.source_path} -> {archive_path}")
             task.source_path = archive_path
-        
+
         # 3. 检查是否是分卷
         volume_set = self._detect_volume_set(archive_path)
         if volume_set:
@@ -123,17 +124,28 @@ class ExtractService:
             if not await self._wait_for_complete_set(volume_set, task):
                 raise Exception("分卷组不完整或等待超时")
             archive_path = volume_set.volumes[0]  # 使用第一个分卷
-        
+
         # 检查暂停和取消
         await task.wait_if_paused()
         if task.is_cancelled():
             logger.info(f"任务 {task.id} 在等待分卷后被取消")
             return None
-        
+
+        # 3.5. 处理 polyglot 文件（如 MP4 内嵌压缩包）
+        # 如果压缩包不在文件开头，提取压缩包部分到临时文件
+        prepared_path = await self._prepare_polyglot_file(archive_path)
+        if prepared_path != archive_path:
+            logger.info(f"[Extract] Polyglot 文件已处理: {archive_path} -> {prepared_path}")
+            polyglot_temp_path = prepared_path
+            archive_path = prepared_path
+
         # 4. 获取压缩包内文件列表
         task.update_progress(20, "读取压缩包内容")
         archive_info = await self._get_archive_info(archive_path)
         if not archive_info:
+            # 清理 polyglot 临时文件
+            if polyglot_temp_path and os.path.exists(polyglot_temp_path):
+                os.remove(polyglot_temp_path)
             raise Exception("无法读取压缩包内容")
         
         # 5. 确定输出路径
@@ -154,11 +166,14 @@ class ExtractService:
             logger.error(f"任务 {task.id}: {error_msg}")
             # 清理已创建的解压目录（包括部分解压的残留文件）
             self._cleanup_extract_path(output_path)
+            # 清理 polyglot 临时文件
+            if polyglot_temp_path and os.path.exists(polyglot_temp_path):
+                os.remove(polyglot_temp_path)
             return None
-        
+
         # 记录成功使用的密码
         logger.info(f"外层压缩包解压成功，使用密码: {success_password or '无密码'}")
-        
+
         # 检查暂停和取消
         await task.wait_if_paused()
         if task.is_cancelled():
@@ -166,19 +181,25 @@ class ExtractService:
             import shutil
             if os.path.exists(output_path):
                 shutil.rmtree(output_path)
+            # 清理 polyglot 临时文件
+            if polyglot_temp_path and os.path.exists(polyglot_temp_path):
+                os.remove(polyglot_temp_path)
             return None
-        
+
         # 7. 验证解压完整性
         task.update_progress(90, "验证解压完整性")
         if not await self._verify_extraction(archive_info, output_path):
+            # 清理 polyglot 临时文件
+            if polyglot_temp_path and os.path.exists(polyglot_temp_path):
+                os.remove(polyglot_temp_path)
             raise Exception("解压验证失败，文件不完整")
-        
+
         # 8. 检查并解压嵌套压缩包
         if self.config.extract.extract_nested_archives:
             task.update_progress(95, "检查嵌套压缩包")
             nested_count = await self._extract_nested_archives(
-                output_path, 
-                task, 
+                output_path,
+                task,
                 max_depth=self.config.extract.max_nested_depth,
                 parent_password=success_password  # 传递成功使用的密码给嵌套压缩包
             )
@@ -186,7 +207,11 @@ class ExtractService:
                 logger.info(f"解压了 {nested_count} 个嵌套压缩包")
         else:
             logger.debug("嵌套压缩包解压已禁用")
-        
+
+        # 清理 polyglot 临时文件
+        if polyglot_temp_path and os.path.exists(polyglot_temp_path):
+            os.remove(polyglot_temp_path)
+
         return output_path
     
     async def _extract_nested_archives(self, directory: str, task: Task, max_depth: int = 5, current_depth: int = 0, processed_paths: Optional[set] = None, parent_password: Optional[str] = None) -> int:
@@ -241,12 +266,17 @@ class ExtractService:
                     # 检查后缀名或通过魔数检测
                     is_archive = False
                     ext = Path(filename).suffix.lower()
-                    
+
                     if ext in archive_extensions:
                         is_archive = True
                     else:
                         # 通过后缀名无法识别，尝试魔数检测
                         is_archive = await self._detect_by_magic_bytes(file_path) is not None
+                        # 如果魔数检测未识别，检查是否是可能包含嵌入压缩包的媒体文件
+                        if not is_archive:
+                            media_extensions = {'.mp4', '.mkv', '.avi', '.flv', '.wmv', '.mov', '.mp3', '.wav', '.flac', '.aac', '.wma', '.ogg', '.webm', '.m4v'}
+                            if ext in media_extensions:
+                                is_archive = await self._detect_embedded_archive_type(file_path) is not None
                     
                     if is_archive:
                         # 检查是否是分卷文件（跳过非首卷）
@@ -277,11 +307,21 @@ class ExtractService:
                             counter += 1
                         
                         os.makedirs(nested_output_dir, exist_ok=True)
-                        
+
                         # 尝试解压嵌套压缩包
+                        nested_polyglot_temp = None
                         try:
+                            # 处理 polyglot 文件（如 MP4 内嵌压缩包）
+                            prepared_path = await self._prepare_polyglot_file(file_path)
+                            if prepared_path != file_path:
+                                logger.info(f"[Nested] Polyglot 文件已处理: {file_path} -> {prepared_path}")
+                                nested_polyglot_temp = prepared_path
+                                extract_file_path = prepared_path
+                            else:
+                                extract_file_path = file_path
+
                             # 首先尝试使用父密码读取压缩包信息
-                            nested_archive_info = await self._get_nested_archive_info(file_path, parent_password)
+                            nested_archive_info = await self._get_nested_archive_info(extract_file_path, parent_password)
                             
                             if nested_archive_info:
                                 task.update_progress(
@@ -305,12 +345,12 @@ class ExtractService:
                                         for pwd in vault_passwords:
                                             if pwd != nested_archive_info.password and pwd != parent_password:
                                                 logger.info(f"尝试使用密码库密码解压嵌套压缩包: {filename}")
-                                                # 重新获取压缩包信息
-                                                new_info = await self._get_nested_archive_info(file_path, pwd)
+                                                # 重新获取压缩包信息（使用 prepare 后的路径）
+                                                new_info = await self._get_nested_archive_info(extract_file_path, pwd)
                                                 if new_info:
                                                     success, nested_success_password = await self._try_extract_nested(
-                                                        new_info, 
-                                                        nested_output_dir, 
+                                                        new_info,
+                                                        nested_output_dir,
                                                         task,
                                                         pwd
                                                     )
@@ -367,6 +407,13 @@ class ExtractService:
                             if os.path.exists(nested_output_dir):
                                 import shutil
                                 shutil.rmtree(nested_output_dir)
+                        finally:
+                            # 清理 polyglot 临时文件
+                            if nested_polyglot_temp and os.path.exists(nested_polyglot_temp):
+                                try:
+                                    os.remove(nested_polyglot_temp)
+                                except Exception:
+                                    pass
         
         except Exception as e:
             logger.error(f"扫描嵌套压缩包时出错: {e}")
@@ -892,13 +939,23 @@ class ExtractService:
     
     async def _detect_real_type(self, file_path: str) -> Optional[str]:
         """检测文件真实类型"""
+        # 常见压缩格式类型
+        archive_types = {'zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'}
+
         # 方法1: 使用 filetype 库（添加重试机制）
         max_retries = 3
         for retry in range(max_retries):
             try:
                 kind = filetype.guess(file_path)
                 if kind:
-                    return kind.extension
+                    file_type = kind.extension
+                    # 如果 filetype 检测到的不是压缩格式，额外检查是否包含嵌入的压缩包
+                    # 这处理 polyglot 文件（如 MP4 文件内嵌 RAR/ZIP/7z 压缩包）
+                    if file_type not in archive_types:
+                        embedded_type = await self._detect_embedded_archive_type(file_path)
+                        if embedded_type:
+                            return embedded_type
+                    return file_type
                 break
             except PermissionError:
                 if retry < max_retries - 1:
@@ -924,7 +981,12 @@ class ExtractService:
         
         # 方法3: 魔数检测
         magic_result = await self._detect_by_magic_bytes(file_path)
-        return magic_result
+        if magic_result:
+            return magic_result
+
+        # 方法4: 嵌入压缩包检测（polyglot 文件，如 MP4 内嵌 RAR/ZIP/7z）
+        embedded_type = await self._detect_embedded_archive_type(file_path)
+        return embedded_type
     
     async def _detect_by_magic_bytes(self, file_path: str) -> Optional[str]:
         """通过魔数检测文件类型"""
@@ -957,7 +1019,159 @@ class ExtractService:
                 break
         
         return None
-    
+
+    async def _detect_embedded_archive_type(self, file_path: str) -> Optional[str]:
+        """检测文件中是否嵌入了压缩包（扫描非零偏移的魔数）
+
+        用于检测 polyglot 文件（如 MP4 文件内嵌 RAR/ZIP/7z 压缩包）。
+        这类文件的文件头是媒体格式（如 ftyp），但压缩包的魔数在文件的后面部分。
+
+        Args:
+            file_path: 文件路径
+
+        Returns:
+            检测到的压缩包类型（'zip', 'rar', '7z'），未检测到返回 None
+        """
+        magic_bytes = [
+            (b'PK\x03\x04', 'zip'),
+            (b'PK\x05\x06', 'zip'),  # 空zip
+            (b'PK\x07\x08', 'zip'),  # zip64
+            (b'Rar!', 'rar'),
+            (b'7z\xBC\xAF\x27\x1C', '7z'),
+        ]
+
+        max_retries = 3
+        for retry in range(max_retries):
+            try:
+                file_size = os.path.getsize(file_path)
+                if file_size < 8192:  # 太小的文件不可能包含嵌入的压缩包
+                    return None
+
+                with open(file_path, 'rb') as f:
+                    # 跳过前 4KB（文件头部通常是格式标识，不是压缩数据）
+                    f.seek(4096)
+                    # 扫描最多 10MB
+                    scan_size = min(10 * 1024 * 1024, file_size - 4096)
+                    data = f.read(scan_size)
+
+                    for magic, file_type in magic_bytes:
+                        if magic in data:
+                            logger.info(f"[Extract] 检测到嵌入的压缩包: {file_path} (类型: {file_type})")
+                            return file_type
+                break
+            except PermissionError:
+                if retry < max_retries - 1:
+                    logger.warning(f"嵌入压缩包检测文件访问被拒绝，等待后重试 ({retry + 1}/{max_retries}): {file_path}")
+                    await asyncio.sleep(2)
+                else:
+                    logger.error(f"嵌入压缩包检测文件访问被拒绝: {file_path}")
+            except Exception as e:
+                logger.debug(f"嵌入压缩包检测失败: {file_path}, {e}")
+                break
+
+        return None
+
+    def _find_embedded_archive_offset(self, file_path: str) -> Optional[int]:
+        """查找嵌入压缩包在文件中的偏移位置
+
+        Args:
+            file_path: 文件路径
+
+        Returns:
+            压缩包魔数的偏移位置，未找到返回 None
+        """
+        magic_bytes = [
+            (b'PK\x03\x04', 'zip'),
+            (b'PK\x05\x06', 'zip'),
+            (b'PK\x07\x08', 'zip'),
+            (b'Rar!', 'rar'),
+            (b'7z\xBC\xAF\x27\x1C', '7z'),
+        ]
+
+        try:
+            file_size = os.path.getsize(file_path)
+            if file_size < 8192:
+                return None
+
+            with open(file_path, 'rb') as f:
+                # 从文件头开始扫描（跳过前8字节，因为那是已经被检查过的非压缩魔数）
+                f.seek(8)
+                # 扫描最多 10MB
+                scan_size = min(10 * 1024 * 1024, file_size - 8)
+                data = f.read(scan_size)
+
+                for magic, file_type in magic_bytes:
+                    idx = data.find(magic)
+                    if idx >= 0:
+                        offset = 8 + idx
+                        logger.info(f"[Extract] 嵌入压缩包偏移: {file_path} (类型: {file_type}, 偏移: {offset})")
+                        return offset
+        except Exception as e:
+            logger.debug(f"查找嵌入压缩包偏移失败: {file_path}, {e}")
+
+        return None
+
+    async def _prepare_polyglot_file(self, file_path: str) -> str:
+        """处理 polyglot 文件（如 MP4 内嵌压缩包）
+
+        如果文件包含嵌入的压缩包且压缩包不在文件开头，
+        则提取压缩包部分到临时文件，返回临时文件路径。
+        如果不需要处理，返回原路径。
+
+        Args:
+            file_path: 文件路径
+
+        Returns:
+            处理后的文件路径（可能是临时文件）
+        """
+        # 检查文件头是否已经是压缩格式
+        header_archive = await self._detect_by_magic_bytes(file_path)
+        if header_archive:
+            # 文件头已经是压缩格式，不需要处理
+            return file_path
+
+        # 查找嵌入的压缩包偏移
+        offset = self._find_embedded_archive_offset(file_path)
+        if offset is None or offset == 0:
+            return file_path
+
+        # 压缩包在非零偏移位置，需要提取
+        logger.info(f"[Extract] 检测到 polyglot 文件，提取压缩包部分: {file_path} (偏移: {offset})")
+
+        import tempfile
+        file_size = os.path.getsize(file_path)
+        archive_size = file_size - offset
+
+        # 创建临时文件
+        temp_dir = self.config.storage.temp_path
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_fd, temp_path = tempfile.mkstemp(dir=temp_dir, suffix='.archive')
+        os.close(temp_fd)
+
+        try:
+            # 提取压缩包部分
+            with open(file_path, 'rb') as src:
+                src.seek(offset)
+                with open(temp_path, 'wb') as dst:
+                    # 分块复制，避免大文件占用过多内存
+                    remaining = archive_size
+                    chunk_size = 8 * 1024 * 1024  # 8MB chunks
+                    while remaining > 0:
+                        chunk = src.read(min(chunk_size, remaining))
+                        if not chunk:
+                            break
+                        dst.write(chunk)
+                        remaining -= len(chunk)
+
+            logger.info(f"[Extract] 已提取压缩包部分: {temp_path} ({archive_size} bytes)")
+            return temp_path
+        except Exception as e:
+            logger.error(f"[Extract] 提取压缩包部分失败: {e}")
+            # 清理临时文件
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            return file_path
+
     def _get_correct_extension(self, file_type: str) -> str:
         """获取正确的后缀名"""
         extension_map = {
