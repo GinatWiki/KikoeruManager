@@ -680,29 +680,27 @@ class FileProcessor:
                     data = f.read(scan_size)
                     logger.info(f"[FileProcessor] 扫描 offset {pos} 开始的 {scan_size} bytes")
 
-                    # 扫描 RAR5 签名 (最常见)
-                    rar5_sig = b'Rar!\x1a\x07\x01\x00'
-                    idx = data.find(rar5_sig)
+                    # 扫描 RAR 签名 (RAR4 和 RAR5)
+                    # RAR5: Rar!\x1a\x07\x01\x00
+                    # RAR4: Rar!\x1a\x07\x00
+                    rar_sig = b'Rar!\x1a\x07'
+                    idx = data.find(rar_sig)
                     if idx >= 0:
-                        if self._validate_rar_header(data, idx, is_rar5=True):
-                            logger.info(f"[FileProcessor] 找到有效的 RAR5 签名: {path} (偏移: {pos + idx})")
-                            return 'rar'
-
-                    # 扫描 RAR4 签名
-                    rar4_sig = b'Rar!\x1a\x07\x00'
-                    idx = data.find(rar4_sig)
-                    if idx >= 0:
-                        if self._validate_rar_header(data, idx, is_rar5=False):
-                            logger.info(f"[FileProcessor] 找到有效的 RAR4 签名: {path} (偏移: {pos + idx})")
-                            return 'rar'
+                        # 检查签名后面是否有合理的字节
+                        if idx + 8 <= len(data):
+                            after_sig = data[idx + 7:idx + 10]
+                            # RAR5: \x01\x00 后面是 header_type
+                            # RAR4: \x00 后面是 header_crc
+                            if after_sig[0:1] in [b'\x00', b'\x01']:
+                                logger.info(f"[FileProcessor] 找到 RAR 签名: {path} (偏移: {pos + idx})")
+                                return 'rar'
 
                     # 扫描 ZIP 签名
                     zip_sig = b'PK\x03\x04'
                     idx = data.find(zip_sig)
                     if idx >= 0:
-                        if self._validate_zip_header(data, idx):
-                            logger.info(f"[FileProcessor] 找到有效的 ZIP 签名: {path} (偏移: {pos + idx})")
-                            return 'zip'
+                        logger.info(f"[FileProcessor] 找到 ZIP 签名: {path} (偏移: {pos + idx})")
+                        return 'zip'
 
                     # 扫描 7z 签名
                     sevenz_sig = b'7z\xBC\xAF\x27\x1C'
@@ -711,7 +709,7 @@ class FileProcessor:
                         logger.info(f"[FileProcessor] 找到 7z 签名: {path} (偏移: {pos + idx})")
                         return '7z'
 
-                logger.info(f"[FileProcessor] 未检测到有效的嵌入压缩包签名: {path}")
+                logger.info(f"[FileProcessor] 未检测到嵌入压缩包签名: {path}")
         except (PermissionError, IOError) as e:
             logger.debug(f"[FileProcessor] 嵌入压缩包检测文件访问失败: {path}, 错误: {e}")
         except Exception as e:

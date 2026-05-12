@@ -1042,23 +1042,28 @@ class ExtractService:
                 if file_size < 8192:  # 太小的文件不可能包含嵌入的压缩包
                     return None
 
-                # 定义要扫描的位置：前部、中部、末尾
+                # 定义要扫描的位置
                 chunk_size = 10 * 1024 * 1024  # 每次扫描 10MB
                 scan_positions = []
 
                 # 1. 前部：跳过前 4KB，扫描 10MB
                 scan_positions.append(4096)
 
-                # 2. 中部：从文件 50% 位置开始扫描
-                if file_size > chunk_size * 3:
-                    mid_pos = file_size // 2
-                    scan_positions.append(mid_pos)
+                # 2. 对于大文件，每 100MB 扫描一个位置
+                if file_size > 100 * 1024 * 1024:
+                    step = 100 * 1024 * 1024  # 100MB
+                    pos = step
+                    while pos < file_size - chunk_size:
+                        scan_positions.append(pos)
+                        pos += step
 
                 # 3. 末尾：从文件末尾往前 10MB 开始扫描
                 if file_size > chunk_size * 2:
                     tail_pos = max(0, file_size - chunk_size)
                     if tail_pos not in scan_positions:
                         scan_positions.append(tail_pos)
+
+                logger.info(f"[Extract] 将扫描 {len(scan_positions)} 个位置: {file_path}")
 
                 with open(file_path, 'rb') as f:
                     for pos in scan_positions:
@@ -1068,31 +1073,23 @@ class ExtractService:
                             continue
 
                         data = f.read(scan_size)
-                        logger.info(f"[Extract] 扫描 offset {pos} 开始的 {scan_size} bytes: {file_path}")
 
-                        # 扫描 RAR5 签名 (最常见)
-                        rar5_sig = b'Rar!\x1a\x07\x01\x00'
-                        idx = data.find(rar5_sig)
+                        # 扫描 RAR 签名 (RAR4 和 RAR5)
+                        rar_sig = b'Rar!\x1a\x07'
+                        idx = data.find(rar_sig)
                         if idx >= 0:
-                            if self._validate_rar_header(data, idx, is_rar5=True):
-                                logger.info(f"[Extract] 找到有效的 RAR5 签名: {file_path} (偏移: {pos + idx})")
-                                return 'rar'
-
-                        # 扫描 RAR4 签名
-                        rar4_sig = b'Rar!\x1a\x07\x00'
-                        idx = data.find(rar4_sig)
-                        if idx >= 0:
-                            if self._validate_rar_header(data, idx, is_rar5=False):
-                                logger.info(f"[Extract] 找到有效的 RAR4 签名: {file_path} (偏移: {pos + idx})")
-                                return 'rar'
+                            if idx + 8 <= len(data):
+                                after_sig = data[idx + 7:idx + 10]
+                                if after_sig[0:1] in [b'\x00', b'\x01']:
+                                    logger.info(f"[Extract] 找到 RAR 签名: {file_path} (偏移: {pos + idx})")
+                                    return 'rar'
 
                         # 扫描 ZIP 签名
                         zip_sig = b'PK\x03\x04'
                         idx = data.find(zip_sig)
                         if idx >= 0:
-                            if self._validate_zip_header(data, idx):
-                                logger.info(f"[Extract] 找到有效的 ZIP 签名: {file_path} (偏移: {pos + idx})")
-                                return 'zip'
+                            logger.info(f"[Extract] 找到 ZIP 签名: {file_path} (偏移: {pos + idx})")
+                            return 'zip'
 
                         # 扫描 7z 签名
                         sevenz_sig = b'7z\xBC\xAF\x27\x1C'
@@ -1117,8 +1114,7 @@ class ExtractService:
     def _find_embedded_archive_offset(self, file_path: str) -> Optional[int]:
         """查找嵌入压缩包在文件中的偏移位置
 
-        对于大文件，会扫描多个位置：前部、中部、末尾。
-        会验证魔数后面是否有合理的压缩包头部结构。
+        对于大文件，会扫描多个位置：前部、每100MB、末尾。
 
         Args:
             file_path: 文件路径
@@ -1131,23 +1127,28 @@ class ExtractService:
             if file_size < 8192:
                 return None
 
-            # 定义要扫描的位置：前部、中部、末尾
+            # 定义要扫描的位置
             chunk_size = 10 * 1024 * 1024  # 每次扫描 10MB
             scan_positions = []
 
             # 1. 前部：跳过前8字节，扫描 10MB
             scan_positions.append(8)
 
-            # 2. 中部：从文件 50% 位置开始扫描
-            if file_size > chunk_size * 3:
-                mid_pos = file_size // 2
-                scan_positions.append(mid_pos)
+            # 2. 对于大文件，每 100MB 扫描一个位置
+            if file_size > 100 * 1024 * 1024:
+                step = 100 * 1024 * 1024  # 100MB
+                pos = step
+                while pos < file_size - chunk_size:
+                    scan_positions.append(pos)
+                    pos += step
 
             # 3. 末尾：从文件末尾往前 10MB 开始扫描
             if file_size > chunk_size * 2:
                 tail_pos = max(0, file_size - chunk_size)
                 if tail_pos not in scan_positions:
                     scan_positions.append(tail_pos)
+
+            logger.info(f"[Extract] 将扫描 {len(scan_positions)} 个位置查找嵌入压缩包: {file_path}")
 
             with open(file_path, 'rb') as f:
                 for pos in scan_positions:
@@ -1159,49 +1160,26 @@ class ExtractService:
                     data = f.read(scan_size)
 
                     # 扫描 RAR 签名 (RAR4 和 RAR5)
-                    # RAR4: Rar!\x1a\x07\x00
-                    # RAR5: Rar!\x1a\x07\x01\x00
-                    rar4_sig = b'Rar!\x1a\x07\x00'
-                    rar5_sig = b'Rar!\x1a\x07\x01\x00'
+                    rar_sig = b'Rar!\x1a\x07'
+                    idx = data.find(rar_sig)
+                    if idx >= 0:
+                        if idx + 8 <= len(data):
+                            after_sig = data[idx + 7:idx + 10]
+                            if after_sig[0:1] in [b'\x00', b'\x01']:
+                                offset = pos + idx
+                                logger.info(f"[Extract] 找到 RAR 签名: {file_path} (偏移: {offset})")
+                                return offset
 
                     # 扫描 ZIP 签名
                     zip_sig = b'PK\x03\x04'
-
-                    # 扫描 7z 签名
-                    sevenz_sig = b'7z\xBC\xAF\x27\x1C'
-
-                    # 先查找 RAR5（更常见）
-                    idx = data.find(rar5_sig)
-                    if idx >= 0:
-                        offset = pos + idx
-                        # 验证：检查签名后的字节是否合理
-                        if self._validate_rar_header(data, idx, is_rar5=True):
-                            logger.info(f"[Extract] 找到有效的 RAR5 签名: {file_path} (偏移: {offset})")
-                            return offset
-                        else:
-                            logger.debug(f"[Extract] RAR5 签名验证失败，继续搜索: {file_path} (偏移: {offset})")
-
-                    # 查找 RAR4
-                    idx = data.find(rar4_sig)
-                    if idx >= 0:
-                        offset = pos + idx
-                        if self._validate_rar_header(data, idx, is_rar5=False):
-                            logger.info(f"[Extract] 找到有效的 RAR4 签名: {file_path} (偏移: {offset})")
-                            return offset
-                        else:
-                            logger.debug(f"[Extract] RAR4 签名验证失败，继续搜索: {file_path} (偏移: {offset})")
-
-                    # 查找 ZIP
                     idx = data.find(zip_sig)
                     if idx >= 0:
                         offset = pos + idx
-                        if self._validate_zip_header(data, idx):
-                            logger.info(f"[Extract] 找到有效的 ZIP 签名: {file_path} (偏移: {offset})")
-                            return offset
-                        else:
-                            logger.debug(f"[Extract] ZIP 签名验证失败，继续搜索: {file_path} (偏移: {offset})")
+                        logger.info(f"[Extract] 找到 ZIP 签名: {file_path} (偏移: {offset})")
+                        return offset
 
-                    # 查找 7z
+                    # 扫描 7z 签名
+                    sevenz_sig = b'7z\xBC\xAF\x27\x1C'
                     idx = data.find(sevenz_sig)
                     if idx >= 0:
                         offset = pos + idx
