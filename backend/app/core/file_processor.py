@@ -627,6 +627,8 @@ class FileProcessor:
         用于检测 polyglot 文件（如 MP4 文件内嵌 RAR/ZIP/7z 压缩包）。
         这类文件的文件头是媒体格式（如 ftyp），但压缩包的魔数在文件的后面部分。
 
+        对于大文件，会扫描多个位置：前部、中部、末尾。
+
         Args:
             path: 文件路径
 
@@ -653,24 +655,43 @@ class FileProcessor:
 
             logger.info(f"[FileProcessor] 嵌入压缩包检测: 扫描文件 {path} (大小: {file_size} bytes)")
 
+            # 定义要扫描的位置：前部、中部、末尾
+            chunk_size = 10 * 1024 * 1024  # 每次扫描 10MB
+            scan_positions = []
+
+            # 1. 前部：跳过前 4KB，扫描 10MB
+            scan_positions.append(4096)
+
+            # 2. 中部：从文件 50% 位置开始扫描
+            if file_size > chunk_size * 3:
+                mid_pos = file_size // 2
+                scan_positions.append(mid_pos)
+
+            # 3. 末尾：从文件末尾往前 10MB 开始扫描
+            if file_size > chunk_size * 2:
+                tail_pos = max(0, file_size - chunk_size)
+                if tail_pos not in scan_positions:
+                    scan_positions.append(tail_pos)
+
             with open(path, 'rb') as f:
                 # 读取文件头用于日志
                 header = f.read(16)
                 logger.info(f"[FileProcessor] 文件头 (前16字节): {header.hex()}")
 
-                # 跳过前 4KB（文件头部通常是格式标识，不是压缩数据）
-                f.seek(4096)
-                # 扫描最多 10MB
-                scan_size = min(10 * 1024 * 1024, file_size - 4096)
-                data = f.read(scan_size)
+                for pos in scan_positions:
+                    f.seek(pos)
+                    scan_size = min(chunk_size, file_size - pos)
+                    if scan_size <= 0:
+                        continue
 
-                logger.info(f"[FileProcessor] 扫描 offset 4096 开始的 {scan_size} bytes")
+                    data = f.read(scan_size)
+                    logger.info(f"[FileProcessor] 扫描 offset {pos} 开始的 {scan_size} bytes")
 
-                for magic, file_type in magic_bytes:
-                    if magic in data:
-                        offset = data.find(magic)
-                        logger.info(f"[FileProcessor] 检测到嵌入的压缩包: {path} (类型: {file_type}, 偏移: {4096 + offset})")
-                        return file_type
+                    for magic, file_type in magic_bytes:
+                        if magic in data:
+                            offset = data.find(magic)
+                            logger.info(f"[FileProcessor] 检测到嵌入的压缩包: {path} (类型: {file_type}, 偏移: {pos + offset})")
+                            return file_type
 
                 logger.info(f"[FileProcessor] 未检测到嵌入压缩包魔数: {path}")
         except (PermissionError, IOError) as e:

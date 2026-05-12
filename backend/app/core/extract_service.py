@@ -1026,6 +1026,8 @@ class ExtractService:
         用于检测 polyglot 文件（如 MP4 文件内嵌 RAR/ZIP/7z 压缩包）。
         这类文件的文件头是媒体格式（如 ftyp），但压缩包的魔数在文件的后面部分。
 
+        对于大文件，会扫描多个位置：前部、中部、末尾。
+
         Args:
             file_path: 文件路径
 
@@ -1047,17 +1049,38 @@ class ExtractService:
                 if file_size < 8192:  # 太小的文件不可能包含嵌入的压缩包
                     return None
 
-                with open(file_path, 'rb') as f:
-                    # 跳过前 4KB（文件头部通常是格式标识，不是压缩数据）
-                    f.seek(4096)
-                    # 扫描最多 10MB
-                    scan_size = min(10 * 1024 * 1024, file_size - 4096)
-                    data = f.read(scan_size)
+                # 定义要扫描的位置：前部、中部、末尾
+                chunk_size = 10 * 1024 * 1024  # 每次扫描 10MB
+                scan_positions = []
 
-                    for magic, file_type in magic_bytes:
-                        if magic in data:
-                            logger.info(f"[Extract] 检测到嵌入的压缩包: {file_path} (类型: {file_type})")
-                            return file_type
+                # 1. 前部：跳过前 4KB，扫描 10MB
+                scan_positions.append(4096)
+
+                # 2. 中部：从文件 50% 位置开始扫描
+                if file_size > chunk_size * 3:
+                    mid_pos = file_size // 2
+                    scan_positions.append(mid_pos)
+
+                # 3. 末尾：从文件末尾往前 10MB 开始扫描
+                if file_size > chunk_size * 2:
+                    tail_pos = max(0, file_size - chunk_size)
+                    if tail_pos not in scan_positions:
+                        scan_positions.append(tail_pos)
+
+                with open(file_path, 'rb') as f:
+                    for pos in scan_positions:
+                        f.seek(pos)
+                        scan_size = min(chunk_size, file_size - pos)
+                        if scan_size <= 0:
+                            continue
+
+                        data = f.read(scan_size)
+                        logger.info(f"[Extract] 扫描 offset {pos} 开始的 {scan_size} bytes: {file_path}")
+
+                        for magic, file_type in magic_bytes:
+                            if magic in data:
+                                logger.info(f"[Extract] 检测到嵌入的压缩包: {file_path} (类型: {file_type}, 偏移约: {pos})")
+                                return file_type
                 break
             except PermissionError:
                 if retry < max_retries - 1:
@@ -1073,6 +1096,8 @@ class ExtractService:
 
     def _find_embedded_archive_offset(self, file_path: str) -> Optional[int]:
         """查找嵌入压缩包在文件中的偏移位置
+
+        对于大文件，会扫描多个位置：前部、中部、末尾。
 
         Args:
             file_path: 文件路径
@@ -1093,19 +1118,39 @@ class ExtractService:
             if file_size < 8192:
                 return None
 
-            with open(file_path, 'rb') as f:
-                # 从文件头开始扫描（跳过前8字节，因为那是已经被检查过的非压缩魔数）
-                f.seek(8)
-                # 扫描最多 10MB
-                scan_size = min(10 * 1024 * 1024, file_size - 8)
-                data = f.read(scan_size)
+            # 定义要扫描的位置：前部、中部、末尾
+            chunk_size = 10 * 1024 * 1024  # 每次扫描 10MB
+            scan_positions = []
 
-                for magic, file_type in magic_bytes:
-                    idx = data.find(magic)
-                    if idx >= 0:
-                        offset = 8 + idx
-                        logger.info(f"[Extract] 嵌入压缩包偏移: {file_path} (类型: {file_type}, 偏移: {offset})")
-                        return offset
+            # 1. 前部：跳过前8字节，扫描 10MB
+            scan_positions.append(8)
+
+            # 2. 中部：从文件 50% 位置开始扫描
+            if file_size > chunk_size * 3:
+                mid_pos = file_size // 2
+                scan_positions.append(mid_pos)
+
+            # 3. 末尾：从文件末尾往前 10MB 开始扫描
+            if file_size > chunk_size * 2:
+                tail_pos = max(0, file_size - chunk_size)
+                if tail_pos not in scan_positions:
+                    scan_positions.append(tail_pos)
+
+            with open(file_path, 'rb') as f:
+                for pos in scan_positions:
+                    f.seek(pos)
+                    scan_size = min(chunk_size, file_size - pos)
+                    if scan_size <= 0:
+                        continue
+
+                    data = f.read(scan_size)
+
+                    for magic, file_type in magic_bytes:
+                        idx = data.find(magic)
+                        if idx >= 0:
+                            offset = pos + idx
+                            logger.info(f"[Extract] 嵌入压缩包偏移: {file_path} (类型: {file_type}, 偏移: {offset})")
+                            return offset
         except Exception as e:
             logger.debug(f"查找嵌入压缩包偏移失败: {file_path}, {e}")
 
