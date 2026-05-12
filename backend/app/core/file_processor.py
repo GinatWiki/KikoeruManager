@@ -643,23 +643,36 @@ class FileProcessor:
 
         try:
             if not os.path.exists(path) or not os.path.isfile(path):
+                logger.debug(f"[FileProcessor] 嵌入压缩包检测: 文件不存在或不是文件: {path}")
                 return None
 
             file_size = os.path.getsize(path)
             if file_size < 8192:  # 太小的文件不可能包含嵌入的压缩包
+                logger.debug(f"[FileProcessor] 嵌入压缩包检测: 文件太小 ({file_size} < 8192 bytes): {path}")
                 return None
 
+            logger.info(f"[FileProcessor] 嵌入压缩包检测: 扫描文件 {path} (大小: {file_size} bytes)")
+
             with open(path, 'rb') as f:
+                # 读取文件头用于日志
+                header = f.read(16)
+                logger.info(f"[FileProcessor] 文件头 (前16字节): {header.hex()}")
+
                 # 跳过前 4KB（文件头部通常是格式标识，不是压缩数据）
                 f.seek(4096)
                 # 扫描最多 10MB
                 scan_size = min(10 * 1024 * 1024, file_size - 4096)
                 data = f.read(scan_size)
 
+                logger.info(f"[FileProcessor] 扫描 offset 4096 开始的 {scan_size} bytes")
+
                 for magic, file_type in magic_bytes:
                     if magic in data:
-                        logger.info(f"[FileProcessor] 检测到嵌入的压缩包: {path} (类型: {file_type})")
+                        offset = data.find(magic)
+                        logger.info(f"[FileProcessor] 检测到嵌入的压缩包: {path} (类型: {file_type}, 偏移: {4096 + offset})")
                         return file_type
+
+                logger.info(f"[FileProcessor] 未检测到嵌入压缩包魔数: {path}")
         except (PermissionError, IOError) as e:
             logger.debug(f"[FileProcessor] 嵌入压缩包检测文件访问失败: {path}, 错误: {e}")
         except Exception as e:
