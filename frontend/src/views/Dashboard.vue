@@ -61,26 +61,35 @@
         </div>
       </template>
       <div class="action-buttons">
-        <el-button 
-          type="primary" 
-          size="large" 
+        <el-button
+          type="primary"
+          size="large"
           @click="handleManualScan"
           :loading="scanning"
         >
           <el-icon><Search /></el-icon>
-          扫描并处理文件夹
+          扫描输入目录
         </el-button>
-        <el-button 
-          type="success" 
-          size="large" 
+        <el-button
+          type="warning"
+          size="large"
+          @click="handleScanProcessedArchives"
+          :loading="scanningProcessed"
+        >
+          <el-icon><Refresh /></el-icon>
+          扫描已处理目录
+        </el-button>
+        <el-button
+          type="success"
+          size="large"
           @click="handleWatcherToggle"
         >
           <el-icon><VideoPlay v-if="!watcherRunning" /><VideoPause v-else /></el-icon>
           {{ watcherRunning ? '停止监视器' : '启动监视器' }}
         </el-button>
-        <el-button 
-          type="info" 
-          size="large" 
+        <el-button
+          type="info"
+          size="large"
           @click="$router.push('/conflicts')"
         >
           <el-icon><Warning /></el-icon>
@@ -195,8 +204,8 @@
               </el-icon>
             </el-button>
             
-            <el-button link @click="fetchProcessedArchives" :loading="archivesLoading">
-              <el-icon><Refresh /></el-icon>刷新
+            <el-button link @click="handleScanProcessedArchives" :loading="archivesLoading">
+              <el-icon><Refresh /></el-icon>扫描并刷新
             </el-button>
             <el-button link @click="showAllArchives = !showAllArchives">
               {{ showAllArchives ? '收起' : '查看全部' }}
@@ -297,6 +306,7 @@ import FileUploader from '../components/FileUploader.vue'
 const taskStore = useTaskStore()
 const loading = ref(false)
 const scanning = ref(false)
+const scanningProcessed = ref(false)
 const watcherRunning = ref(false)
 const recentTasks = ref([])
 const stats = ref({
@@ -514,7 +524,7 @@ function handleUploadSuccess() {
 async function handleManualScan() {
   scanning.value = true
   try {
-    ElMessage.info('正在扫描文件夹...')
+    ElMessage.info('正在扫描输入目录...')
     const data = await scanApi.scan()
     ElMessage.success(data.message)
     await refreshData()
@@ -523,6 +533,21 @@ async function handleManualScan() {
     ElMessage.error('扫描失败: ' + (error.response?.data?.detail || error.message))
   } finally {
     scanning.value = false
+  }
+}
+
+async function handleScanProcessedArchives() {
+  scanningProcessed.value = true
+  try {
+    ElMessage.info('正在扫描已处理压缩包目录...')
+    await processedArchiveApi.scan()
+    await fetchProcessedArchives()
+    ElMessage.success('已处理压缩包目录扫描完成')
+  } catch (error) {
+    console.error('扫描已处理目录失败:', error)
+    ElMessage.error('扫描失败: ' + (error.response?.data?.detail || error.message))
+  } finally {
+    scanningProcessed.value = false
   }
 }
 
@@ -552,11 +577,10 @@ async function fetchWatcherStatus() {
   }
 }
 
-// 获取已处理压缩包列表
+// 获取已处理压缩包列表（只获取列表，不触发扫描）
 async function fetchProcessedArchives() {
   archivesLoading.value = true
   try {
-    await processedArchiveApi.scan()
     const params = {
       sort_by: archiveSortBy.value,
       sort_order: archiveSortOrder.value
@@ -570,7 +594,6 @@ async function fetchProcessedArchives() {
     if (archives.value.length > 0) {
       console.log('第一条记录:', archives.value[0].filename, '时间:', archives.value[0].processed_at)
     }
-    ElMessage.success('刷新成功')
   } catch (error) {
     console.error('获取已处理压缩包列表失败:', error)
     ElMessage.error('获取已处理压缩包列表失败')
