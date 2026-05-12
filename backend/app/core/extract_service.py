@@ -1027,6 +1027,7 @@ class ExtractService:
         这类文件的文件头是媒体格式（如 ftyp），但压缩包的魔数在文件的后面部分。
 
         对于大文件，会扫描多个位置：前部、中部、末尾。
+        会验证魔数后面是否有合理的压缩包头部结构。
 
         Args:
             file_path: 文件路径
@@ -1034,14 +1035,6 @@ class ExtractService:
         Returns:
             检测到的压缩包类型（'zip', 'rar', '7z'），未检测到返回 None
         """
-        magic_bytes = [
-            (b'PK\x03\x04', 'zip'),
-            (b'PK\x05\x06', 'zip'),  # 空zip
-            (b'PK\x07\x08', 'zip'),  # zip64
-            (b'Rar!', 'rar'),
-            (b'7z\xBC\xAF\x27\x1C', '7z'),
-        ]
-
         max_retries = 3
         for retry in range(max_retries):
             try:
@@ -1077,10 +1070,37 @@ class ExtractService:
                         data = f.read(scan_size)
                         logger.info(f"[Extract] 扫描 offset {pos} 开始的 {scan_size} bytes: {file_path}")
 
-                        for magic, file_type in magic_bytes:
-                            if magic in data:
-                                logger.info(f"[Extract] 检测到嵌入的压缩包: {file_path} (类型: {file_type}, 偏移约: {pos})")
-                                return file_type
+                        # 扫描 RAR5 签名 (最常见)
+                        rar5_sig = b'Rar!\x1a\x07\x01\x00'
+                        idx = data.find(rar5_sig)
+                        if idx >= 0:
+                            if self._validate_rar_header(data, idx, is_rar5=True):
+                                logger.info(f"[Extract] 找到有效的 RAR5 签名: {file_path} (偏移: {pos + idx})")
+                                return 'rar'
+
+                        # 扫描 RAR4 签名
+                        rar4_sig = b'Rar!\x1a\x07\x00'
+                        idx = data.find(rar4_sig)
+                        if idx >= 0:
+                            if self._validate_rar_header(data, idx, is_rar5=False):
+                                logger.info(f"[Extract] 找到有效的 RAR4 签名: {file_path} (偏移: {pos + idx})")
+                                return 'rar'
+
+                        # 扫描 ZIP 签名
+                        zip_sig = b'PK\x03\x04'
+                        idx = data.find(zip_sig)
+                        if idx >= 0:
+                            if self._validate_zip_header(data, idx):
+                                logger.info(f"[Extract] 找到有效的 ZIP 签名: {file_path} (偏移: {pos + idx})")
+                                return 'zip'
+
+                        # 扫描 7z 签名
+                        sevenz_sig = b'7z\xBC\xAF\x27\x1C'
+                        idx = data.find(sevenz_sig)
+                        if idx >= 0:
+                            logger.info(f"[Extract] 找到 7z 签名: {file_path} (偏移: {pos + idx})")
+                            return '7z'
+
                 break
             except PermissionError:
                 if retry < max_retries - 1:
@@ -1098,6 +1118,7 @@ class ExtractService:
         """查找嵌入压缩包在文件中的偏移位置
 
         对于大文件，会扫描多个位置：前部、中部、末尾。
+        会验证魔数后面是否有合理的压缩包头部结构。
 
         Args:
             file_path: 文件路径
@@ -1105,14 +1126,6 @@ class ExtractService:
         Returns:
             压缩包魔数的偏移位置，未找到返回 None
         """
-        magic_bytes = [
-            (b'PK\x03\x04', 'zip'),
-            (b'PK\x05\x06', 'zip'),
-            (b'PK\x07\x08', 'zip'),
-            (b'Rar!', 'rar'),
-            (b'7z\xBC\xAF\x27\x1C', '7z'),
-        ]
-
         try:
             file_size = os.path.getsize(file_path)
             if file_size < 8192:
@@ -1145,16 +1158,129 @@ class ExtractService:
 
                     data = f.read(scan_size)
 
-                    for magic, file_type in magic_bytes:
-                        idx = data.find(magic)
-                        if idx >= 0:
-                            offset = pos + idx
-                            logger.info(f"[Extract] 嵌入压缩包偏移: {file_path} (类型: {file_type}, 偏移: {offset})")
+                    # 扫描 RAR 签名 (RAR4 和 RAR5)
+                    # RAR4: Rar!\x1a\x07\x00
+                    # RAR5: Rar!\x1a\x07\x01\x00
+                    rar4_sig = b'Rar!\x1a\x07\x00'
+                    rar5_sig = b'Rar!\x1a\x07\x01\x00'
+
+                    # 扫描 ZIP 签名
+                    zip_sig = b'PK\x03\x04'
+
+                    # 扫描 7z 签名
+                    sevenz_sig = b'7z\xBC\xAF\x27\x1C'
+
+                    # 先查找 RAR5（更常见）
+                    idx = data.find(rar5_sig)
+                    if idx >= 0:
+                        offset = pos + idx
+                        # 验证：检查签名后的字节是否合理
+                        if self._validate_rar_header(data, idx, is_rar5=True):
+                            logger.info(f"[Extract] 找到有效的 RAR5 签名: {file_path} (偏移: {offset})")
                             return offset
+                        else:
+                            logger.debug(f"[Extract] RAR5 签名验证失败，继续搜索: {file_path} (偏移: {offset})")
+
+                    # 查找 RAR4
+                    idx = data.find(rar4_sig)
+                    if idx >= 0:
+                        offset = pos + idx
+                        if self._validate_rar_header(data, idx, is_rar5=False):
+                            logger.info(f"[Extract] 找到有效的 RAR4 签名: {file_path} (偏移: {offset})")
+                            return offset
+                        else:
+                            logger.debug(f"[Extract] RAR4 签名验证失败，继续搜索: {file_path} (偏移: {offset})")
+
+                    # 查找 ZIP
+                    idx = data.find(zip_sig)
+                    if idx >= 0:
+                        offset = pos + idx
+                        if self._validate_zip_header(data, idx):
+                            logger.info(f"[Extract] 找到有效的 ZIP 签名: {file_path} (偏移: {offset})")
+                            return offset
+                        else:
+                            logger.debug(f"[Extract] ZIP 签名验证失败，继续搜索: {file_path} (偏移: {offset})")
+
+                    # 查找 7z
+                    idx = data.find(sevenz_sig)
+                    if idx >= 0:
+                        offset = pos + idx
+                        logger.info(f"[Extract] 找到 7z 签名: {file_path} (偏移: {offset})")
+                        return offset
+
         except Exception as e:
             logger.debug(f"查找嵌入压缩包偏移失败: {file_path}, {e}")
 
         return None
+
+    def _validate_rar_header(self, data: bytes, sig_offset: int, is_rar5: bool) -> bool:
+        """验证 RAR 签名后是否有合理的头部结构
+
+        Args:
+            data: 数据块
+            sig_offset: 签名在数据中的偏移
+            is_rar5: 是否是 RAR5 格式
+
+        Returns:
+            是否是有效的 RAR 头部
+        """
+        try:
+            sig_len = 8 if is_rar5 else 7  # RAR5 签名 8 字节，RAR4 签名 7 字节
+
+            # 检查是否有足够的数据
+            if sig_offset + sig_len + 4 > len(data):
+                return False
+
+            # RAR5: 签名后是 header_type (1 byte), header_size (varint)
+            # RAR4: 签名后是 header_crc (2 bytes), header_type (1 byte), header_flags (2 bytes)
+            after_sig = data[sig_offset + sig_len:]
+
+            if is_rar5:
+                # RAR5 header_type: 0x01=archive, 0x02=file, 0x03=service, 0x04=encryption, 0x05=end
+                header_type = after_sig[0]
+                if header_type in [0x01, 0x02, 0x03, 0x04, 0x05]:
+                    return True
+            else:
+                # RAR4: 检查 header_type
+                header_type = after_sig[2]
+                # 0x73=archive header, 0x74=file header, 0x75=comment, 0x76=extra info
+                if header_type in [0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a]:
+                    return True
+
+            return False
+        except Exception:
+            return False
+
+    def _validate_zip_header(self, data: bytes, sig_offset: int) -> bool:
+        """验证 ZIP 签名后是否有合理的头部结构
+
+        Args:
+            data: 数据块
+            sig_offset: 签名在数据中的偏移
+
+        Returns:
+            是否是有效的 ZIP 头部
+        """
+        try:
+            # ZIP local file header: signature (4) + version (2) + flags (2) + method (2) + ...
+            if sig_offset + 30 > len(data):
+                return False
+
+            after_sig = data[sig_offset + 4:]
+
+            # 解压方法：0=stored, 8=deflated, 12=bzip2, 14=lzma, 93=zstd, 95=xz
+            method = int.from_bytes(after_sig[4:6], 'little')
+            if method in [0, 8, 9, 12, 14, 93, 95]:
+                return True
+
+            # 版本检查：通常在 20-63 之间
+            version = int.from_bytes(after_sig[0:2], 'little')
+            if 10 <= version <= 63:
+                return True
+
+            return False
+        except Exception:
+            return False
 
     async def _prepare_polyglot_file(self, file_path: str) -> str:
         """处理 polyglot 文件（如 MP4 内嵌压缩包）

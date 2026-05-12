@@ -628,6 +628,7 @@ class FileProcessor:
         这类文件的文件头是媒体格式（如 ftyp），但压缩包的魔数在文件的后面部分。
 
         对于大文件，会扫描多个位置：前部、中部、末尾。
+        会验证魔数后面是否有合理的压缩包头部结构。
 
         Args:
             path: 文件路径
@@ -635,14 +636,6 @@ class FileProcessor:
         Returns:
             检测到的压缩包类型（'zip', 'rar', '7z'），未检测到返回 None
         """
-        magic_bytes = [
-            (b'PK\x03\x04', 'zip'),
-            (b'PK\x05\x06', 'zip'),  # 空zip
-            (b'PK\x07\x08', 'zip'),  # zip64
-            (b'Rar!', 'rar'),
-            (b'7z\xBC\xAF\x27\x1C', '7z'),
-        ]
-
         try:
             if not os.path.exists(path) or not os.path.isfile(path):
                 logger.debug(f"[FileProcessor] 嵌入压缩包检测: 文件不存在或不是文件: {path}")
@@ -687,17 +680,111 @@ class FileProcessor:
                     data = f.read(scan_size)
                     logger.info(f"[FileProcessor] 扫描 offset {pos} 开始的 {scan_size} bytes")
 
-                    for magic, file_type in magic_bytes:
-                        if magic in data:
-                            offset = data.find(magic)
-                            logger.info(f"[FileProcessor] 检测到嵌入的压缩包: {path} (类型: {file_type}, 偏移: {pos + offset})")
-                            return file_type
+                    # 扫描 RAR5 签名 (最常见)
+                    rar5_sig = b'Rar!\x1a\x07\x01\x00'
+                    idx = data.find(rar5_sig)
+                    if idx >= 0:
+                        if self._validate_rar_header(data, idx, is_rar5=True):
+                            logger.info(f"[FileProcessor] 找到有效的 RAR5 签名: {path} (偏移: {pos + idx})")
+                            return 'rar'
 
-                logger.info(f"[FileProcessor] 未检测到嵌入压缩包魔数: {path}")
+                    # 扫描 RAR4 签名
+                    rar4_sig = b'Rar!\x1a\x07\x00'
+                    idx = data.find(rar4_sig)
+                    if idx >= 0:
+                        if self._validate_rar_header(data, idx, is_rar5=False):
+                            logger.info(f"[FileProcessor] 找到有效的 RAR4 签名: {path} (偏移: {pos + idx})")
+                            return 'rar'
+
+                    # 扫描 ZIP 签名
+                    zip_sig = b'PK\x03\x04'
+                    idx = data.find(zip_sig)
+                    if idx >= 0:
+                        if self._validate_zip_header(data, idx):
+                            logger.info(f"[FileProcessor] 找到有效的 ZIP 签名: {path} (偏移: {pos + idx})")
+                            return 'zip'
+
+                    # 扫描 7z 签名
+                    sevenz_sig = b'7z\xBC\xAF\x27\x1C'
+                    idx = data.find(sevenz_sig)
+                    if idx >= 0:
+                        logger.info(f"[FileProcessor] 找到 7z 签名: {path} (偏移: {pos + idx})")
+                        return '7z'
+
+                logger.info(f"[FileProcessor] 未检测到有效的嵌入压缩包签名: {path}")
         except (PermissionError, IOError) as e:
             logger.debug(f"[FileProcessor] 嵌入压缩包检测文件访问失败: {path}, 错误: {e}")
         except Exception as e:
             logger.debug(f"[FileProcessor] 嵌入压缩包检测失败: {path}, 错误: {e}")
+
+        return None
+
+    def _validate_rar_header(self, data: bytes, sig_offset: int, is_rar5: bool) -> bool:
+        """验证 RAR 签名后是否有合理的头部结构
+
+        Args:
+            data: 数据块
+            sig_offset: 签名在数据中的偏移
+            is_rar5: 是否是 RAR5 格式
+
+        Returns:
+            是否是有效的 RAR 头部
+        """
+        try:
+            sig_len = 8 if is_rar5 else 7  # RAR5 签名 8 字节，RAR4 签名 7 字节
+
+            # 检查是否有足够的数据
+            if sig_offset + sig_len + 4 > len(data):
+                return False
+
+            after_sig = data[sig_offset + sig_len:]
+
+            if is_rar5:
+                # RAR5 header_type: 0x01=archive, 0x02=file, 0x03=service, 0x04=encryption, 0x05=end
+                header_type = after_sig[0]
+                if header_type in [0x01, 0x02, 0x03, 0x04, 0x05]:
+                    return True
+            else:
+                # RAR4: 检查 header_type
+                header_type = after_sig[2]
+                # 0x73=archive header, 0x74=file header, 0x75=comment, 0x76=extra info
+                if header_type in [0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a]:
+                    return True
+
+            return False
+        except Exception:
+            return False
+
+    def _validate_zip_header(self, data: bytes, sig_offset: int) -> bool:
+        """验证 ZIP 签名后是否有合理的头部结构
+
+        Args:
+            data: 数据块
+            sig_offset: 签名在数据中的偏移
+
+        Returns:
+            是否是有效的 ZIP 头部
+        """
+        try:
+            # ZIP local file header: signature (4) + version (2) + flags (2) + method (2) + ...
+            if sig_offset + 30 > len(data):
+                return False
+
+            after_sig = data[sig_offset + 4:]
+
+            # 解压方法：0=stored, 8=deflated, 12=bzip2, 14=lzma, 93=zstd, 95=xz
+            method = int.from_bytes(after_sig[4:6], 'little')
+            if method in [0, 8, 9, 12, 14, 93, 95]:
+                return True
+
+            # 版本检查：通常在 20-63 之间
+            version = int.from_bytes(after_sig[0:2], 'little')
+            if 10 <= version <= 63:
+                return True
+
+            return False
+        except Exception:
+            return False
 
         return None
 
