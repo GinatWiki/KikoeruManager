@@ -238,10 +238,27 @@ class TaskEngine:
                         task.completed_at = datetime.utcnow()
                         return
 
-                # 步骤1: 解压
-                logger.debug(f"[{rjcode}] 步骤1: 解压")
+                # 步骤1: 获取元数据（在解压之前，避免解压后元数据失败导致浪费）
+                logger.debug(f"[{rjcode}] 步骤1: 获取元数据")
+                if config.auto_process.fetch_metadata:
+                    task.update_progress(10, "获取元数据")
+                    metadata = await metadata_service.fetch(task.source_path, task)
+                    logger.debug(f"[{rjcode}] 元数据: {metadata.get('work_name', '未知')}")
+                    task.task_metadata = metadata
+                else:
+                    logger.info(f"[{rjcode}] 步骤[获取元数据]已禁用，跳过")
+                    metadata = {'rjcode': rjcode}
+                    task.task_metadata = metadata
+
+                await task.wait_if_paused()
+                if task.is_cancelled():
+                    logger.info(f"[{rjcode}] 任务已取消")
+                    return
+
+                # 步骤2: 解压
+                logger.debug(f"[{rjcode}] 步骤2: 解压")
                 if config.auto_process.extract:
-                    task.update_progress(10, "解压中")
+                    task.update_progress(35, "解压中")
                     extracted_path = await extract_service.extract(task)
                     logger.debug(f"[{rjcode}] 解压结果路径: {extracted_path}")
                     if not extracted_path:
@@ -253,23 +270,6 @@ class TaskEngine:
                     if os.path.isfile(extracted_path):
                         logger.error(f"[{rjcode}] 解压已禁用但源路径是文件，任务终止")
                         return
-
-                await task.wait_if_paused()
-                if task.is_cancelled():
-                    logger.info(f"[{rjcode}] 任务已取消")
-                    return
-
-                # 步骤2: 获取元数据
-                logger.debug(f"[{rjcode}] 步骤2: 获取元数据")
-                if config.auto_process.fetch_metadata:
-                    task.update_progress(40, "获取元数据")
-                    metadata = await metadata_service.fetch(extracted_path, task)
-                    logger.debug(f"[{rjcode}] 元数据: {metadata.get('work_name', '未知')}")
-                    task.task_metadata = metadata
-                else:
-                    logger.info(f"[{rjcode}] 步骤[获取元数据]已禁用，跳过")
-                    metadata = {'rjcode': rjcode}
-                    task.task_metadata = metadata
 
                 await task.wait_if_paused()
                 if task.is_cancelled():
