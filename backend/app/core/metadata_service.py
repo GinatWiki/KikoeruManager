@@ -49,6 +49,14 @@ class MetadataService:
     def __init__(self):
         self.config = get_config()
         self.session = requests.Session()
+        # 使用浏览器 UA（参考 VoiceLinks），默认 python-requests UA 容易被拦截/限流
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0',
+            'Accept': 'text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9,ja;q=0.8',
+        })
+        # DLsite 年龄确认 cookie，避免 R18 页面被年龄验证拦截
+        self.session.cookies.set('adultchecked', '1', domain='.dlsite.com')
         if self.config.metadata.http_proxy:
             self.session.proxies = {
                 'http': self.config.metadata.http_proxy,
@@ -167,153 +175,280 @@ class MetadataService:
             db.close()
     
     async def _fetch_from_dlsite(self, rjcode: str) -> WorkMetadata:
-        """从DLsite API获取元数据（支持大家翻译）"""
+        """从DLsite获取元数据（支持大家翻译）
+
+        分层策略（参考 VoiceLinks 的实现）：
+        1. product.json API（数据最全，含翻译信息）
+        2. 作品 HTML 页面解析（API 无数据时兜底，含预售 announce 页面）
+        """
         await asyncio.sleep(self.config.metadata.sleep_interval)
-        
-        # 获取基础数据（使用配置的语言）
+
+        # 1. product.json API
         url = f"https://www.dlsite.com/maniax/api/=/product.json?workno={rjcode}&locale={self.config.metadata.locale}"
-        
+        product = None
         try:
             response = self.session.get(
                 url,
                 timeout=(self.config.metadata.connect_timeout, self.config.metadata.read_timeout)
             )
-            response.raise_for_status()
-            
-            data = response.json()
-            if not data or len(data) == 0:
-                raise Exception(f"作品未找到: {rjcode}")
-            
-            product = data[0]
-            metadata = WorkMetadata()
-            metadata.rjcode = product.get('workno', rjcode)
-            metadata.work_name = product.get('work_name', '')
-            
-            metadata.maker_id = product.get('maker_id', '')
-            metadata.maker_name = product.get('maker_name', '')
-            metadata.release_date = product.get('regist_date', '')[:10]
-            metadata.series_name = product.get('series_name')
-            metadata.series_id = product.get('series_id')
-            metadata.cover_url = 'https:' + product.get('image_main', {}).get('url', '')
-            
-            # 年龄分级
-            age_category = product.get('age_category', 3)
-            if age_category == 1:
-                metadata.age_category = 'GEN'
-            elif age_category == 2:
-                metadata.age_category = 'R15'
+            if response.status_code == 200:
+                data = response.json()
+                if data and len(data) > 0:
+                    product = data[0]
             else:
-                metadata.age_category = 'ADL'
-            
-            # 标签
-            for genre in product.get('genres', []):
-                metadata.tags.append(genre.get('name', ''))
-            
-            # 声优
-            creators = product.get('creaters', {})
-            if isinstance(creators, dict) and 'voice_by' in creators:
-                for cv in creators['voice_by']:
-                    metadata.cvs.append(cv.get('name', ''))
-            
-            # 检查是否有大家翻译的中文标题
-            translation_info = product.get('translation_info')
-            if translation_info:
-                logger.info(f"[{rjcode}] 发现翻译信息: {translation_info}")
-                
-                # 语言代码映射
-                locale_map = {
-                    'CHI_HANS': 'zh-CN',
-                    'CHI_HANT': 'zh-TW',
-                    'ENG': 'en-US',
-                    'KOR': 'ko-KR',
-                    'SPA': 'es-ES',
-                    'DEU': 'de-DE',
-                    'FRA': 'fr-FR',
-                    'IND': 'id-ID',
-                    'ITA': 'it-IT',
-                    'POR': 'pt-PT',
-                    'SWE': 'sv-SE',
-                    'THA': 'th-TH',
-                    'VIE': 'vi-VN'
-                }
-                
-                translated_name = None
-                
-                # 情况1: 翻译作品（子作品）
-                if not translation_info.get('is_original', True):
-                    lang_code = translation_info.get('lang')
-                    if lang_code:
-                        try:
-                            logger.info(f"[{rjcode}] 处理翻译作品，原语言: {lang_code}")
-                            
-                            # 优先尝试简体中文，然后是繁体中文，最后是作品本身的语言
-                            tried_locales = []
-                            
-                            # 策略1: 如果原语言不是简体中文，先尝试简体中文
-                            if lang_code != 'CHI_HANS':
-                                logger.info(f"[{rjcode}] 尝试获取简体中文标题")
-                                translated_name = await self._fetch_translated_title(rjcode, 'zh-CN', validate_chinese=True)
-                                tried_locales.append('zh-CN')
-                                if translated_name:
-                                    logger.info(f"[{rjcode}] 成功获取简体中文翻译标题: {translated_name}")
-                            
-                            # 策略2: 如果简体中文失败且原语言不是繁体中文，尝试繁体中文
-                            if not translated_name and lang_code != 'CHI_HANT':
-                                logger.info(f"[{rjcode}] 简体中文不可用，尝试获取繁体中文标题")
-                                translated_name = await self._fetch_translated_title(rjcode, 'zh-TW', validate_chinese=True)
-                                tried_locales.append('zh-TW')
-                                if translated_name:
-                                    logger.info(f"[{rjcode}] 成功获取繁体中文翻译标题: {translated_name}")
-                            
-                            # 策略3: 使用作品本身的翻译语言
-                            if not translated_name:
-                                dlsite_locale = locale_map.get(lang_code, lang_code)
-                                logger.info(f"[{rjcode}] 已尝试{tried_locales}，使用作品原locale {dlsite_locale}")
-                                should_validate = lang_code in ['CHI_HANS', 'CHI_HANT']
-                                translated_name = await self._fetch_translated_title(rjcode, str(dlsite_locale), validate_chinese=should_validate)
-                                if translated_name:
-                                    logger.info(f"[{rjcode}] 使用{lang_code}翻译标题: {translated_name}")
-                        except Exception as e:
-                            logger.warning(f"[{rjcode}] 获取翻译标题失败: {e}")
-                
-                # 情况2: 原作但有"大家来翻译"申请
-                elif translation_info.get('is_translation_agree', False):
-                    logger.info(f"[{rjcode}] 原作但有翻译申请，检查是否有可用的中文翻译")
-                    
-                    translation_status = translation_info.get('translation_status_for_translator', {})
-                    logger.info(f"[{rjcode}] 翻译状态: {translation_status}")
-                    
-                    # 检查简体中文是否可用
-                    chi_hans_status = translation_status.get('CHI_HANS', {})
-                    if chi_hans_status.get('is_available', False) and not chi_hans_status.get('is_denied', True):
-                        logger.info(f"[{rjcode}] 简体中文翻译申请可用，尝试获取")
-                        try:
+                logger.warning(f"[{rjcode}] product.json 返回 HTTP {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"[{rjcode}] product.json 请求失败: {e}")
+
+        # 2. API 无数据时，解析 HTML 页面兜底（work 页面 → announce 预售页面）
+        if product is None:
+            logger.info(f"[{rjcode}] product.json 无数据，尝试解析 HTML 页面")
+            metadata = await self._fetch_from_dlsite_html(rjcode)
+            if metadata:
+                return metadata
+            raise Exception(f"作品未找到: {rjcode}")
+
+        metadata = WorkMetadata()
+        metadata.rjcode = product.get('workno', rjcode)
+        metadata.work_name = product.get('work_name', '')
+
+        metadata.maker_id = product.get('maker_id', '')
+        metadata.maker_name = product.get('maker_name', '')
+        metadata.release_date = product.get('regist_date', '')[:10]
+        metadata.series_name = product.get('series_name')
+        metadata.series_id = product.get('series_id')
+        metadata.cover_url = 'https:' + product.get('image_main', {}).get('url', '')
+
+        # 年龄分级
+        age_category = product.get('age_category', 3)
+        if age_category == 1:
+            metadata.age_category = 'GEN'
+        elif age_category == 2:
+            metadata.age_category = 'R15'
+        else:
+            metadata.age_category = 'ADL'
+
+        # 标签
+        for genre in product.get('genres', []):
+            metadata.tags.append(genre.get('name', ''))
+
+        # 声优
+        creators = product.get('creaters', {})
+        if isinstance(creators, dict) and 'voice_by' in creators:
+            for cv in creators['voice_by']:
+                metadata.cvs.append(cv.get('name', ''))
+
+        # 检查是否有大家翻译的中文标题
+        translation_info = product.get('translation_info')
+        if translation_info:
+            logger.info(f"[{rjcode}] 发现翻译信息: {translation_info}")
+
+            # 语言代码映射
+            locale_map = {
+                'CHI_HANS': 'zh-CN',
+                'CHI_HANT': 'zh-TW',
+                'ENG': 'en-US',
+                'KOR': 'ko-KR',
+                'SPA': 'es-ES',
+                'DEU': 'de-DE',
+                'FRA': 'fr-FR',
+                'IND': 'id-ID',
+                'ITA': 'it-IT',
+                'POR': 'pt-PT',
+                'SWE': 'sv-SE',
+                'THA': 'th-TH',
+                'VIE': 'vi-VN'
+            }
+
+            translated_name = None
+
+            # 情况1: 翻译作品（子作品）
+            if not translation_info.get('is_original', True):
+                lang_code = translation_info.get('lang')
+                if lang_code:
+                    try:
+                        logger.info(f"[{rjcode}] 处理翻译作品，原语言: {lang_code}")
+
+                        # 优先尝试简体中文，然后是繁体中文，最后是作品本身的语言
+                        tried_locales = []
+
+                        # 策略1: 如果原语言不是简体中文，先尝试简体中文
+                        if lang_code != 'CHI_HANS':
+                            logger.info(f"[{rjcode}] 尝试获取简体中文标题")
                             translated_name = await self._fetch_translated_title(rjcode, 'zh-CN', validate_chinese=True)
+                            tried_locales.append('zh-CN')
                             if translated_name:
                                 logger.info(f"[{rjcode}] 成功获取简体中文翻译标题: {translated_name}")
+
+                        # 策略2: 如果简体中文失败且原语言不是繁体中文，尝试繁体中文
+                        if not translated_name and lang_code != 'CHI_HANT':
+                            logger.info(f"[{rjcode}] 简体中文不可用，尝试获取繁体中文标题")
+                            translated_name = await self._fetch_translated_title(rjcode, 'zh-TW', validate_chinese=True)
+                            tried_locales.append('zh-TW')
+                            if translated_name:
+                                logger.info(f"[{rjcode}] 成功获取繁体中文翻译标题: {translated_name}")
+
+                        # 策略3: 使用作品本身的翻译语言
+                        if not translated_name:
+                            dlsite_locale = locale_map.get(lang_code, lang_code)
+                            logger.info(f"[{rjcode}] 已尝试{tried_locales}，使用作品原locale {dlsite_locale}")
+                            should_validate = lang_code in ['CHI_HANS', 'CHI_HANT']
+                            translated_name = await self._fetch_translated_title(rjcode, str(dlsite_locale), validate_chinese=should_validate)
+                            if translated_name:
+                                logger.info(f"[{rjcode}] 使用{lang_code}翻译标题: {translated_name}")
+                    except Exception as e:
+                        logger.warning(f"[{rjcode}] 获取翻译标题失败: {e}")
+
+            # 情况2: 原作但有"大家来翻译"申请
+            elif translation_info.get('is_translation_agree', False):
+                logger.info(f"[{rjcode}] 原作但有翻译申请，检查是否有可用的中文翻译")
+
+                translation_status = translation_info.get('translation_status_for_translator', {})
+                logger.info(f"[{rjcode}] 翻译状态: {translation_status}")
+
+                # 检查简体中文是否可用
+                chi_hans_status = translation_status.get('CHI_HANS', {})
+                if chi_hans_status.get('is_available', False) and not chi_hans_status.get('is_denied', True):
+                    logger.info(f"[{rjcode}] 简体中文翻译申请可用，尝试获取")
+                    try:
+                        translated_name = await self._fetch_translated_title(rjcode, 'zh-CN', validate_chinese=True)
+                        if translated_name:
+                            logger.info(f"[{rjcode}] 成功获取简体中文翻译标题: {translated_name}")
+                    except Exception as e:
+                        logger.warning(f"[{rjcode}] 获取简体中文翻译标题失败: {e}")
+
+                # 如果简体中文不可用或获取失败，尝试繁体中文
+                if not translated_name:
+                    chi_hant_status = translation_status.get('CHI_HANT', {})
+                    if chi_hant_status.get('is_available', False) and not chi_hant_status.get('is_denied', True):
+                        logger.info(f"[{rjcode}] 繁体中文翻译申请可用，尝试获取")
+                        try:
+                            translated_name = await self._fetch_translated_title(rjcode, 'zh-TW', validate_chinese=True)
+                            if translated_name:
+                                logger.info(f"[{rjcode}] 成功获取繁体中文翻译标题: {translated_name}")
                         except Exception as e:
-                            logger.warning(f"[{rjcode}] 获取简体中文翻译标题失败: {e}")
-                    
-                    # 如果简体中文不可用或获取失败，尝试繁体中文
-                    if not translated_name:
-                        chi_hant_status = translation_status.get('CHI_HANT', {})
-                        if chi_hant_status.get('is_available', False) and not chi_hant_status.get('is_denied', True):
-                            logger.info(f"[{rjcode}] 繁体中文翻译申请可用，尝试获取")
-                            try:
-                                translated_name = await self._fetch_translated_title(rjcode, 'zh-TW', validate_chinese=True)
-                                if translated_name:
-                                    logger.info(f"[{rjcode}] 成功获取繁体中文翻译标题: {translated_name}")
-                            except Exception as e:
-                                logger.warning(f"[{rjcode}] 获取繁体中文翻译标题失败: {e}")
-                
-                if translated_name:
-                    metadata.work_name = translated_name
-            
+                            logger.warning(f"[{rjcode}] 获取繁体中文翻译标题失败: {e}")
+
+            if translated_name:
+                metadata.work_name = translated_name
+
+        return metadata
+
+    async def _fetch_from_dlsite_html(self, rjcode: str) -> Optional[WorkMetadata]:
+        """解析 DLsite 作品 HTML 页面获取元数据（product.json 无数据时的兜底）
+
+        依次尝试：
+        1. 正式作品页面 /maniax/work/=/product_id/{rjcode}.html
+        2. 预售作品页面 /maniax/announce/=/product_id/{rjcode}.html
+        """
+        locale = self.config.metadata.locale
+        pages = [
+            (f"https://www.dlsite.com/maniax/work/=/product_id/{rjcode}.html/?locale={locale}", False),
+            (f"https://www.dlsite.com/maniax/announce/=/product_id/{rjcode}.html/?locale={locale}", True),
+        ]
+
+        for url, is_announce in pages:
+            try:
+                await asyncio.sleep(self.config.metadata.sleep_interval)
+                logger.info(f"[{rjcode}] 尝试 HTML 页面: {url}")
+                response = self.session.get(
+                    url,
+                    timeout=(self.config.metadata.connect_timeout, self.config.metadata.read_timeout)
+                )
+                if response.status_code == 404:
+                    continue
+                if response.status_code != 200:
+                    logger.warning(f"[{rjcode}] HTML 页面返回 HTTP {response.status_code}")
+                    continue
+
+                metadata = self._parse_dlsite_work_html(rjcode, response.text, is_announce)
+                if metadata:
+                    logger.info(f"[{rjcode}] HTML 页面解析成功: {metadata.work_name}")
+                    return metadata
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"[{rjcode}] HTML 页面请求失败: {e}")
+
+        return None
+
+    def _parse_dlsite_work_html(self, rjcode: str, html: str, is_announce: bool = False) -> Optional[WorkMetadata]:
+        """解析 DLsite 作品页面 HTML（参考 VoiceLinks 的 parseWorkDOM）
+
+        提取：标题、社团、发售日、年龄分级、标签、声优、封面
+        表头匹配支持日/简中/繁中/英/韩五种语言
+        """
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, 'lxml')
+
+        title_el = soup.find(id='work_name')
+        if not title_el:
+            return None
+
+        metadata = WorkMetadata()
+        metadata.rjcode = rjcode
+        metadata.work_name = title_el.get_text(strip=True)
+
+        # 封面
+        og_image = soup.find('meta', property='og:image')
+        if og_image and og_image.get('content'):
+            cover = og_image['content']
+            metadata.cover_url = 'https:' + cover if cover.startswith('//') else cover
+
+        # 社团
+        maker_el = soup.select_one('span.maker_name')
+        if maker_el:
+            metadata.maker_name = maker_el.get_text(strip=True)
+        maker_link = soup.select_one('#work_maker a[href]')
+        if maker_link:
+            rg_match = re.search(r'(RG\d+)', maker_link['href'])
+            if rg_match:
+                metadata.maker_id = rg_match.group(1)
+
+        # 概要表
+        table = soup.find('table', id='work_outline')
+        if not table:
             return metadata
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"请求DLsite失败: {e}")
-            raise Exception(f"获取元数据失败: {e}")
+
+        for row in table.find_all('tr'):
+            cells = row.find_all(['th', 'td'])
+            if len(cells) < 2:
+                continue
+            header = cells[0].get_text(strip=True)
+            data = cells[1]
+
+            if header in ('販売日', '发售日', '販賣日', 'Release date', '판매일'):
+                metadata.release_date = self._normalize_html_date(data.get_text(strip=True))
+            elif header in ('年齢指定', '年龄指定', '年齡指定', 'Age', '연령 지정'):
+                rating = data.get_text(strip=True)
+                if '18' in rating:
+                    metadata.age_category = 'ADL'
+                elif '15' in rating:
+                    metadata.age_category = 'R15'
+                else:
+                    metadata.age_category = 'GEN'
+            elif header in ('ジャンル', '分类', '分類', 'Genre', '장르'):
+                metadata.tags = [a.get_text(strip=True) for a in data.find_all('a')]
+            elif header in ('声優', '声优', '聲優', 'Voice Actor', '성우'):
+                cvs = [a.get_text(strip=True) for a in data.find_all('a')]
+                if not cvs:
+                    # 无链接时按分隔符拆分纯文本
+                    cvs = [t.strip() for t in re.split(r'[/、]', data.get_text()) if t.strip()]
+                metadata.cvs = cvs
+
+        if is_announce:
+            logger.info(f"[{rjcode}] 该作品为预售作品（announce）")
+
+        return metadata
+
+    def _normalize_html_date(self, text: str) -> str:
+        """从各种语言的日期文本中提取 YYYY-MM-DD
+
+        例如: "2026年07月26日" / "2026/07/26" / "2026-07-26" -> "2026-07-26"
+        """
+        match = re.search(r'(\d{4})\D{0,3}(\d{1,2})\D{0,3}(\d{1,2})', text)
+        if match:
+            return f"{match.group(1)}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
+        return text[:10]
     
     async def _fetch_from_asmr_one(self, rjcode: str) -> Optional[WorkMetadata]:
         """从 asmr.one API 获取元数据（DLsite 的备用源）"""
