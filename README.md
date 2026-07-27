@@ -17,21 +17,21 @@
 
 ### Windows 用户
 
-1. 从 [Releases](https://github.com/canforgive/KikoeruTool/releases) 下载最新版本
+1. 从 [Releases](https://github.com/GinatWiki/KikoeruTool/releases) 下载最新版本
 2. 解压后双击运行 `prekikoeru.exe`
 3. 浏览器访问 http://localhost:8000
 
 ### Docker 部署
 
 ```bash
-docker pull ghcr.io/canforgive/kikoerutool:latest
+docker pull ghcr.io/ginatwiki/kikoerutool:latest
 ```
 
 ```yaml
 version: '3'
 services:
   prekikoeru:
-    image: ghcr.io/canforgive/kikoerutool:latest
+    image: ghcr.io/ginatwiki/kikoerutool:latest
     container_name: prekikoeru
     ports:
       - "8000:8000"
@@ -81,7 +81,13 @@ prekikoeru/
 
 ## 许可证
 
-MIT License
+本项目代码采用 MIT License，**但以下部分除外**：
+
+- 前端界面主题（`frontend/src/styles/animal-theme.css`、`frontend/src/components/AcTitle.vue`）基于
+  [guokaigdg/animal-island-ui](https://github.com/guokaigdg/animal-island-ui) 的设计规范修改，
+  该部分遵循 [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) 协议。
+
+⚠️ **由于包含 CC BY-NC 4.0 授权的内容，本项目整体仅限个人非商业用途，禁止任何形式的商用。**
 
 ## 致谢
 
@@ -90,3 +96,4 @@ MIT License
 - [Sakyoriii/prekikoeru](https://github.com/Sakyoriii/prekikoeru)
 - [yodhcn/dlsite-doujin-renamer](https://github.com/yodhcn/dlsite-doujin-renamer)
 - [Number178/kikoeru-quasar](https://github.com/Number178/kikoeru-quasar)
+- [guokaigdg/animal-island-ui](https://github.com/guokaigdg/animal-island-ui) — 界面主题设计规范（CC BY-NC 4.0）

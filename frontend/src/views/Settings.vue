@@ -1484,11 +1484,41 @@
         <el-button size="large" @click="resetConfig">重置</el-button>
       </div>
     </el-form>
+
+    <!-- 关于与署名 -->
+    <el-card class="setting-card about-card">
+      <template #header>
+        <div class="card-header">
+          <span>关于</span>
+        </div>
+      </template>
+      <div class="about-content">
+        <p><strong>Prekikoeru</strong> v{{ appVersion }}</p>
+        <p class="about-desc">DLsite 音声作品智能整理工具（仅限个人非商业用途）</p>
+        <el-divider style="margin: 12px 0;" />
+        <p class="attrib-title">界面设计署名 / UI Design Attribution</p>
+        <p class="about-desc">
+          本项目的界面主题设计基于
+          <a href="https://github.com/guokaigdg/animal-island-ui" target="_blank" rel="noopener">animal-island-ui</a>
+          （作者: guokaigdg）的设计规范修改而来，原作品采用
+          <a href="https://creativecommons.org/licenses/by-nc/4.0/deed.zh-hans" target="_blank" rel="noopener">CC BY-NC 4.0</a>
+          协议授权。<strong>禁止商用</strong>。
+        </p>
+        <p class="about-desc">
+          The UI theme of this project is adapted from
+          <a href="https://github.com/guokaigdg/animal-island-ui" target="_blank" rel="noopener">animal-island-ui</a>
+          by guokaigdg, licensed under
+          <a href="https://creativecommons.org/licenses/by-nc/4.0/" target="_blank" rel="noopener">CC BY-NC 4.0</a>.
+          Commercial use is prohibited.
+        </p>
+      </div>
+    </el-card>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted } from 'vue'
+import pkg from '../../package.json'
 import { Folder, FolderOpened, Plus, Delete, Check, QuestionFilled, Tools, Warning, View, ArrowRight, Document, Connection, Key, Link, Search, User } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useConfigStore } from '../stores'
@@ -1496,6 +1526,7 @@ import { configApi, kikoeruApi, pathMappingApi, cleanupApi } from '../api'
 
 const configStore = useConfigStore()
 const loading = ref(false)
+const appVersion = pkg.version
 
 const defaultConfig = {
   storage: {
@@ -2492,6 +2523,34 @@ async function runArchiveCleanup() {
   font-size: 12px;
   color: #909399;
   margin-top: 4px;
+}
+
+.about-card {
+  margin-top: 24px;
+}
+
+.about-content p {
+  margin: 6px 0;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.attrib-title {
+  font-weight: 600;
+  color: var(--el-color-primary);
+}
+
+.about-desc {
+  color: #606266;
+}
+
+.about-content a {
+  color: var(--el-color-primary);
+  text-decoration: none;
+}
+
+.about-content a:hover {
+  text-decoration: underline;
 }
 
 .text-gray {

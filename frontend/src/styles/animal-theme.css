@@ -1,5 +1,16 @@
 /* ============================================================
-   Animal Crossing 主题（参考 animal-island-ui 设计规范）
+   Animal Crossing 主题（基于 animal-island-ui 设计规范修改）
+
+   署名 / Attribution (CC BY-NC 4.0 要求):
+   - 原作品: animal-island-ui
+     https://github.com/guokaigdg/animal-island-ui
+   - 作者: guokaigdg
+   - 协议: Creative Commons Attribution-NonCommercial 4.0
+     International (CC BY-NC 4.0)
+     https://creativecommons.org/licenses/by-nc/4.0/
+   - 变更说明: 本文件为依据其设计规范重写的 Element Plus
+     主题覆盖样式，含适应性修改。禁止商用。
+
    设计语言：暖羊皮纸底色 + 棕色文字 + 薄荷绿主色 + 胶囊形状
             + 3D 像素堆叠按钮阴影（任天堂按键手感）
    ============================================================ */

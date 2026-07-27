@@ -30,7 +30,7 @@ from ..config.settings import get_config
 app = FastAPI(
     title="Prekikoeru API",
     description="DLsite作品整理工具API",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 # ========== 健康检查 API ==========
@@ -40,7 +40,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "prekikoeru",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "timestamp": datetime.now().isoformat()
     }
 

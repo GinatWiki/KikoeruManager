@@ -24,7 +24,8 @@ const sizeMap = {
 
 <style scoped>
 /* 缎带标题：燕尾 + 3D 折叠（em-based，随 font-size 缩放）
-   参考 animal-island-ui Title 组件规范 */
+   基于 animal-island-ui (https://github.com/guokaigdg/animal-island-ui,
+   作者 guokaigdg, CC BY-NC 4.0 协议) Title 组件规范修改，禁止商用 */
 .ac-title {
   /* 配色变量（各色板在下方定义） */
   --rf: #19c8b9;
