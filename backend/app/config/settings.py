@@ -9,6 +9,7 @@ class StorageConfig(BaseModel):
     input_path: str = "/input"
     temp_path: str = "/temp"
     library_path: str = "/library"
+    real_library_path: str = ""  # 真库存文件夹路径（一键移库的目标，空表示未配置）
     processed_archives_path: str = "/processed"
     existing_folders_path: str = "/existing"  # 已存在文件夹目录（非软件解压的文件夹）
     asmr_subtitle_path: str = ""  # ASMR同步字幕文件夹路径

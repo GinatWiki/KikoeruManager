@@ -116,7 +116,7 @@
       <el-table
         ref="tableRef"
         v-if="folders.length > 0"
-        :data="filteredFolders"
+        :data="paginatedFolders"
         style="width: 100%"
         empty-text="暂无文件夹"
         row-key="path"
@@ -125,7 +125,7 @@
         @cell-click="handleCellClick"
         :row-class-name="getRowClassName"
       >
-        <el-table-column type="selection" width="55" />
+        <el-table-column type="selection" width="55" reserve-selection />
         
         <el-table-column prop="name" label="文件夹名" show-overflow-tooltip>
           <template #default="{ row }">
@@ -231,8 +231,18 @@
           </template>
         </el-table-column>
       </el-table>
+
+      <div class="pagination-container" v-if="filteredFolders.length > pageSize">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :page-sizes="[20, 50, 100, 200]"
+          :total="filteredFolders.length"
+          layout="total, sizes, prev, pager, next"
+        />
+      </div>
     </el-card>
-    
+
     <!-- 处理结果对话框 -->
     <el-dialog
       v-model="resultDialogVisible"
@@ -384,7 +394,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { Refresh, RefreshRight, Search, Folder, VideoPlay, Warning, Check, InfoFilled, Loading, Clock, Delete } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
@@ -438,19 +448,33 @@ const duplicateDetailData = ref(null)
 const selectedResolution = ref('')
 const currentConflictFolder = ref(null)
 
+// 分页
+const currentPage = ref(1)
+const pageSize = ref(50)
+
 // 过滤后的文件夹列表
 const filteredFolders = computed(() => {
   let result = folders.value
-  
+
   if (searchQuery.value) {
     const query = searchQuery.value.toLowerCase()
-    result = result.filter(folder => 
-      folder.name.toLowerCase().includes(query) || 
+    result = result.filter(folder =>
+      folder.name.toLowerCase().includes(query) ||
       (folder.rjcode && folder.rjcode.toLowerCase().includes(query))
     )
   }
-  
+
   return result
+})
+
+// 搜索时回到第一页
+watch(searchQuery, () => {
+  currentPage.value = 1
+})
+
+const paginatedFolders = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value
+  return filteredFolders.value.slice(start, start + pageSize.value)
 })
 
 async function refreshFolders() {
@@ -548,6 +572,7 @@ async function refreshFoldersWithOptions(forceRefresh = false) {
   loading.value = true
   folders.value = [] // 清空列表
   conflictCount.value = 0
+  currentPage.value = 1 // 重置分页
   
   try {
     const url = `/api/existing-folders/scan?check_duplicates=${checkDuplicates.value}&force_refresh=${forceRefresh}`
@@ -1127,6 +1152,12 @@ async function handleProcessSingle(row) {
   padding: 12px;
   background-color: #f5f7fa;
   border-radius: 4px;
+}
+
+.pagination-container {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
 }
 
 /* 选中行高亮 */

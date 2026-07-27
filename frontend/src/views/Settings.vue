@@ -70,8 +70,8 @@
         <el-row :gutter="20">
           <el-col :span="12">
             <el-form-item label="已存在文件夹目录">
-              <el-input 
-                v-model="config.storage.existing_folders_path" 
+              <el-input
+                v-model="config.storage.existing_folders_path"
                 placeholder="例如: D:\\prekikoeru\\test_data\\existing"
               >
                 <template #prefix>
@@ -80,6 +80,21 @@
               </el-input>
               <div class="form-tip">
                 存放已解压的文件夹（非软件处理的压缩包），也以 {RJCode} {work_name} 格式命名
+              </div>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="真库存文件夹（移库目标）">
+              <el-input
+                v-model="config.storage.real_library_path"
+                placeholder="例如: E:\\正式库存（留空则禁用移库功能）"
+              >
+                <template #prefix>
+                  <el-icon><Folder /></el-icon>
+                </template>
+              </el-input>
+              <div class="form-tip">
+                一键移库功能的目标目录。库存文件夹中处理完成的文件夹可一键移入此处；仅移动，目标已存在时跳过，绝不覆盖或删除
               </div>
             </el-form-item>
           </el-col>
@@ -1487,6 +1502,7 @@ const defaultConfig = {
     input_path: '/input',
     temp_path: '/temp',
     library_path: '/library',
+    real_library_path: '',
     asmr_subtitle_path: ''
   },
   processing: {

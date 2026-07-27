@@ -1793,6 +1793,144 @@ async def delete_library_file(request: Request):
         logger.error(f"删除失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
 
+def _validate_real_library_config(config):
+    """校验移库配置，返回 (暂存库真实路径, 真库存真实路径)
+
+    安全约束：
+    - 真库存必须已配置
+    - 两库路径不能相同，也不能互为子目录（防止把文件移进自身内部）
+    """
+    real_path = (config.storage.real_library_path or "").strip()
+    if not real_path:
+        raise HTTPException(status_code=400, detail="未配置真库存路径，请先在设置页配置")
+
+    library_path = config.storage.library_path
+    lib_real = os.path.realpath(library_path)
+    real_real = os.path.realpath(real_path)
+
+    if lib_real == real_real:
+        raise HTTPException(status_code=400, detail="真库存路径不能与暂存库路径相同")
+
+    try:
+        common = os.path.commonpath([lib_real, real_real])
+        if common in (lib_real, real_real):
+            raise HTTPException(status_code=400, detail="真库存路径与暂存库路径不能互为子目录")
+    except ValueError:
+        pass  # 不同盘符/驱动器，无包含关系，安全
+
+    return lib_real, real_real
+
+
+def _is_within_library(path: str, lib_real: str) -> bool:
+    """严格判断 path 是否位于暂存库内（解析符号链接后判断，防 ../ 逃逸）"""
+    try:
+        path_real = os.path.realpath(path)
+        return os.path.commonpath([path_real, lib_real]) == lib_real
+    except (ValueError, OSError):
+        return False
+
+
+@app.get("/api/library/real-library-status")
+async def get_real_library_status():
+    """获取真库存（移库目标）配置状态"""
+    try:
+        config = get_config()
+        real_path = (config.storage.real_library_path or "").strip()
+        status = {
+            "configured": bool(real_path),
+            "path": real_path,
+            "exists": os.path.isdir(real_path) if real_path else False,
+            "error": None,
+        }
+        if real_path:
+            try:
+                _validate_real_library_config(config)
+            except HTTPException as e:
+                status["error"] = e.detail
+        return status
+    except Exception as e:
+        logger.error(f"获取真库存状态失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"获取真库存状态失败: {str(e)}")
+
+
+@app.post("/api/library/move-to-real")
+async def move_to_real_library(request: Request):
+    """将暂存库中的文件/文件夹移动到真库存
+
+    安全设计（仅移动，绝不删除或覆盖）：
+    - 源路径必须严格位于暂存库内，且不能是暂存库根目录本身
+    - 目标路径保留相对于暂存库的子目录结构（分类层级原样保留）
+    - 目标已存在时跳过，不覆盖、不合并
+    - 同设备使用 os.rename 原子移动；跨设备 shutil.move 先完整复制再移除源
+    - dry_run=true 时只返回执行计划，不做任何改动
+    """
+    try:
+        data = await request.json()
+        paths = data.get("paths", [])
+        dry_run = data.get("dry_run", False)
+
+        if not isinstance(paths, list) or not paths:
+            raise HTTPException(status_code=400, detail="缺少要移动的路径列表")
+
+        config = get_config()
+        library_path = config.storage.library_path
+        lib_real, real_real = _validate_real_library_config(config)
+        real_path = config.storage.real_library_path.strip()
+
+        results = {"moved": [], "skipped": [], "failed": []}
+
+        for src in paths:
+            try:
+                # 1. 源必须严格在暂存库内，且不能是暂存库根本身
+                if not _is_within_library(src, lib_real):
+                    results["failed"].append({"path": src, "reason": "路径不在暂存库内，已拒绝"})
+                    continue
+                if os.path.realpath(src) == lib_real:
+                    results["failed"].append({"path": src, "reason": "不能移动暂存库根目录"})
+                    continue
+                if not os.path.exists(src):
+                    results["failed"].append({"path": src, "reason": "源不存在（可能已被移动）"})
+                    continue
+
+                # 2. 目标保留相对子目录结构
+                rel = os.path.relpath(src, library_path)
+                dst = os.path.join(real_path, rel)
+
+                # 3. 目标已存在 → 跳过，绝不覆盖
+                if os.path.exists(dst):
+                    results["skipped"].append({"path": src, "target": dst, "reason": "目标已存在，跳过（不覆盖）"})
+                    continue
+
+                if dry_run:
+                    results["moved"].append({"path": src, "target": dst, "planned": True})
+                    continue
+
+                # 4. 执行移动（不删除任何其他内容）
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                try:
+                    os.rename(src, dst)  # 同设备：原子移动
+                except OSError:
+                    shutil.move(src, dst)  # 跨设备：完整复制后才移除源
+                logger.info(f"[移库] {src} -> {dst}")
+                results["moved"].append({"path": src, "target": dst})
+            except Exception as e:
+                logger.error(f"[移库] 移动失败 {src}: {e}", exc_info=True)
+                results["failed"].append({"path": src, "reason": str(e)})
+
+        if not dry_run:
+            logger.info(
+                f"[移库] 完成: 移动 {len(results['moved'])} 项, "
+                f"跳过 {len(results['skipped'])} 项, 失败 {len(results['failed'])} 项"
+            )
+        return results
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"移库失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"移库失败: {str(e)}")
+
+
 @app.post("/api/library/open-folder")
 async def open_library_folder(request: Request):
     """打开文件夹位置"""

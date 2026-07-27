@@ -27,7 +27,7 @@
     <el-card v-loading="loading" :element-loading-text="loadingText">
       <el-table 
         ref="conflictsTable"
-        :data="conflicts" 
+        :data="paginatedConflicts"
         style="width: 100%"
         :header-cell-style="{ 'white-space': 'nowrap' }"
         @selection-change="handleSelectionChange"
@@ -163,34 +163,48 @@
       </el-table>
       
       <el-empty v-if="conflicts.length === 0" description="没有问题作品" />
+
+      <div class="pagination-container" v-if="conflicts.length > pageSize">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :page-sizes="[10, 20, 50, 100]"
+          :total="conflicts.length"
+          layout="total, sizes, prev, pager, next"
+        />
+      </div>
     </el-card>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { conflictApi } from '../api'
+import { usePoller } from '../stores/poller'
 
 const conflicts = ref([])
+// 分页
+const currentPage = ref(1)
+const pageSize = ref(20)
+
+const paginatedConflicts = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value
+  return conflicts.value.slice(start, start + pageSize.value)
+})
 const loading = ref(false)
 const loadingText = ref('加载中...')
 const selectedConflicts = ref([])
 const conflictsTable = ref(null)
 const processingIds = ref(new Set())
 const kikoeruUrl = ref('')
-let intervalId = null
 
 onMounted(async () => {
   await fetchConflicts()
-  intervalId = setInterval(fetchConflicts, 5000)
 })
 
-onUnmounted(() => {
-  if (intervalId) {
-    clearInterval(intervalId)
-  }
-})
+// 统一轮询调度（每 2 个周期 ≈ 6 秒，卸载自动注销）
+usePoller('conflicts-list', fetchConflicts, 2)
 
 async function fetchConflicts() {
   try {
@@ -554,11 +568,17 @@ async function handleBatchAction(action) {
 
 .kikoeru-link {
   margin-left: 8px;
-  color: #409eff;
+  color: #11a89b;
   text-decoration: none;
 }
 .kikoeru-link:hover {
   text-decoration: underline;
-  color: #66b1ff;
+  color: #19c8b9;
+}
+
+.pagination-container {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
 }
 </style>

@@ -1,12 +1,14 @@
 <template>
   <div class="dashboard">
-    <h1 class="page-title">概览</h1>
-    
+    <div class="title-row">
+      <AcTitle size="large" color="teal">工作台</AcTitle>
+    </div>
+
     <!-- 统计卡片 -->
     <el-row :gutter="20" class="stats-row">
       <el-col :span="6">
-        <el-card class="stat-card">
-          <div class="stat-icon" style="background-color: #3b82f6;">
+        <el-card class="stat-card clickable" @click="$router.push('/tasks')">
+          <div class="stat-icon" style="background-color: #889df0;">
             <el-icon :size="24"><Document /></el-icon>
           </div>
           <div class="stat-info">
@@ -15,10 +17,10 @@
           </div>
         </el-card>
       </el-col>
-      
+
       <el-col :span="6">
-        <el-card class="stat-card">
-          <div class="stat-icon" style="background-color: #f59e0b;">
+        <el-card class="stat-card clickable" @click="$router.push('/tasks')">
+          <div class="stat-icon" style="background-color: #f7cd67;">
             <el-icon :size="24"><Loading /></el-icon>
           </div>
           <div class="stat-info">
@@ -27,22 +29,22 @@
           </div>
         </el-card>
       </el-col>
-      
+
       <el-col :span="6">
         <el-card class="stat-card clickable" @click="$router.push('/library')">
-          <div class="stat-icon" style="background-color: #10b981;">
+          <div class="stat-icon" style="background-color: #8ac68a;">
             <el-icon :size="24"><CircleCheck /></el-icon>
           </div>
           <div class="stat-info">
             <div class="stat-value">{{ stats.completed }}</div>
-            <div class="stat-label">已完成（点击查看库文件）</div>
+            <div class="stat-label">已完成（查看库存）</div>
           </div>
         </el-card>
       </el-col>
-      
+
       <el-col :span="6">
-        <el-card class="stat-card">
-          <div class="stat-icon" style="background-color: #ef4444;">
+        <el-card class="stat-card clickable" @click="$router.push('/conflicts')">
+          <div class="stat-icon" style="background-color: #fc736d;">
             <el-icon :size="24"><Warning /></el-icon>
           </div>
           <div class="stat-info">
@@ -52,7 +54,7 @@
         </el-card>
       </el-col>
     </el-row>
-    
+
     <!-- 快捷操作栏 -->
     <el-card class="action-card">
       <template #header>
@@ -99,7 +101,120 @@
       <el-divider />
       <FileUploader @upload-success="handleUploadSuccess" />
     </el-card>
-    
+
+    <!-- 工作台：密码入库 / 已有文件夹 / 同步下载 -->
+    <el-row :gutter="20" class="workbench-row">
+      <!-- 密码快速入库 -->
+      <el-col :span="10">
+        <el-card class="workbench-card password-card">
+          <template #header>
+            <div class="card-header">
+              <span><el-icon><Lock /></el-icon> 密码快速入库</span>
+              <el-button link type="primary" @click="$router.push('/passwords')">
+                管理密码库
+              </el-button>
+            </div>
+          </template>
+          <el-input
+            v-model="quickImportText"
+            type="textarea"
+            :rows="4"
+            placeholder="每行一个密码，粘贴后点击下方按钮即可（自动匹配RJ号）&#10;支持格式：纯密码 / RJ号,密码 / 文件名 密码"
+            class="quick-import-input"
+          />
+          <div class="quick-import-footer">
+            <span v-if="quickImportResult" class="quick-import-result">{{ quickImportResult }}</span>
+            <span v-else class="quick-import-hint">
+              {{ quickImportCount > 0 ? `待导入 ${quickImportCount} 个` : '粘贴密码文本即可' }}
+            </span>
+            <el-button
+              type="primary"
+              @click="handleQuickImport"
+              :loading="quickImporting"
+              :disabled="quickImportCount === 0"
+            >
+              <el-icon><Key /></el-icon>
+              一键入库{{ quickImportCount > 0 ? ` (${quickImportCount})` : '' }}
+            </el-button>
+          </div>
+        </el-card>
+      </el-col>
+
+      <!-- 已有文件夹 -->
+      <el-col :span="7">
+        <el-card class="workbench-card clickable-card" @click="$router.push('/existing-folders')">
+          <div class="entry-card-content">
+            <div class="entry-icon" style="background-color: #e59266;">
+              <el-icon :size="26"><Folder /></el-icon>
+            </div>
+            <div class="entry-info">
+              <div class="entry-title">已有文件夹</div>
+              <div class="entry-desc">
+                <template v-if="existingFoldersCount !== null">
+                  共 {{ existingFoldersCount }} 个待处理
+                </template>
+                <template v-else>加载中...</template>
+              </div>
+            </div>
+            <el-icon class="entry-arrow"><ArrowRight /></el-icon>
+          </div>
+        </el-card>
+
+        <!-- 同步下载 -->
+        <el-card class="workbench-card clickable-card" @click="$router.push('/asmr-sync')">
+          <div class="entry-card-content">
+            <div class="entry-icon" style="background-color: #b77dee;">
+              <el-icon :size="26"><Download /></el-icon>
+            </div>
+            <div class="entry-info">
+              <div class="entry-title">同步下载</div>
+              <div class="entry-desc">
+                <template v-if="asmrStatus">
+                  {{ asmrStatus.processing + asmrStatus.pending }} 进行中 / {{ asmrStatus.waiting_retry }} 待重试
+                </template>
+                <template v-else>加载中...</template>
+              </div>
+            </div>
+            <el-icon class="entry-arrow"><ArrowRight /></el-icon>
+          </div>
+        </el-card>
+      </el-col>
+
+      <!-- 监视器状态 -->
+      <el-col :span="7">
+        <el-card class="workbench-card watcher-card">
+          <div class="entry-card-content">
+            <div class="entry-icon" :style="{ backgroundColor: watcherRunning ? '#8ac68a' : '#c4b89e' }">
+              <el-icon :size="26"><View v-if="watcherRunning" /><Hide v-else /></el-icon>
+            </div>
+            <div class="entry-info">
+              <div class="entry-title">目录监视器</div>
+              <div class="entry-desc">{{ watcherRunning ? '正在监视输入目录' : '已停止' }}</div>
+            </div>
+            <el-switch
+              :model-value="watcherRunning"
+              @change="handleWatcherToggle"
+              @click.stop
+            />
+          </div>
+        </el-card>
+
+        <!-- 日志入口 -->
+        <el-card class="workbench-card clickable-card" @click="$router.push('/logs')">
+          <div class="entry-card-content">
+            <div class="entry-icon" style="background-color: #9a835a;">
+              <el-icon :size="26"><Document /></el-icon>
+            </div>
+            <div class="entry-info">
+              <div class="entry-title">运行日志</div>
+              <div class="entry-desc">查看处理日志与错误信息</div>
+            </div>
+            <el-icon class="entry-arrow"><ArrowRight /></el-icon>
+          </div>
+        </el-card>
+      </el-col>
+    </el-row>
+
     <!-- 当前任务 -->
     <el-card class="tasks-card">
       <template #header>
@@ -108,22 +223,22 @@
           <el-button link @click="$router.push('/tasks')">查看全部</el-button>
         </div>
       </template>
-      
+
       <el-table :data="recentTasks" v-loading="loading" style="width: 100%">
         <el-table-column prop="id" label="ID" width="80">
           <template #default="{ row }">
             <span class="task-id">{{ row.id.slice(0, 8) }}</span>
           </template>
         </el-table-column>
-        
+
         <el-table-column prop="source_path" label="源文件" show-overflow-tooltip />
-        
+
         <el-table-column prop="type" label="类型" width="100">
           <template #default="{ row }">
             <el-tag size="small">{{ getTaskTypeLabel(row.type) }}</el-tag>
           </template>
         </el-table-column>
-        
+
         <el-table-column prop="status" label="状态" width="100">
           <template #default="{ row }">
             <el-tag :type="getStatusType(row.status)" size="small">
@@ -131,12 +246,12 @@
             </el-tag>
           </template>
         </el-table-column>
-        
+
         <el-table-column prop="progress" label="进度" width="200">
           <template #default="{ row }">
             <div class="progress-wrapper">
-              <el-progress 
-                :percentage="row.progress" 
+              <el-progress
+                :percentage="row.progress"
                 :status="getProgressStatus(row.status)"
                 :stroke-width="16"
               />
@@ -144,16 +259,16 @@
             </div>
           </template>
         </el-table-column>
-        
+
         <el-table-column label="操作" width="150" fixed="right">
           <template #default="{ row }">
             <el-button-group v-if="row.status === 'processing'">
               <el-button size="small" @click="pauseTask(row.id)">暂停</el-button>
               <el-button size="small" type="danger" @click="cancelTask(row.id)">取消</el-button>
             </el-button-group>
-            <el-button 
-              v-else-if="row.status === 'paused'" 
-              size="small" 
+            <el-button
+              v-else-if="row.status === 'paused'"
+              size="small"
               type="primary"
               @click="resumeTask(row.id)"
             >
@@ -163,7 +278,7 @@
         </el-table-column>
       </el-table>
     </el-card>
-    
+
     <!-- 已处理压缩包 -->
     <el-card class="archives-card">
       <template #header>
@@ -182,7 +297,7 @@
                 <el-icon><Search /></el-icon>
               </template>
             </el-input>
-            
+
             <!-- 排序选择器 -->
             <el-select v-model="archiveSortBy" style="width: 140px; margin-right: 8px;" @change="handleArchiveSortChange">
               <el-option label="处理时间" value="processed_at" />
@@ -191,10 +306,10 @@
               <el-option label="处理次数" value="process_count" />
               <el-option label="状态" value="status" />
             </el-select>
-            
+
             <!-- 排序方向 -->
-            <el-button 
-              link 
+            <el-button
+              link
               @click="toggleArchiveSortOrder"
               :title="archiveSortOrder === 'desc' ? '降序' : '升序'"
             >
@@ -203,20 +318,20 @@
                 <SortUp v-else />
               </el-icon>
             </el-button>
-            
+
             <el-button link @click="handleScanProcessedArchives" :loading="archivesLoading">
               <el-icon><Refresh /></el-icon>扫描并刷新
             </el-button>
-            <el-button link @click="showAllArchives = !showAllArchives">
+            <el-button link @click="toggleShowAllArchives">
               {{ showAllArchives ? '收起' : '查看全部' }}
             </el-button>
           </div>
         </div>
       </template>
-      
-      <el-table 
-        :data="displayedArchives" 
-        v-loading="archivesLoading" 
+
+      <el-table
+        :data="displayedArchives"
+        v-loading="archivesLoading"
         style="width: 100%"
         empty-text="暂无已处理压缩包"
         row-key="id"
@@ -232,14 +347,14 @@
             </div>
           </template>
         </el-table-column>
-        
+
         <el-table-column prop="rjcode" label="RJ号" width="120">
           <template #default="{ row }">
             <el-tag type="primary" size="small" v-if="row.rjcode">{{ row.rjcode }}</el-tag>
             <span v-else class="text-gray">-</span>
           </template>
         </el-table-column>
-        
+
         <el-table-column prop="filename" label="文件名" show-overflow-tooltip>
           <template #default="{ row }">
             {{ row.filename }}
@@ -248,40 +363,40 @@
             </el-tag>
           </template>
         </el-table-column>
-        
+
         <el-table-column prop="file_size" label="大小" width="100">
           <template #default="{ row }">
             {{ formatFileSize(row.file_size) }}
           </template>
         </el-table-column>
-        
+
         <el-table-column prop="process_count" label="处理次数" width="100">
           <template #default="{ row }">
             <el-tag type="info" size="small">{{ row.process_count || 1 }} 次</el-tag>
           </template>
         </el-table-column>
-        
+
         <el-table-column prop="processed_at" label="处理时间" width="160">
           <template #default="{ row }">
             <span class="time-text">{{ formatDate(row.processed_at) }}</span>
           </template>
         </el-table-column>
-        
+
         <el-table-column prop="status" label="状态" width="100">
           <template #default="{ row }">
-            <el-tag 
-              :type="row.status === 'completed' ? 'success' : (row.status === 'reprocessing' ? 'warning' : 'info')" 
+            <el-tag
+              :type="row.status === 'completed' ? 'success' : (row.status === 'reprocessing' ? 'warning' : 'info')"
               size="small"
             >
               {{ row.status === 'completed' ? '已完成' : (row.status === 'reprocessing' ? '重新处理中' : '处理中') }}
             </el-tag>
           </template>
         </el-table-column>
-        
+
         <el-table-column label="操作" width="120" fixed="right">
           <template #default="{ row }">
-            <el-button 
-              size="small" 
+            <el-button
+              size="small"
               type="primary"
               @click="reprocessArchive(row.id)"
               :loading="reprocessingId === row.id"
@@ -291,17 +406,29 @@
           </template>
         </el-table-column>
       </el-table>
+
+      <!-- 查看全部模式下的分页 -->
+      <div class="pagination-container" v-if="showAllArchives && groupedArchives.length > archivePageSize">
+        <el-pagination
+          v-model:current-page="archiveCurrentPage"
+          :page-size="archivePageSize"
+          :total="groupedArchives.length"
+          layout="total, prev, pager, next"
+        />
+      </div>
     </el-card>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, computed } from 'vue'
-import { Document, Loading, CircleCheck, Warning, Search, VideoPlay, VideoPause, Refresh, SortDown, SortUp } from '@element-plus/icons-vue'
+import { ref, onMounted, computed } from 'vue'
+import { Document, Loading, CircleCheck, Warning, Search, VideoPlay, VideoPause, Refresh, SortDown, SortUp, Lock, Key, Folder, Download, ArrowRight, View, Hide } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useTaskStore } from '../stores'
-import { conflictApi, scanApi, watcherApi, processedArchiveApi } from '../api'
+import { usePoller } from '../stores/poller'
+import { conflictApi, scanApi, watcherApi, processedArchiveApi, passwordApi, existingFolderApi, asmrSyncApi } from '../api'
 import FileUploader from '../components/FileUploader.vue'
+import AcTitle from '../components/AcTitle.vue'
 
 const taskStore = useTaskStore()
 const loading = ref(false)
@@ -324,23 +451,34 @@ const showAllArchives = ref(false)
 const archiveSearchQuery = ref('')
 const archiveSortBy = ref('processed_at')
 const archiveSortOrder = ref('desc')
+const archiveCurrentPage = ref(1)
+const archivePageSize = 20
 let archiveSearchTimeout = null
+
+// 工作台：密码快速入库
+const quickImportText = ref('')
+const quickImporting = ref(false)
+const quickImportResult = ref('')
+
+// 工作台：入口卡片数据
+const existingFoldersCount = ref(null)
+const asmrStatus = ref(null)
 
 // 合并分卷压缩包组
 const groupedArchives = computed(() => {
   const groups = new Map()
   const singles = []
-  
+
   archives.value.forEach(archive => {
     const filename = archive.filename
     // 检查是否是分卷压缩包（支持 .part1.rar, .part2.rar, .part1.exe 等）
     const volumeMatch = filename.match(/^(.*)\.part(\d+)\.(rar|zip|7z|exe)$/i)
-    
+
     if (volumeMatch) {
       // 提取基础组名（如：RJ01207739，不包含 .part 和扩展名）
       const baseName = volumeMatch[1]
       const groupKey = baseName + '_volume_group'
-      
+
       if (!groups.has(groupKey)) {
         groups.set(groupKey, {
           id: archive.id,
@@ -356,11 +494,11 @@ const groupedArchives = computed(() => {
           volumes: []
         })
       }
-      
+
       const group = groups.get(groupKey)
       group.volumes.push(archive)
       group.file_size += (archive.file_size || 0)
-      
+
       // 使用最新的处理时间和状态（使用 Date 对象比较，避免字符串比较问题）
       const archiveTime = archive.processed_at ? new Date(archive.processed_at).getTime() : 0
       const groupTime = group.processed_at ? new Date(group.processed_at).getTime() : 0
@@ -386,40 +524,45 @@ const groupedArchives = computed(() => {
       })
     }
   })
-  
+
   // 合并组和非分卷文件
   const result = [...groups.values(), ...singles]
-  
+
   // 按处理时间排序（降序，最新的在前）
   result.sort((a, b) => {
     const timeA = a.processed_at ? new Date(a.processed_at).getTime() : 0
     const timeB = b.processed_at ? new Date(b.processed_at).getTime() : 0
     return timeB - timeA
   })
-  
+
   return result
 })
 
-// 显示的归档列表（根据showAllArchives控制数量）
+// 显示的归档列表（默认前5条，查看全部时分页显示）
 const displayedArchives = computed(() => {
   if (showAllArchives.value) {
-    return groupedArchives.value
+    const start = (archiveCurrentPage.value - 1) * archivePageSize
+    return groupedArchives.value.slice(start, start + archivePageSize)
   }
   return groupedArchives.value.slice(0, 5)
 })
 
-let intervalId
+// 待导入密码数量
+const quickImportCount = computed(() => {
+  const text = quickImportText.value.trim()
+  if (!text) return 0
+  return text.split('\n').filter(l => l.trim()).length
+})
 
 onMounted(async () => {
   await refreshData()
   await fetchWatcherStatus()
   await fetchProcessedArchives()
-  intervalId = setInterval(refreshData, 3000)
+  await fetchWorkbenchData()
 })
 
-onUnmounted(() => {
-  if (intervalId) clearInterval(intervalId)
-})
+// 统一轮询调度（卸载自动注销）
+usePoller('dashboard', refreshData)
 
 let previousCompletedCount = 0
 let lastRefreshTime = 0
@@ -427,26 +570,26 @@ let lastRefreshTime = 0
 async function refreshData() {
   await taskStore.fetchTasks()
   recentTasks.value = taskStore.tasks.slice(0, 5)
-  
+
   // 获取当前完成的任务数
-  const currentCompletedCount = recentTasks.value.filter(task => 
+  const currentCompletedCount = recentTasks.value.filter(task =>
     task.status === 'completed' || task.status === 'COMPLETED'
   ).length
-  
+
   // 如果完成的任务数增加了，或者距离上次刷新已处理压缩包已超过30秒，则刷新
   const now = Date.now()
-  const shouldRefreshArchives = 
-    currentCompletedCount > previousCompletedCount || 
+  const shouldRefreshArchives =
+    currentCompletedCount > previousCompletedCount ||
     (now - lastRefreshTime > 30000 && recentTasks.value.length > 0)
-  
+
   if (shouldRefreshArchives) {
     console.log('检测到任务状态变化，刷新已处理压缩包列表')
     await fetchProcessedArchives()
     lastRefreshTime = now
   }
-  
+
   previousCompletedCount = currentCompletedCount
-  
+
   // 获取问题作品数量
   let conflictCount = 0
   try {
@@ -455,13 +598,54 @@ async function refreshData() {
   } catch (error) {
     console.error('获取问题作品数量失败:', error)
   }
-  
+
   stats.value = {
     pending: taskStore.pendingTasks.length,
     processing: taskStore.processingTasks.length,
     completed: taskStore.completedTasks.length,
     conflicts: conflictCount
   }
+}
+
+// 工作台入口数据（已有文件夹数量 / 同步下载状态）
+async function fetchWorkbenchData() {
+  try {
+    const folders = await existingFolderApi.list()
+    existingFoldersCount.value = Array.isArray(folders) ? folders.length : 0
+  } catch (error) {
+    console.error('获取已有文件夹数量失败:', error)
+    existingFoldersCount.value = 0
+  }
+  try {
+    asmrStatus.value = await asmrSyncApi.status()
+  } catch (error) {
+    console.error('获取同步下载状态失败:', error)
+  }
+}
+
+// 密码快速入库（一键完成）
+async function handleQuickImport() {
+  const text = quickImportText.value.trim()
+  if (!text) return
+
+  quickImporting.value = true
+  quickImportResult.value = ''
+  try {
+    const { imported, skipped } = await passwordApi.importFromText(text)
+    quickImportText.value = ''
+    quickImportResult.value = `已入库 ${imported} 个` + (skipped > 0 ? `，跳过重复 ${skipped} 个` : '')
+    ElMessage.success(`密码入库成功：${imported} 个`)
+  } catch (error) {
+    console.error('密码入库失败:', error)
+    ElMessage.error('入库失败: ' + (error.response?.data?.detail || error.message))
+  } finally {
+    quickImporting.value = false
+  }
+}
+
+function toggleShowAllArchives() {
+  showAllArchives.value = !showAllArchives.value
+  archiveCurrentPage.value = 1
 }
 
 function getTaskTypeLabel(type) {
@@ -590,10 +774,6 @@ async function fetchProcessedArchives() {
     }
     const data = await processedArchiveApi.list(params)
     archives.value = data.archives || []
-    console.log('获取到已处理压缩包:', archives.value.length, '条记录')
-    if (archives.value.length > 0) {
-      console.log('第一条记录:', archives.value[0].filename, '时间:', archives.value[0].processed_at)
-    }
   } catch (error) {
     console.error('获取已处理压缩包列表失败:', error)
     ElMessage.error('获取已处理压缩包列表失败')
@@ -608,18 +788,21 @@ function handleArchiveSearch() {
     clearTimeout(archiveSearchTimeout)
   }
   archiveSearchTimeout = setTimeout(() => {
+    archiveCurrentPage.value = 1
     fetchProcessedArchives()
   }, 500)
 }
 
 // 处理排序字段变化
 function handleArchiveSortChange() {
+  archiveCurrentPage.value = 1
   fetchProcessedArchives()
 }
 
 // 切换排序方向
 function toggleArchiveSortOrder() {
   archiveSortOrder.value = archiveSortOrder.value === 'desc' ? 'asc' : 'desc'
+  archiveCurrentPage.value = 1
   fetchProcessedArchives()
 }
 
@@ -681,11 +864,8 @@ function formatDate(dateString) {
   margin: 0 auto;
 }
 
-.page-title {
-  margin-bottom: 24px;
-  font-size: 28px;
-  font-weight: 600;
-  color: #1e293b;
+.title-row {
+  margin-bottom: 20px;
 }
 
 .stats-row {
@@ -701,7 +881,7 @@ function formatDate(dateString) {
 .stat-icon {
   width: 48px;
   height: 48px;
-  border-radius: 12px;
+  border-radius: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -715,15 +895,16 @@ function formatDate(dateString) {
 
 .stat-value {
   font-size: 28px;
-  font-weight: 700;
-  color: #1e293b;
+  font-weight: 800;
+  color: #794f27;
   line-height: 1;
 }
 
 .stat-label {
   font-size: 14px;
-  color: #64748b;
+  color: #9f927d;
   margin-top: 4px;
+  font-weight: 600;
 }
 
 .upload-card {
@@ -737,8 +918,9 @@ function formatDate(dateString) {
 }
 
 .task-id {
-  font-family: monospace;
-  color: #64748b;
+  font-family: 'Nunito', monospace;
+  font-weight: 700;
+  color: #9f927d;
 }
 
 .progress-wrapper {
@@ -749,7 +931,7 @@ function formatDate(dateString) {
 
 .progress-text {
   font-size: 12px;
-  color: #64748b;
+  color: #9f927d;
 }
 
 .action-card {
@@ -771,6 +953,101 @@ function formatDate(dateString) {
   margin-right: 8px;
 }
 
+/* 工作台区域 */
+.workbench-row {
+  margin-bottom: 24px;
+}
+
+.workbench-card {
+  margin-bottom: 20px;
+}
+
+.workbench-card .card-header .el-icon {
+  margin-right: 6px;
+  vertical-align: -2px;
+}
+
+/* 密码快速入库 */
+.password-card {
+  height: calc(100% - 20px);
+}
+
+.quick-import-input {
+  margin-bottom: 12px;
+}
+
+.quick-import-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.quick-import-hint {
+  font-size: 13px;
+  color: #9f927d;
+  font-weight: 600;
+}
+
+.quick-import-result {
+  font-size: 13px;
+  color: #6fba2c;
+  font-weight: 700;
+}
+
+/* 入口卡片 */
+.clickable-card {
+  cursor: pointer;
+}
+
+.clickable-card:hover {
+  transform: translateY(-2px);
+}
+
+.entry-card-content {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.entry-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.entry-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.entry-title {
+  font-size: 16px;
+  font-weight: 800;
+  color: #794f27;
+}
+
+.entry-desc {
+  font-size: 13px;
+  color: #9f927d;
+  font-weight: 600;
+  margin-top: 2px;
+}
+
+.entry-arrow {
+  color: #c4b89e;
+  font-size: 18px;
+}
+
+.clickable-card:hover .entry-arrow {
+  color: #19c8b9;
+}
+
 .archives-card {
   margin-top: 24px;
 }
@@ -779,30 +1056,34 @@ function formatDate(dateString) {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .archives-header-actions {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex-wrap: wrap;
 }
 
-.archives-card .el-button-group {
-  margin-left: 8px;
+.pagination-container {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
 }
 
 .text-gray {
-  color: #94a3b8;
+  color: #c4b89e;
 }
 
 .stat-card.clickable {
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .stat-card.clickable:hover {
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
 .stat-card.clickable:active {
@@ -815,22 +1096,23 @@ function formatDate(dateString) {
 
 .volume-list {
   padding: 12px 24px;
-  background-color: #f8f9fa;
-  border-radius: 4px;
+  background-color: rgba(248, 248, 240, 0.8);
+  border-radius: 12px;
   margin: 8px 0;
 }
 
 .volume-list-title {
-  font-weight: 600;
-  color: #606266;
+  font-weight: 700;
+  color: #794f27;
   margin-bottom: 8px;
   font-size: 13px;
 }
 
 .time-text {
   font-size: 12px;
-  color: #909399;
-  font-family: 'Consolas', 'Monaco', monospace;
+  color: #9f927d;
+  font-family: 'Nunito', 'Consolas', monospace;
+  font-weight: 600;
 }
 
 .volume-item {
@@ -838,22 +1120,23 @@ function formatDate(dateString) {
   justify-content: space-between;
   padding: 6px 12px;
   margin: 4px 0;
-  background-color: white;
-  border-radius: 4px;
+  background-color: #fffdf5;
+  border-radius: 8px;
   font-size: 13px;
 }
 
 .volume-name {
-  color: #303133;
-  font-family: 'Consolas', 'Monaco', monospace;
+  color: #725d42;
+  font-family: 'Nunito', 'Consolas', monospace;
+  font-weight: 600;
 }
 
 .volume-size {
-  color: #909399;
+  color: #9f927d;
   font-size: 12px;
 }
 
 :deep(.el-table__expand-icon) {
-  color: #409eff;
+  color: #19c8b9;
 }
 </style>

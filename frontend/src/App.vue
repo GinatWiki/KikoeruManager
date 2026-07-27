@@ -11,9 +11,6 @@
         :default-active="$route.path"
         router
         class="sidebar-menu"
-        background-color="#1e293b"
-        text-color="#94a3b8"
-        active-text-color="#ffffff"
       >
         <el-menu-item index="/">
           <el-icon><HomeFilled /></el-icon>
@@ -89,9 +86,10 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted } from 'vue'
 import { Box, HomeFilled, List, WarningFilled, Setting, Document, Lock, Folder, Download } from '@element-plus/icons-vue'
 import { useWatcherStore } from './stores'
+import { usePoller } from './stores/poller'
 
 // 直接定义版本号（确保每次构建都会更新）
 const appVersion = '1.7.6'
@@ -100,16 +98,12 @@ const watcherStore = useWatcherStore()
 const conflictCount = ref(0)
 const watcherStatus = ref({ is_running: false, watch_path: '', pending_files: [] })
 
-let intervalId
-
 onMounted(async () => {
   await refreshStatus()
-  intervalId = setInterval(refreshStatus, 3000)
 })
 
-onUnmounted(() => {
-  if (intervalId) clearInterval(intervalId)
-})
+// 统一轮询调度（组件卸载自动注销）
+usePoller('watcher-status', refreshStatus)
 
 async function refreshStatus() {
   await watcherStore.fetchStatus()
@@ -131,8 +125,12 @@ async function toggleWatcher() {
   height: 100vh;
 }
 
+/* 侧边栏：暖米色 + 淡波点（动森壁纸感） */
 .sidebar {
-  background-color: #1e293b;
+  background:
+    radial-gradient(circle, rgba(159, 146, 125, 0.08) 1.5px, transparent 1.5px) 0 0 / 24px 24px,
+    #f5efdc;
+  border-right: 2px dashed #e3dccb;
   display: flex;
   flex-direction: column;
 }
@@ -143,24 +141,59 @@ async function toggleWatcher() {
   align-items: center;
   justify-content: center;
   padding: 0 20px;
-  border-bottom: 1px solid #334155;
-  color: #ffffff;
+  border-bottom: 2px dashed #e3dccb;
+  color: #794f27;
+}
+
+.logo .el-icon {
+  color: #19c8b9;
 }
 
 .logo-text {
   margin-left: 12px;
   font-size: 20px;
-  font-weight: 600;
+  font-weight: 800;
+  letter-spacing: 0.02em;
 }
 
+/* 菜单：圆角项 + 动森demo站配色（active 长春花蓝） */
 .sidebar-menu {
   flex: 1;
   border-right: none;
+  background: transparent;
+  padding: 8px 0;
+}
+
+.sidebar-menu :deep(.el-menu-item) {
+  height: 44px;
+  line-height: 44px;
+  margin: 2px 8px;
+  padding-left: 20px !important;
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #8a7b66;
+  transition: all 0.15s;
+}
+
+.sidebar-menu :deep(.el-menu-item .el-icon) {
+  color: inherit;
+}
+
+.sidebar-menu :deep(.el-menu-item:hover) {
+  background: #d6dff0;
+  color: #5a6b8c;
+}
+
+.sidebar-menu :deep(.el-menu-item.is-active) {
+  background: #b7c6e5;
+  color: #fff;
+  font-weight: 700;
 }
 
 .sidebar-footer {
   padding: 16px;
-  border-top: 1px solid #334155;
+  border-top: 2px dashed #e3dccb;
 }
 
 .watcher-status {
@@ -177,20 +210,22 @@ async function toggleWatcher() {
   margin-top: 8px;
   text-align: center;
   padding-top: 8px;
-  border-top: 1px solid #334155;
+  border-top: 2px dashed #e3dccb;
 }
 
 .version-text {
   font-size: 12px;
-  color: #94a3b8;
-  background-color: #0f172a;
-  padding: 2px 8px;
-  border-radius: 4px;
+  font-weight: 700;
+  color: #9f927d;
+  background-color: #efe9d5;
+  padding: 3px 10px;
+  border-radius: 10px;
   display: inline-block;
 }
 
 .main-content {
-  background-color: #f1f5f9;
+  /* 页面背景由 body 提供（淡波点纹理） */
+  background-color: transparent;
   padding: 20px;
   overflow-y: auto;
   min-width: 0; /* 防止 flex 子元素溢出 */
@@ -201,18 +236,18 @@ async function toggleWatcher() {
   .app-container {
     flex-direction: column;
   }
-  
+
   .sidebar {
     width: 100% !important;
     height: auto;
     max-height: 60px;
     overflow: hidden;
   }
-  
+
   .sidebar.expanded {
     max-height: none;
   }
-  
+
   .main-content {
     padding: 10px;
   }

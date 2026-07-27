@@ -324,10 +324,11 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search, Download, Folder, Loading, Refresh, Document, WarningFilled, Clock } from '@element-plus/icons-vue'
 import { asmrSyncApi, configApi } from '../api'
+import { usePoller } from '../stores/poller'
 
 const subtitleFolder = ref('')
 const scanning = ref(false)
@@ -341,7 +342,6 @@ const previewLoading = ref(false)
 const previewData = ref(null)
 const tasks = ref([])
 const nextRetryTime = ref('')
-let statusInterval = null
 
 // 计算属性：分离等待重试的任务和活动任务
 const waitingRetryTasks = computed(() => {
@@ -579,16 +579,14 @@ onMounted(async () => {
   await loadSavedFolder()
   await loadWaitingRetryTasks()
   refreshStatus()
-  statusInterval = setInterval(refreshStatus, 3000)
   // 自动扫描字幕文件夹
   if (subtitleFolder.value) {
     scanFolder()
   }
 })
 
-onUnmounted(() => {
-  if (statusInterval) clearInterval(statusInterval)
-})
+// 统一轮询调度（卸载自动注销）
+usePoller('asmr-sync-status', refreshStatus)
 </script>
 
 <style scoped>

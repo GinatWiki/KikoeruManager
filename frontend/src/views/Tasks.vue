@@ -11,8 +11,8 @@
     </div>
     
     <el-card v-loading="initialLoading" element-loading-text="加载中...">
-      <el-table 
-        :data="taskStore.tasks"
+      <el-table
+        :data="paginatedTasks"
         style="width: 100%"
       >
         <el-table-column type="expand">
@@ -114,20 +114,39 @@
       </el-table>
       
       <el-empty v-if="taskStore.tasks.length === 0" description="暂无任务" />
+
+      <div class="pagination-container" v-if="taskStore.tasks.length > pageSize">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :page-sizes="[10, 20, 50, 100]"
+          :total="taskStore.tasks.length"
+          layout="total, sizes, prev, pager, next"
+        />
+      </div>
     </el-card>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { VideoPause, VideoPlay, CircleClose, Refresh } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import { useTaskStore } from '../stores'
+import { usePoller } from '../stores/poller'
 
 const taskStore = useTaskStore()
 const currentStatus = ref('')
 const initialLoading = ref(true)
 
-let intervalId
+// 分页
+const currentPage = ref(1)
+const pageSize = ref(20)
+
+const paginatedTasks = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value
+  return taskStore.tasks.slice(start, start + pageSize.value)
+})
 
 onMounted(async () => {
   try {
@@ -135,21 +154,19 @@ onMounted(async () => {
   } finally {
     initialLoading.value = false
   }
-  // 轮询时不显示全局 loading
-  intervalId = setInterval(async () => {
-    try {
-      await taskStore.fetchTasks(currentStatus.value, false) // false = 不显示 loading
-    } catch (e) {
-      console.error('轮询任务失败:', e)
-    }
-  }, 3000)
 })
 
-onUnmounted(() => {
-  if (intervalId) clearInterval(intervalId)
+// 统一轮询调度（轮询时不显示全局 loading，卸载自动注销）
+usePoller('tasks-list', async () => {
+  try {
+    await taskStore.fetchTasks(currentStatus.value, false) // false = 不显示 loading
+  } catch (e) {
+    console.error('轮询任务失败:', e)
+  }
 })
 
 async function handleStatusChange() {
+  currentPage.value = 1
   initialLoading.value = true
   try {
     await taskStore.fetchTasks(currentStatus.value)
@@ -207,7 +224,13 @@ function getProgressStatus(status) {
 }
 
 async function retryTask(task) {
-  await taskStore.createTask(task.source_path, task.type, true)
+  try {
+    await taskStore.createTask(task.source_path, task.type, true)
+    ElMessage.success('已重新提交任务')
+    await taskStore.fetchTasks(currentStatus.value, false)
+  } catch (error) {
+    ElMessage.error('重试失败: ' + (error.response?.data?.detail || error.message))
+  }
 }
 </script>
 
@@ -246,6 +269,12 @@ async function retryTask(task) {
 .step-text {
   font-size: 12px;
   color: #64748b;
+}
+
+.pagination-container {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
 }
 
 .task-detail {

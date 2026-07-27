@@ -78,7 +78,7 @@
       
       <!-- 数据表格 -->
       <el-table
-        :data="passwords"
+        :data="paginatedPasswords"
         style="width: 100%"
         v-loading="loading"
         @selection-change="handleSelectionChange"
@@ -143,6 +143,17 @@
       <el-empty v-if="!loading && passwords.length === 0" description="暂无密码记录">
         <el-button type="primary" @click="showAddDialog = true">添加第一个密码</el-button>
       </el-empty>
+
+      <!-- 分页 -->
+      <div class="pagination-container" v-if="passwords.length > pageSize">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :page-sizes="[20, 50, 100, 200]"
+          :total="passwords.length"
+          layout="total, sizes, prev, pager, next"
+        />
+      </div>
     </el-card>
     
     <!-- 添加/编辑对话框 -->
@@ -291,11 +302,13 @@
       </div>
     </el-dialog>
 
-    <!-- 批量导入对话框 -->
+    <!-- 批量导入对话框（内容自动保存草稿，误关闭不丢失） -->
     <el-dialog
       v-model="showImportDialog"
       title="批量导入密码"
       width="600px"
+      :close-on-click-modal="false"
+      @open="restoreImportDraft"
     >
       <el-alert
         title="导入格式说明"
@@ -309,14 +322,25 @@
         </div>
       </el-alert>
 
-      <div style="margin-bottom: 12px;">
-        <el-button type="primary" plain @click="importFromClipboard" :loading="clipboardLoading">
-          <el-icon><DocumentCopy /></el-icon>
-          从剪贴板导入
+      <div style="margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between;">
+        <div>
+          <el-button type="primary" plain @click="importFromClipboard" :loading="clipboardLoading">
+            <el-icon><DocumentCopy /></el-icon>
+            从剪贴板导入
+          </el-button>
+          <span style="margin-left: 12px; font-size: 12px; color: #909399;">
+            或在页面任意位置 Ctrl+V 直接粘贴
+          </span>
+        </div>
+        <el-button
+          v-if="importText.trim()"
+          link
+          type="danger"
+          size="small"
+          @click="clearImportDraft"
+        >
+          清空内容
         </el-button>
-        <span style="margin-left: 12px; font-size: 12px; color: #909399;">
-          点击后会自动读取剪贴板内容并填充到下方文本框
-        </span>
       </div>
 
       <el-input
@@ -325,9 +349,13 @@
         :rows="10"
         placeholder="在此粘贴密码列表（每行一个）...&#10;例如：&#10;password123&#10;password456&#10;password789"
       />
+      <div class="draft-hint">
+        <el-icon><CircleCheck /></el-icon>
+        内容实时自动保存，误关闭或刷新页面都不会丢失
+      </div>
 
       <template #footer>
-        <el-button @click="showImportDialog = false">取消</el-button>
+        <el-button @click="showImportDialog = false">关闭</el-button>
         <el-button type="primary" @click="handleImport" :loading="importing">
           导入 {{ importText.trim() ? importText.trim().split('\n').filter(l => l.trim()).length : 0 }} 个密码
         </el-button>
@@ -337,8 +365,8 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue'
-import { Plus, Delete, Document, DocumentCopy, Search, View, Hide, Timer, Refresh, Setting, SortDown, SortUp } from '@element-plus/icons-vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { Plus, Delete, Document, DocumentCopy, Search, View, Hide, Timer, Refresh, Setting, SortDown, SortUp, CircleCheck } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { passwordApi, cleanupApi } from '../api'
 
@@ -362,6 +390,13 @@ const formRef = ref(null)
 const cleanupStatus = ref(null)
 const cleanupHistory = ref([])
 
+// 分页
+const currentPage = ref(1)
+const pageSize = ref(50)
+
+// 导入草稿（防误触关闭丢失）
+const IMPORT_DRAFT_KEY = 'password_import_draft'
+
 const form = ref({
   id: null,
   rjcode: '',
@@ -377,10 +412,77 @@ const rules = {
   ]
 }
 
+// 分页后的密码列表
+const paginatedPasswords = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value
+  return passwords.value.slice(start, start + pageSize.value)
+})
+
+// 导入内容实时保存草稿
+watch(importText, (val) => {
+  try {
+    if (val && val.trim()) {
+      localStorage.setItem(IMPORT_DRAFT_KEY, val)
+    } else {
+      localStorage.removeItem(IMPORT_DRAFT_KEY)
+    }
+  } catch (e) {
+    // localStorage 不可用时静默失败
+  }
+})
+
 onMounted(() => {
   loadPasswords()
   loadCleanupStatus()
+  document.addEventListener('paste', handlePagePaste)
 })
+
+onUnmounted(() => {
+  document.removeEventListener('paste', handlePagePaste)
+})
+
+// 页面任意位置 Ctrl+V：自动唤起导入框并填充
+function handlePagePaste(event) {
+  // 已经在输入框/文本域中时，交给原生粘贴
+  const target = event.target
+  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return
+
+  const text = event.clipboardData?.getData('text')
+  if (!text || !text.trim()) return
+
+  if (importText.value.trim()) {
+    importText.value = importText.value.trim() + '\n' + text.trim()
+  } else {
+    importText.value = text.trim()
+  }
+  showImportDialog.value = true
+  ElMessage.success(`已粘贴 ${text.trim().split('\n').filter(l => l.trim()).length} 行到导入框`)
+}
+
+// 打开导入框时恢复草稿
+function restoreImportDraft() {
+  if (importText.value.trim()) return
+  try {
+    const draft = localStorage.getItem(IMPORT_DRAFT_KEY)
+    if (draft && draft.trim()) {
+      importText.value = draft
+      ElMessage.info(`已恢复上次未导入的内容（${draft.split('\n').filter(l => l.trim()).length} 行）`)
+    }
+  } catch (e) {
+    // 忽略
+  }
+}
+
+// 清空导入内容和草稿
+function clearImportDraft() {
+  importText.value = ''
+  try {
+    localStorage.removeItem(IMPORT_DRAFT_KEY)
+  } catch (e) {
+    // 忽略
+  }
+  ElMessage.success('已清空')
+}
 
 async function loadPasswords() {
   loading.value = true
@@ -411,6 +513,7 @@ function togglePasswordSortOrder() {
 }
 
 function handleSearch() {
+  currentPage.value = 1
   loadPasswords()
 }
 
@@ -542,7 +645,7 @@ async function handleImport() {
     }
 
     showImportDialog.value = false
-    importText.value = ''
+    importText.value = '' // watch 会自动清除草稿
     loadPasswords()
   } catch (error) {
     console.error('导入失败:', error)
@@ -795,5 +898,21 @@ watch(showCleanupDialog, (newVal) => {
 
 .stats-bar {
   margin-bottom: 16px;
+}
+
+.pagination-container {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.draft-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #6fba2c;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 </style>

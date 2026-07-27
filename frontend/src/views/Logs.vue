@@ -98,10 +98,10 @@ import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { Refresh, Delete, VideoPlay, VideoPause, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { logApi } from '../api'
+import { usePoller } from '../stores/poller'
 
 const logs = ref([])
 const logContainer = ref(null)
-let intervalId = null
 const isPaused = ref(false)
 const isUserScrolling = ref(false)
 let scrollTimeout = null
@@ -172,17 +172,16 @@ function parseModule(message, rawLine) {
 
 onMounted(() => {
   refreshLogs()
-  intervalId = setInterval(() => {
-    if (!isPaused.value) {
-      refreshLogs()
-    }
-  }, 3000)
+})
+
+// 统一轮询调度（暂停时不刷新，卸载自动注销）
+usePoller('logs-refresh', () => {
+  if (!isPaused.value) {
+    refreshLogs()
+  }
 })
 
 onUnmounted(() => {
-  if (intervalId) {
-    clearInterval(intervalId)
-  }
   if (scrollTimeout) {
     clearTimeout(scrollTimeout)
   }
