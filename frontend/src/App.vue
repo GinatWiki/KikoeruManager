@@ -92,7 +92,7 @@ import { useWatcherStore } from './stores'
 import { usePoller } from './stores/poller'
 
 // 直接定义版本号（确保每次构建都会更新）
-const appVersion = '2.1.0'
+const appVersion = '2.1.1'
 
 const watcherStore = useWatcherStore()
 const conflictCount = ref(0)
