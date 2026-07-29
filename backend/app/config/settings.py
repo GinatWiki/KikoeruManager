@@ -169,9 +169,9 @@ class ASMRSyncConfig(BaseModel):
     simplify_chinese_enabled: bool = True  # 是否启用字幕繁体转简体
 
     # 自定义服务器配置（留空则使用默认值）
-    custom_api_url: str = "  # 自定义服务器地址（如 https://api.asmr-300.com），末尾不要有斜杠，留空用默认
-    custom_meta_template: str = "  # meta 请求模板（如 /workInfo/{rjcode}），留空用默认
-    custom_track_template: str = "  # track 请求模板（如 /tracks/{rjcode}），留空用默认
+    custom_api_url: str = ""  # 自定义服务器地址（如 https://api.asmr-300.com），末尾不要有斜杠，留空用默认
+    custom_meta_template: str = ""  # meta 请求模板（如 /workInfo/{rjcode}），留空用默认
+    custom_track_template: str = ""  # track 请求模板（如 /tracks/{rjcode}），留空用默认
 
 class AutoProcessConfig(BaseModel):
     """正常解压缩流程步骤配置"""
