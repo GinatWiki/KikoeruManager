@@ -992,6 +992,19 @@ class TaskEngine:
         
         config = get_config()
         cleaned_paths = []
+
+        # ASMR sync download: cleanup cache on cancel/fail
+        if task.type == TaskType.ASMR_SYNC_DOWNLOAD:
+            download_dir = task.task_metadata.get('download_dir', '')
+            if download_dir and os.path.exists(download_dir):
+                if task.status == TaskStatus.FAILED or task._cancelled:
+                    try:
+                        shutil.rmtree(download_dir, ignore_errors=True)
+                        cleaned_paths.append(download_dir)
+                        logger.info(f'Cleanup ASMR download cache: {download_dir}')
+                    except Exception as e:
+                        logger.warning(f'Cleanup ASMR download cache failed: {download_dir}, {e}')
+            return
         
         # 对于 PROCESS_EXISTING_FOLDER 类型，成功完成的任务不需要清理
         # 因为文件夹是直接从已有目录处理的，不是临时文件
@@ -1306,6 +1319,7 @@ class TaskEngine:
             temp_path = config.storage.temp_path
             download_dir = os.path.join(temp_path, f"{rjcode}_asmr_sync")
             os.makedirs(download_dir, exist_ok=True)
+            task.task_metadata['download_dir'] = download_dir
 
             # 步骤2: 获取作品信息和下载文件
             task.update_progress(10, "获取作品信息")
@@ -1361,6 +1375,14 @@ class TaskEngine:
                 file_progress_callback=file_progress_callback,
                 check_pause=check_pause
             )
+
+            # 检查取消
+            if task.is_cancelled():
+                logger.info(f"[{rjcode}] 任务已取消，清理下载目录: {download_dir}")
+                import shutil as _shutil
+                if os.path.exists(download_dir):
+                    _shutil.rmtree(download_dir, ignore_errors=True)
+                return
 
             # 保存失败文件列表
             if download_result.get('failed_files'):

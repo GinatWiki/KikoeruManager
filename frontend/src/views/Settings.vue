@@ -1106,6 +1106,42 @@
                 />
               </el-form-item>
               <div class="form-tip">可选，用于访问 asmr.one</div>
+
+          <el-divider content-position="left">自定义服务器配置</el-divider>
+
+          <el-row :gutter="20">
+            <el-col :span="24">
+              <el-form-item label="服务器地址">
+                <el-input
+                  v-model="config.asmr_sync.custom_api_url"
+                  placeholder="留空使用默认 (https://api.asmr-200.com)，如 https://api.asmr-300.com"
+                  style="width: 100%;"
+                />
+                <div class="form-tip">自定义 ASMR 服务器地址，末尾不要有斜杠。留空则使用默认服务器</div>
+              </el-form-item>
+            </el-col>
+          </el-row>
+
+          <el-row :gutter="20">
+            <el-col :span="12">
+              <el-form-item label="Meta 请求模板">
+                <el-input
+                  v-model="config.asmr_sync.custom_meta_template"
+                  placeholder="留空使用默认 (/workInfo/{rjcode})"
+                />
+                <div class="form-tip">获取作品元数据的路径模板，如 /workInfo/{rjcode}</div>
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="Track 请求模板">
+                <el-input
+                  v-model="config.asmr_sync.custom_track_template"
+                  placeholder="留空使用默认 (/tracks/{rjcode})"
+                />
+                <div class="form-tip">获取音轨/文件列表的路径模板，如 /tracks/{rjcode}</div>
+              </el-form-item>
+            </el-col>
+          </el-row>
             </el-col>
           </el-row>
 
