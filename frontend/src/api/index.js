@@ -435,6 +435,14 @@ export const asmrSyncApi = {
     return response.data
   },
 
+  downloadSelected: async (rjcode, selectedFiles) => {
+    const response = await apiClient.post('/asmr-sync/download-selected', {
+      rjcode,
+      selected_files: selectedFiles
+    }, { timeout: 60000 })
+    return response.data
+  },
+
   searchDownload: async (rjcode, options = {}) => {
     const response = await apiClient.post('/asmr-sync/search-download', {
       rjcode,

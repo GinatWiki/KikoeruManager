@@ -3499,6 +3499,92 @@ async def asmr_sync_search_download(request: ASMRSearchDownloadRequest):
         logger.error(f"RJ号搜索下载失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"搜索下载失败: {str(e)}")
 
+
+class ASMRDownloadSelectedRequest(BaseModel):
+    """选择文件下载请求"""
+    rjcode: str
+    selected_files: List[str]  # 选中的文件标题列表
+    dest_dir: Optional[str] = None
+    auto_classify: bool = True
+
+@app.post("/api/asmr-sync/download-selected")
+async def asmr_sync_download_selected(request: ASMRDownloadSelectedRequest):
+    """下载用户在预览中选中的文件（而非全部过滤后的文件）
+
+    流程：搜索最佳版本 → 获取完整文件列表 → 仅保留用户选中的文件 → 创建下载任务
+    """
+    from ..core.asmr_download_service import get_asmr_download_service
+    from ..core.task_engine import Task, TaskType, get_task_engine
+
+    try:
+        rjcode = request.rjcode.strip()
+        if not rjcode:
+            raise HTTPException(status_code=400, detail="RJ号不能为空")
+        if not request.selected_files:
+            raise HTTPException(status_code=400, detail="未选择任何文件")
+
+        config = get_config()
+        asmr_service = get_asmr_download_service()
+
+        dest_dir = request.dest_dir
+        if not dest_dir:
+            dest_dir = config.storage.asmr_subtitle_path or config.storage.temp_path
+        if not dest_dir:
+            raise HTTPException(status_code=400, detail="未配置下载目标目录")
+
+        # 搜索最佳版本
+        actual_rjcode, work_info = await asmr_service.find_best_available_work(rjcode)
+        if not work_info:
+            raise HTTPException(status_code=404, detail=f"未找到作品 {rjcode}")
+
+        # 获取完整文件列表
+        tracks = await asmr_service.fetch_track_list(actual_rjcode)
+        if not tracks:
+            raise HTTPException(status_code=404, detail="无法获取文件列表")
+
+        all_files = asmr_service._flatten_tracks(tracks)
+
+        # 仅保留用户选中的文件（按标题匹配）
+        selected_set = set(request.selected_files)
+        filtered_files = [f for f in all_files if f.get('title', '') in selected_set]
+
+        if not filtered_files:
+            raise HTTPException(status_code=400, detail="选中的文件在文件列表中未找到匹配")
+
+        # 创建下载任务，将选中的文件信息存入 metadata
+        work_title = work_info.get('title', rjcode)
+        engine = get_task_engine()
+        task = Task(
+            task_type=TaskType.ASMR_SYNC_DOWNLOAD,
+            source_path=dest_dir,
+            auto_classify=request.auto_classify,
+            metadata={
+                "rjcode": actual_rjcode,
+                "subtitle_folder": dest_dir,
+                "work_title": work_title,
+                "selected_files": [f.get('title', '') for f in filtered_files],
+                "search_mode": "selected_download"
+            }
+        )
+        await engine.submit(task)
+
+        total_size = sum(f.get('size', 0) for f in filtered_files)
+
+        return {
+            "success": True,
+            "rjcode": rjcode,
+            "actual_rjcode": actual_rjcode,
+            "title": work_title,
+            "task_id": task.id,
+            "selected_count": len(filtered_files),
+            "total_size": total_size
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"选择文件下载失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"下载失败: {str(e)}")
 @app.post("/api/asmr-sync/start")
 async def asmr_sync_start(request: ASMRSyncStartRequest):
     """开始同步下载任务"""

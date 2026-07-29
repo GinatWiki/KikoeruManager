@@ -162,11 +162,59 @@
           </el-table>
         </div>
 
-        <!-- 文件列表 -->
+        <!-- 过滤规则编辑区 -->
+        <div class="filter-rules-section">
+          <div class="filter-rules-header">
+            <h4>过滤规则（实时预览）</h4>
+            <el-button size="small" type="primary" plain @click="addPreviewFilterRule">
+              <el-icon><Plus /></el-icon> 添加规则
+            </el-button>
+          </div>
+          <el-table :data="previewFilterRules" size="small" max-height="200">
+            <el-table-column label="启用" width="60">
+              <template #default="{ row }">
+                <el-switch v-model="row.enabled" @change="reapplyPreviewFilter" />
+              </template>
+            </el-table-column>
+            <el-table-column label="名称" width="150">
+              <template #default="{ row }">
+                <el-input v-model="row.name" size="small" placeholder="规则名称" @change="reapplyPreviewFilter" />
+              </template>
+            </el-table-column>
+            <el-table-column label="正则表达式" min-width="200">
+              <template #default="{ row }">
+                <el-input v-model="row.pattern" size="small" placeholder="正则表达式" @change="reapplyPreviewFilter" />
+              </template>
+            </el-table-column>
+            <el-table-column label="排除/包含" width="100">
+              <template #default="{ row }">
+                <el-select v-model="row.action" size="small" @change="reapplyPreviewFilter">
+                  <el-option label="排除" value="exclude" />
+                  <el-option label="包含" value="include" />
+                </el-select>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="60">
+              <template #default="{ $index }">
+                <el-button size="small" type="danger" link @click="previewFilterRules.splice($index, 1); reapplyPreviewFilter()">
+                  <el-icon><Delete /></el-icon>
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+
+        <!-- 文件列表（带勾选） -->
         <div class="file-list">
-          <h4>下载文件列表 ({{ previewData.filtered_files }} 个)</h4>
-          <el-table :data="previewData.files" max-height="400" size="small">
-            <el-table-column type="index" label="#" width="50" />
+          <div class="file-list-header">
+            <h4>下载文件列表 ({{ previewFilteredFiles.length }}/{{ previewAllFiles.length }} 个)</h4>
+            <el-button type="primary" size="small" @click="downloadSelectedFiles" :loading="searching" :disabled="previewSelectedFiles.length === 0">
+              <el-icon><Download /></el-icon>
+              下载选中 ({{ previewSelectedFiles.length }})
+            </el-button>
+          </div>
+          <el-table :data="previewFilteredFiles" max-height="400" size="small" @selection-change="previewSelectionChange">
+            <el-table-column type="selection" width="45" />
             <el-table-column label="文件路径" min-width="300">
               <template #default="{ row }">
                 <div class="file-path">
@@ -363,7 +411,7 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Search, Download, Folder, Loading, Refresh, Document, WarningFilled, Clock, View } from '@element-plus/icons-vue'
+import { Search, Download, Folder, Loading, Refresh, Document, WarningFilled, Clock, View, Plus, Delete } from '@element-plus/icons-vue'
 import { asmrSyncApi, configApi } from '../api'
 import { usePoller } from '../stores/poller'
 
@@ -383,6 +431,10 @@ const searchRjcode = ref('')
 const searching = ref(false)
 const previewing = ref(false)
 const searchResult = ref(null)
+const previewFilterRules = ref([])
+const previewAllFiles = ref([])
+const previewFilteredFiles = ref([])
+const previewSelectedFiles = ref([])
 
 // 计算属性：分离等待重试的任务和活动任务
 const waitingRetryTasks = computed(() => {
@@ -539,6 +591,14 @@ const handleSearchPreview = async () => {
     if (result.success) {
       previewDialogVisible.value = true
       previewData.value = result
+      // 初始化过滤规则和全量文件
+      try {
+        const cfg = await configApi.get()
+        previewFilterRules.value = (cfg.filter?.rules || []).map(r => ({...r}))
+      } catch {}
+      previewAllFiles.value = result.files || []
+      previewFilteredFiles.value = result.files || []
+      reapplyPreviewFilter()
     } else {
       searchResult.value = { type: 'error', msg: result.error || '未找到作品' }
       ElMessage.warning(result.error || '未找到作品')
@@ -577,6 +637,54 @@ const handleSearchDownload = async () => {
 
 const searchResultMessage = computed(() => searchResult.value?.msg || '')
 const searchResultType = computed(() => searchResult.value?.type || 'info')
+// 重新应用过滤规则到预览文件列表
+const reapplyPreviewFilter = () => {
+  if (!previewAllFiles.value.length) return
+  let files = [...previewAllFiles.value]
+  const enabledRules = previewFilterRules.value.filter(r => r.enabled && r.pattern)
+  if (enabledRules.length > 0) {
+    files = files.filter(f => {
+      const title = f.title || f.path || ''
+      for (const rule of enabledRules) {
+        try {
+          const regex = new RegExp(rule.pattern, 'i')
+          const match = regex.test(title)
+          if (rule.action === 'exclude' && match) return false
+          if (rule.action === 'include' && !match) return false
+        } catch {}
+      }
+      return true
+    })
+  }
+  previewFilteredFiles.value = files
+}
+
+const previewSelectionChange = (selection) => {
+  previewSelectedFiles.value = selection
+}
+
+const addPreviewFilterRule = () => {
+  previewFilterRules.value.push({ name: '新规则', pattern: '', action: 'exclude', enabled: true })
+}
+
+// 下载选中的文件
+const downloadSelectedFiles = async () => {
+  if (previewSelectedFiles.value.length === 0) return ElMessage.warning('请先选择文件')
+  searching.value = true
+  try {
+    const titles = previewSelectedFiles.value.map(f => f.title)
+    const result = await asmrSyncApi.downloadSelected(previewData.value.rjcode, titles)
+    if (result.success) {
+      ElMessage.success(`下载任务已创建：${result.title}（${result.selected_count} 个文件）`)
+      previewDialogVisible.value = false
+      await refreshStatus()
+    }
+  } catch (error) {
+    ElMessage.error('下载失败: ' + (error.response?.data?.detail || error.message))
+  } finally {
+    searching.value = false
+  }
+}
 const scanFolder = async () => {
   if (!subtitleFolder.value) return ElMessage.warning('请先选择字幕文件夹')
   scanning.value = true
@@ -688,6 +796,11 @@ usePoller('asmr-sync-status', refreshStatus)
 .search-card { margin-bottom: 20px; }
 .results-card { margin-bottom: 20px; }
 .search-section { padding: 8px 0; }
+.filter-rules-section { margin-bottom: 20px; }
+.filter-rules-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.filter-rules-header h4 { margin: 0; }
+.file-list-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.file-list-header h4 { margin: 0; }
 .results-header { display: flex; justify-content: space-between; align-items: center; }
 .folder-name { display: flex; align-items: center; gap: 8px; }
 .preview-loading { display: flex; flex-direction: column; align-items: center; padding: 40px; gap: 12px; }
