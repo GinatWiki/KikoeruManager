@@ -1328,8 +1328,9 @@ class TaskEngine:
                 progress = 10 + int((current / total) * 60) if total > 0 else 10
                 task.update_progress(progress, step)
 
-            # 获取筛选规则
-            filter_rules = config.filter.rules
+            # 获取筛选规则：优先使用任务 metadata 中的（预览时自定义的），否则用全局配置
+            filter_rules = task.task_metadata.get('filter_rules') or config.filter.rules
+            selected_files = task.task_metadata.get('selected_files')
             logger.info(f"[ASMR同步] 筛选规则数量: {len(filter_rules)}")
             for i, rule in enumerate(filter_rules):
                 if isinstance(rule, dict):
@@ -1373,7 +1374,8 @@ class TaskEngine:
                 filter_rules=filter_rules,
                 progress_callback=progress_callback,
                 file_progress_callback=file_progress_callback,
-                check_pause=check_pause
+                check_pause=check_pause,
+                selected_files=selected_files
             )
 
             # 检查取消

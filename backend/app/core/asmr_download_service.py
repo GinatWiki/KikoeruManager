@@ -645,7 +645,8 @@ class ASMRDownloadService:
         filter_rules: List = None,
         progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
         file_progress_callback: Optional[Callable[[str, int, int, int, int], None]] = None,
-        check_pause: Optional[Callable[[], bool]] = None
+        check_pause: Optional[Callable[[], bool]] = None,
+        selected_files: Optional[List[str]] = None  # 只下载指定标题的文件，None 则全部
     ) -> Dict:
         """
         下载整个作品并应用筛选规则
@@ -736,6 +737,9 @@ class ASMRDownloadService:
             failed_files = []  # 记录失败的文件
 
             for i, file_info in enumerate(all_files):
+                # 如果指定了 selected_files，只下载列表中的文件
+                if selected_files is not None and file_info.get('title', '') not in selected_files:
+                    continue
                 # 检查是否需要暂停
                 if check_pause and check_pause():
                     result['paused'] = True
