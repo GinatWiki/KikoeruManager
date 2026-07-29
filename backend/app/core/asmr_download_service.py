@@ -540,7 +540,7 @@ class ASMRDownloadService:
 
     def filter_files(self, files: List[Dict], filter_rules: List) -> List[Dict]:
         """
-        应用筛选规则过滤文件列表
+        应用筛选规则过滤文件列表（两阶段：先文件夹规则，再文件规则）
 
         Args:
             files: 文件列表
@@ -553,27 +553,20 @@ class ASMRDownloadService:
             logger.info("[筛选] 没有筛选规则，保留所有文件")
             return files
 
-        # 音频扩展名集合
-        audio_extensions = {'.wav', '.mp3', '.flac', '.m4a', '.ogg', '.wma', '.aac'}
+        def _get_rule_prop(rule, prop, default=''):
+            if isinstance(rule, dict):
+                return rule.get(prop, default)
+            return getattr(rule, prop, default)
 
-        # 先打印所有筛选规则的状态
+        # 打印所有筛选规则的状态
         logger.info(f"[筛选] 共有 {len(filter_rules)} 条筛选规则:")
         for i, rule in enumerate(filter_rules):
-            if isinstance(rule, dict):
-                name = rule.get('name', f'规则{i+1}')
-                enabled = rule.get('enabled', True)
-                pattern = rule.get('pattern', '')
-                target = rule.get('target', 'file')
-            else:
-                name = getattr(rule, 'name', f'规则{i+1}')
-                enabled = getattr(rule, 'enabled', True)
-                pattern = getattr(rule, 'pattern', '')
-                target = getattr(rule, 'target', 'file')
+            name = _get_rule_prop(rule, 'name', f'规则{i+1}')
+            enabled = _get_rule_prop(rule, 'enabled', True)
+            pattern = _get_rule_prop(rule, 'pattern', '')
+            target = _get_rule_prop(rule, 'target', 'file')
             status = "启用" if enabled else "禁用"
             logger.info(f"[筛选]   - {name}: pattern='{pattern}', target='{target}', 状态={status}")
-
-        filtered_files = []
-        excluded_count = 0
 
         # 调试：打印前几个文件名
         if files:
@@ -581,60 +574,69 @@ class ASMRDownloadService:
             for i, f in enumerate(files[:5]):
                 logger.info(f"[筛选]   {i+1}. title='{f.get('title', '')}', path='{f.get('path', '')}'")
 
-        for file_info in files:
-            file_name = file_info.get('title', '')
-            file_path = file_info.get('path', file_name)  # 完整路径，包含文件夹名
-            ext = os.path.splitext(file_name)[1].lower()
-
-            # 只处理音频文件
-            if ext not in audio_extensions:
-                # 非音频文件（如图片、文本等）直接保留
-                filtered_files.append(file_info)
+        # 分离 folder 规则和 file/all 规则
+        folder_rules = []
+        file_rules = []
+        for rule in filter_rules:
+            if not _get_rule_prop(rule, 'enabled', True):
                 continue
+            target = _get_rule_prop(rule, 'target', 'file')
+            pattern = _get_rule_prop(rule, 'pattern', '')
+            name = _get_rule_prop(rule, 'name', '')
+            if not pattern:
+                continue
+            if target == 'folder':
+                folder_rules.append((pattern, name))
+            else:
+                file_rules.append((pattern, name, target))
 
-            # 应用筛选规则
+        excluded_count = 0
+
+        # 阶段1：文件夹规则过滤
+        # 如果文件的完整路径中包含匹配文件夹规则的部分，整个文件被排除
+        stage1_files = []
+        for file_info in files:
+            file_path = file_info.get('path', file_info.get('title', ''))
             should_exclude = False
-            for rule in filter_rules:
-                # 支持字典和对象两种访问方式
-                if isinstance(rule, dict):
-                    enabled = rule.get('enabled', True)
-                    target = rule.get('target', 'file')
-                    pattern = rule.get('pattern', '')
-                    name = rule.get('name', '')
-                else:
-                    enabled = getattr(rule, 'enabled', True)
-                    target = getattr(rule, 'target', 'file')
-                    pattern = getattr(rule, 'pattern', '')
-                    name = getattr(rule, 'name', '')
-
-                if not enabled:
-                    continue
-
+            for pattern, name in folder_rules:
                 try:
-                    # 根据target决定检查什么内容
-                    if target == 'folder':
-                        # 文件夹规则：检查完整路径（包含文件夹名）
-                        check_content = file_path
-                    elif target == 'all':
-                        # 全部规则：检查路径和文件名
-                        check_content = file_path
-                    else:
-                        # file规则：只检查文件名
-                        check_content = file_name
-
-                    if re.search(pattern, check_content, re.IGNORECASE):
+                    if re.search(pattern, file_path, re.IGNORECASE):
                         should_exclude = True
-                        logger.info(f"[筛选] 文件被规则 [{name}] 过滤: {file_path} (匹配'{pattern}')")
                         excluded_count += 1
+                        logger.info(f"[筛选][文件夹] 文件被规则 [{name}] 过滤: {file_path} (匹配'{pattern}')")
                         break
                 except re.error as e:
                     logger.error(f"正则表达式错误: {pattern}, {e}")
-
             if not should_exclude:
-                filtered_files.append(file_info)
+                stage1_files.append(file_info)
 
-        logger.info(f"[筛选] 原始文件数: {len(files)}, 筛选后: {len(filtered_files)}, 排除: {excluded_count}")
-        return filtered_files
+        logger.info(f"[筛选] 阶段1(文件夹): {len(files)} -> {len(stage1_files)}, 排除 {len(files) - len(stage1_files)}")
+
+        # 阶段2：文件规则过滤（在阶段1剩余文件上）
+        stage2_files = []
+        for file_info in stage1_files:
+            file_name = file_info.get('title', '')
+            file_path = file_info.get('path', file_name)
+            should_exclude = False
+            for pattern, name, target in file_rules:
+                try:
+                    if target == 'all':
+                        check_content = file_path
+                    else:
+                        check_content = file_name
+                    if re.search(pattern, check_content, re.IGNORECASE):
+                        should_exclude = True
+                        excluded_count += 1
+                        logger.info(f"[筛选][文件] 文件被规则 [{name}] 过滤: {file_name} (匹配'{pattern}')")
+                        break
+                except re.error as e:
+                    logger.error(f"正则表达式错误: {pattern}, {e}")
+            if not should_exclude:
+                stage2_files.append(file_info)
+
+        logger.info(f"[筛选] 阶段2(文件): {len(stage1_files)} -> {len(stage2_files)}, 排除 {len(stage1_files) - len(stage2_files)}")
+        logger.info(f"[筛选] 总计: 原始 {len(files)}, 筛选后 {len(stage2_files)}, 排除 {excluded_count}")
+        return stage2_files
 
     async def download_work(
         self,
