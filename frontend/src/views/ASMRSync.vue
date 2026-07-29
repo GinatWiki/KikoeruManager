@@ -41,6 +41,43 @@
       </div>
     </el-card>
 
+    <!-- RJ号直接搜索下载 -->
+    <el-card class="search-card">
+      <template #header>
+        <div class="header-content">
+          <span class="title">RJ号搜索下载</span>
+          <el-tag type="success">直接输入RJ号搜索并下载</el-tag>
+        </div>
+      </template>
+      <div class="search-section">
+        <el-form :inline="true">
+          <el-form-item>
+            <el-input
+              v-model="searchRjcode"
+              placeholder="输入RJ号，如 RJ370190"
+              style="width: 300px"
+              clearable
+              @keyup.enter="handleSearchDownload"
+            >
+              <template #prefix>
+                <el-icon><Search /></el-icon>
+              </template>
+            </el-input>
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" @click="handleSearchDownload" :loading="searching">
+              <el-icon><Search /></el-icon>
+              搜索并下载
+            </el-button>
+            <el-button @click="handleSearchPreview" :loading="previewing">
+              <el-icon><View /></el-icon>
+              预览
+            </el-button>
+          </el-form-item>
+        </el-form>
+        <el-alert v-if="searchResult" :title="searchResultMessage" :type="searchResultType" :closable="false" style="margin-top: 12px;" />
+      </div>
+    </el-card>
     <!-- 扫描结果 -->
     <el-card v-if="scanResults.length > 0" class="results-card">
       <template #header>
@@ -326,7 +363,7 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Search, Download, Folder, Loading, Refresh, Document, WarningFilled, Clock } from '@element-plus/icons-vue'
+import { Search, Download, Folder, Loading, Refresh, Document, WarningFilled, Clock, View } from '@element-plus/icons-vue'
 import { asmrSyncApi, configApi } from '../api'
 import { usePoller } from '../stores/poller'
 
@@ -342,6 +379,10 @@ const previewLoading = ref(false)
 const previewData = ref(null)
 const tasks = ref([])
 const nextRetryTime = ref('')
+const searchRjcode = ref('')
+const searching = ref(false)
+const previewing = ref(false)
+const searchResult = ref(null)
 
 // 计算属性：分离等待重试的任务和活动任务
 const waitingRetryTasks = computed(() => {
@@ -487,6 +528,55 @@ const loadWaitingRetryTasks = async () => {
 
 const selectFolder = () => ElMessage.info('请手动输入文件夹路径')
 
+// RJ号搜索预览
+const handleSearchPreview = async () => {
+  const rj = searchRjcode.value.trim()
+  if (!rj) return ElMessage.warning('请输入RJ号')
+  previewing.value = true
+  searchResult.value = null
+  try {
+    const result = await asmrSyncApi.preview(rj)
+    if (result.success) {
+      previewDialogVisible.value = true
+      previewData.value = result
+    } else {
+      searchResult.value = { type: 'error', msg: result.error || '未找到作品' }
+      ElMessage.warning(result.error || '未找到作品')
+    }
+  } catch (error) {
+    ElMessage.error('预览失败: ' + (error.response?.data?.detail || error.message))
+  } finally {
+    previewing.value = false
+  }
+}
+
+// RJ号搜索并直接下载
+const handleSearchDownload = async () => {
+  const rj = searchRjcode.value.trim()
+  if (!rj) return ElMessage.warning('请输入RJ号')
+  searching.value = true
+  searchResult.value = null
+  try {
+    const result = await asmrSyncApi.searchDownload(rj)
+    if (result.success) {
+      searchResult.value = {
+        type: 'success',
+        msg: `已创建下载任务：${result.title}（${result.actual_rjcode}），共 ${result.filtered_files} 个文件，预计 ${formatSize(result.total_size)}`
+      }
+      ElMessage.success(`下载任务已创建：${result.title}`)
+      await refreshStatus()
+    }
+  } catch (error) {
+    const detail = error.response?.data?.detail || error.message
+    searchResult.value = { type: 'error', msg: detail }
+    ElMessage.error('搜索下载失败: ' + detail)
+  } finally {
+    searching.value = false
+  }
+}
+
+const searchResultMessage = computed(() => searchResult.value?.msg || '')
+const searchResultType = computed(() => searchResult.value?.type || 'info')
 const scanFolder = async () => {
   if (!subtitleFolder.value) return ElMessage.warning('请先选择字幕文件夹')
   scanning.value = true
@@ -595,7 +685,9 @@ usePoller('asmr-sync-status', refreshStatus)
 .header-content { display: flex; align-items: center; gap: 12px; }
 .header-content .title { font-size: 18px; font-weight: 600; }
 .scan-section { margin-top: 16px; }
+.search-card { margin-bottom: 20px; }
 .results-card { margin-bottom: 20px; }
+.search-section { padding: 8px 0; }
 .results-header { display: flex; justify-content: space-between; align-items: center; }
 .folder-name { display: flex; align-items: center; gap: 8px; }
 .preview-loading { display: flex; flex-direction: column; align-items: center; padding: 40px; gap: 12px; }

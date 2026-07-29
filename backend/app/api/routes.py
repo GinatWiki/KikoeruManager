@@ -3403,6 +3403,102 @@ async def asmr_sync_preview(request: Request):
         raise HTTPException(status_code=500, detail=f"预览失败: {str(e)}")
 
 
+
+class ASMRSearchDownloadRequest(BaseModel):
+    """RJ号搜索下载请求"""
+    rjcode: str
+    dest_dir: Optional[str] = None  # 下载目标目录，空则用 asmr_subtitle_path
+    auto_classify: bool = True
+    filter_rules: Optional[List[dict]] = None  # 自定义过滤规则，空则用全局配置
+
+@app.post("/api/asmr-sync/search-download")
+async def asmr_sync_search_download(request: ASMRSearchDownloadRequest):
+    """通过RJ号直接搜索并下载（无需字幕文件夹扫描）
+
+    流程：搜索关联版本 → 选择最佳版本 → 获取文件列表 → 过滤 → 创建下载任务
+    """
+    from ..core.asmr_download_service import get_asmr_download_service
+    from ..core.task_engine import Task, TaskType, get_task_engine
+
+    try:
+        rjcode = request.rjcode.strip()
+        if not rjcode:
+            raise HTTPException(status_code=400, detail="RJ号不能为空")
+
+        config = get_config()
+        asmr_service = get_asmr_download_service()
+
+        # 确定下载目录
+        dest_dir = request.dest_dir
+        if not dest_dir:
+            dest_dir = config.storage.asmr_subtitle_path or config.storage.temp_path
+        if not dest_dir:
+            raise HTTPException(status_code=400, detail="未配置下载目标目录，请在设置中配置ASMR字幕文件夹路径")
+
+        # 搜索最佳版本
+        actual_rjcode, work_info = await asmr_service.find_best_available_work(rjcode)
+        if not work_info:
+            raise HTTPException(status_code=404, detail=f"在服务器上未找到作品 {rjcode} 的任何可用版本")
+
+        # 获取文件列表
+        tracks = await asmr_service.fetch_track_list(actual_rjcode)
+        if not tracks:
+            raise HTTPException(status_code=404, detail=f"无法获取 {actual_rjcode} 的文件列表")
+
+        # 扁平化并过滤
+        all_files = asmr_service._flatten_tracks(tracks)
+        filter_rules = request.filter_rules
+        if not filter_rules:
+            filter_rules = config.filter.rules if config.filter.enabled else None
+
+        if filter_rules:
+            filtered_files = asmr_service.filter_files(all_files, filter_rules)
+        else:
+            filtered_files = all_files
+
+        if not filtered_files:
+            raise HTTPException(status_code=400, detail="过滤后没有可下载的文件")
+
+        # 创建下载任务
+        work_title = work_info.get('title', rjcode)
+        engine = get_task_engine()
+        task = Task(
+            task_type=TaskType.ASMR_SYNC_DOWNLOAD,
+            source_path=dest_dir,
+            auto_classify=request.auto_classify,
+            metadata={
+                "rjcode": actual_rjcode,
+                "subtitle_folder": dest_dir,
+                "work_title": work_title,
+                "filter_rules": filter_rules,
+                "search_mode": "rjcode_direct"  # 标记为RJ号直接搜索下载
+            }
+        )
+        await engine.submit(task)
+
+        total_size = sum(f.get('size', 0) for f in filtered_files)
+
+        return {
+            "success": True,
+            "rjcode": rjcode,
+            "actual_rjcode": actual_rjcode,
+            "title": work_title,
+            "task_id": task.id,
+            "total_files": len(all_files),
+            "filtered_files": len(filtered_files),
+            "total_size": total_size,
+            "files_preview": [
+                {"title": f.get('title'), "size": f.get('size', 0), "type": f.get('type')}
+                for f in filtered_files[:20]
+            ]
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"RJ号搜索下载失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"搜索下载失败: {str(e)}")
+
 @app.post("/api/asmr-sync/start")
 async def asmr_sync_start(request: ASMRSyncStartRequest):
     """开始同步下载任务"""

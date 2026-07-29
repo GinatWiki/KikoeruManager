@@ -59,6 +59,35 @@ class ASMRDownloadService:
         self._cache: Dict = {}
         self._cache_ttl = 300  # 5分钟缓存
 
+    def _get_api_urls(self) -> list:
+        ""获取 API URL 列表：优先用自定义服务器，否则用默认列表""
+        if self.config and hasattr(self.config, 'asmr_sync'):
+            cfg = self.config.asmr_sync
+            custom = getattr(cfg, 'custom_api_url', '') or ''
+            if custom.strip():
+                url = custom.strip().rstrip('/')
+                # 若用户已带 /api 后缀则直接用，否则补上
+                if not url.endswith('/api'):
+                    url = url + '/api'
+                return [url]
+        return self.API_BASE_URLS
+
+    def _get_meta_path(self, rjcode_num: str) -> str:
+        ""获取 meta 请求路径：优先自定义模板，否则默认 /workInfo/{rjcode}""
+        if self.config and hasattr(self.config, 'asmr_sync'):
+            tpl = getattr(self.config.asmr_sync, 'custom_meta_template', '') or ''
+            if tpl.strip():
+                return tpl.strip().format(rjcode=rjcode_num)
+        return f'/workInfo/{rjcode_num}'
+
+    def _get_track_path(self, rjcode_num: str) -> str:
+        ""获取 track 请求路径：优先自定义模板，否则默认 /tracks/{rjcode}""
+        if self.config and hasattr(self.config, 'asmr_sync'):
+            tpl = getattr(self.config.asmr_sync, 'custom_track_template', '') or ''
+            if tpl.strip():
+                return tpl.strip().format(rjcode=rjcode_num)
+        return f'/tracks/{rjcode_num}'
+
     async def _get_session(self) -> aiohttp.ClientSession:
         """获取或创建 HTTP 会话"""
         if self._session is None or self._session.closed:
@@ -216,9 +245,11 @@ class ASMRDownloadService:
         session = await self._get_session()
 
         # 尝试所有 API 服务器
-        for attempt in range(len(self.API_BASE_URLS)):
-            api_base = self._get_api_base()
-            url = f"{api_base}/workInfo/{rjcode_num}"
+        api_urls = self._get_api_urls()
+        for attempt in range(len(api_urls)):
+            api_base = api_urls[attempt % len(api_urls)]
+            meta_path = self._get_meta_path(rjcode_num)
+            url = f"{api_base}{meta_path}"
 
             try:
                 logger.info(f"[ASMR] 获取作品信息: {url}")
@@ -292,9 +323,11 @@ class ASMRDownloadService:
 
         session = await self._get_session()
 
-        for attempt in range(len(self.API_BASE_URLS)):
-            api_base = self._get_api_base()
-            url = f"{api_base}/tracks/{rjcode_num}"
+        api_urls = self._get_api_urls()
+        for attempt in range(len(api_urls)):
+            api_base = api_urls[attempt % len(api_urls)]
+            track_path = self._get_track_path(rjcode_num)
+            url = f"{api_base}{track_path}"
 
             try:
                 logger.info(f"[ASMR] 获取文件列表: {url}")

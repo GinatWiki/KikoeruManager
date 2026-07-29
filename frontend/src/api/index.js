@@ -435,6 +435,16 @@ export const asmrSyncApi = {
     return response.data
   },
 
+  searchDownload: async (rjcode, options = {}) => {
+    const response = await apiClient.post('/asmr-sync/search-download', {
+      rjcode,
+      dest_dir: options.dest_dir || null,
+      auto_classify: options.auto_classify !== false,
+      filter_rules: options.filter_rules || null
+    }, { timeout: 60000 })
+    return response.data
+  },
+
   start: async (items, autoClassify = true) => {
     const response = await apiClient.post('/asmr-sync/start', {
       items,
