@@ -60,7 +60,7 @@ class ASMRDownloadService:
         self._cache_ttl = 300  # 5分钟缓存
 
     def _get_api_urls(self) -> list:
-        ""获取 API URL 列表：优先用自定义服务器，否则用默认列表""
+        """获取 API URL 列表：优先用自定义服务器，否则用默认列表"""
         if self.config and hasattr(self.config, 'asmr_sync'):
             cfg = self.config.asmr_sync
             custom = getattr(cfg, 'custom_api_url', '') or ''
@@ -73,7 +73,7 @@ class ASMRDownloadService:
         return self.API_BASE_URLS
 
     def _get_meta_path(self, rjcode_num: str) -> str:
-        ""获取 meta 请求路径：优先自定义模板，否则默认 /workInfo/{rjcode}""
+        """获取 meta 请求路径：优先自定义模板，否则默认 /workInfo/{rjcode}"""
         if self.config and hasattr(self.config, 'asmr_sync'):
             tpl = getattr(self.config.asmr_sync, 'custom_meta_template', '') or ''
             if tpl.strip():
@@ -81,7 +81,7 @@ class ASMRDownloadService:
         return f'/workInfo/{rjcode_num}'
 
     def _get_track_path(self, rjcode_num: str) -> str:
-        ""获取 track 请求路径：优先自定义模板，否则默认 /tracks/{rjcode}""
+        """获取 track 请求路径：优先自定义模板，否则默认 /tracks/{rjcode}"""
         if self.config and hasattr(self.config, 'asmr_sync'):
             tpl = getattr(self.config.asmr_sync, 'custom_track_template', '') or ''
             if tpl.strip():
