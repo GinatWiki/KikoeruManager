@@ -213,7 +213,7 @@
               下载选中 ({{ previewSelectedFiles.length }})
             </el-button>
           </div>
-          <el-table :data="previewFilteredFiles" max-height="400" size="small" @selection-change="previewSelectionChange">
+          <el-table :data="previewPagedFiles" max-height="400" size="small" @selection-change="previewSelectionChange">
             <el-table-column type="selection" width="45" />
             <el-table-column label="文件路径" min-width="300">
               <template #default="{ row }">
@@ -232,6 +232,11 @@
               <template #default="{ row }">{{ formatSize(row.size) }}</template>
             </el-table-column>
           </el-table>
+          <div class="pagination-container" v-if="previewFilteredFiles.length > previewPageSize">
+            <el-pagination v-model:current-page="previewCurrentPage" v-model:page-size="previewPageSize"
+              :page-sizes="[50, 100, 200]" :total="previewFilteredFiles.length"
+              layout="total, sizes, prev, pager, next" />
+          </div>
         </div>
       </div>
       <div v-else class="preview-error">
@@ -435,6 +440,12 @@ const previewFilterRules = ref([])
 const previewAllFiles = ref([])
 const previewFilteredFiles = ref([])
 const previewSelectedFiles = ref([])
+const previewCurrentPage = ref(1)
+const previewPageSize = ref(50)
+const previewPagedFiles = computed(() => {
+  const start = (previewCurrentPage.value - 1) * previewPageSize.value
+  return previewFilteredFiles.value.slice(start, start + previewPageSize.value)
+})
 
 // 计算属性：分离等待重试的任务和活动任务
 const waitingRetryTasks = computed(() => {
@@ -657,6 +668,7 @@ const reapplyPreviewFilter = () => {
     })
   }
   previewFilteredFiles.value = files
+  previewCurrentPage.value = 1
 }
 
 const previewSelectionChange = (selection) => {

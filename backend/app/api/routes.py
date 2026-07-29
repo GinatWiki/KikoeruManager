@@ -3392,7 +3392,7 @@ async def asmr_sync_preview(request: Request):
                     "size": f.get('size', 0),
                     "type": f.get('type')
                 }
-                for f in filtered_files[:50]  # 只返回前50个用于预览
+                for f in filtered_files  # 返回全量文件列表
             ]
         }
 
@@ -3489,7 +3489,7 @@ async def asmr_sync_search_download(request: ASMRSearchDownloadRequest):
             "total_size": total_size,
             "files_preview": [
                 {"title": f.get('title'), "size": f.get('size', 0), "type": f.get('type')}
-                for f in filtered_files[:20]
+                for f in filtered_files
             ]
         }
 
