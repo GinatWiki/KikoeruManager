@@ -3370,6 +3370,22 @@ async def asmr_sync_preview(request: Request):
         filter_rules = config.filter.rules
         filtered_files = asmr_service.filter_files(all_files, filter_rules) if filter_rules else all_files
 
+        # 构建树形结构（标记文件是否保留）
+        keep_titles = set(f.get('title', '') for f in filtered_files)
+        def build_tree(nodes):
+            result = []
+            for node in nodes:
+                children = node.get('children', [])
+                if children:
+                    child_tree = build_tree(children)
+                    result.append({'title': node.get('title', ''), 'type': node.get('type', 'folder'), 'children': child_tree})
+                else:
+                    title = node.get('title', '')
+                    result.append({'title': title, 'type': node.get('type', 'file'), 'size': node.get('size', 0), 'keep': title in keep_titles})
+            return result
+
+        file_tree = build_tree(tracks)
+
         # 计算总大小
         total_size = sum(f.get('size', 0) for f in filtered_files)
 
@@ -3393,7 +3409,8 @@ async def asmr_sync_preview(request: Request):
                     "type": f.get('type')
                 }
                 for f in filtered_files  # 返回全量文件列表
-            ]
+            ],
+            "file_tree": file_tree
         }
 
     except HTTPException:

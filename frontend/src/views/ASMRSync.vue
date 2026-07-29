@@ -204,45 +204,43 @@
           </el-table>
         </div>
 
-        <!-- 文件列表（带勾选） -->
+        <!-- 文件树（带勾选） -->
         <div class="file-list">
           <div class="file-list-header">
-            <h4>下载文件列表 ({{ previewFilteredFiles.length }}/{{ previewAllFiles.length }} 个)</h4>
-            <el-button type="primary" size="small" @click="downloadSelectedFiles" :loading="searching" :disabled="previewSelectedFiles.length === 0">
+            <h4>下载文件列表 ({{ previewKeepCount }}/{{ previewTotalCount }} 个)</h4>
+            <el-button type="primary" size="small" @click="downloadTreeSelected" :loading="searching" :disabled="previewTreeSelected.length === 0">
               <el-icon><Download /></el-icon>
-              下载选中 ({{ previewSelectedFiles.length }})
+              下载选中 ({{ previewTreeSelected.length }})
             </el-button>
           </div>
-          <el-table :data="previewPagedFiles" max-height="400" size="small" @selection-change="previewSelectionChange">
-            <el-table-column type="selection" width="45" />
-            <el-table-column label="文件路径" min-width="300">
-              <template #default="{ row }">
-                <div class="file-path">
-                  <el-icon><Document /></el-icon>
-                  <span :title="row.path || row.title">{{ row.title }}</span>
-                </div>
-              </template>
-            </el-table-column>
-            <el-table-column prop="type" label="类型" width="80">
-              <template #default="{ row }">
-                <el-tag size="small" type="info">{{ row.type || '文件' }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="大小" width="100">
-              <template #default="{ row }">{{ formatSize(row.size) }}</template>
-            </el-table-column>
-          </el-table>
-          <div class="pagination-container" v-if="previewFilteredFiles.length > previewPageSize">
-            <el-pagination v-model:current-page="previewCurrentPage" v-model:page-size="previewPageSize"
-              :page-sizes="[50, 100, 200]" :total="previewFilteredFiles.length"
-              layout="total, sizes, prev, pager, next" />
-          </div>
-        </div>
-      </div>
-      <div v-else class="preview-error">
-        <el-empty description="无法获取预览信息" />
-      </div>
-    </el-dialog>
+          <el-tree
+            ref="previewTreeRef"
+            :data="previewTreeData"
+            show-checkbox
+            node-key="title"
+            default-expand-all
+            :props="{ label: 'title', children: 'children' }"
+            @check="onTreeCheck"
+            style="max-height: 450px; overflow-y: auto;"
+          >
+            <template #default="{ data }">
+              <span class="tree-node">
+                <span class="tree-node-label">
+                  <el-icon v-if="data.children"><Folder /></el-icon>
+                  <el-icon v-else><Document /></el-icon>
+                  {{ data.title }}
+                </span>
+                <span class="tree-node-info" v-if="!data.children">
+                  <el-tag size="small" type="info">{{ getExt(data.title) }}</el-tag>
+                  <span class="tree-node-size">{{ formatSize(data.size) }}</span>
+                </span>
+                <span class="tree-node-info" v-else>
+                  <span class="tree-node-count">{{ countLeafNodes(data) }} 个文件</span>
+                </span>
+              </span>
+            </template>
+          </el-tree>
+        </div></div></el-dialog>
 
     <!-- 任务详情 -->
     <el-card v-if="tasks.length > 0" class="tasks-card">
@@ -414,7 +412,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search, Download, Folder, Loading, Refresh, Document, WarningFilled, Clock, View, Plus, Delete } from '@element-plus/icons-vue'
 import { asmrSyncApi, configApi } from '../api'
@@ -440,6 +438,9 @@ const previewFilterRules = ref([])
 const previewAllFiles = ref([])
 const previewFilteredFiles = ref([])
 const previewSelectedFiles = ref([])
+const previewTreeRef = ref(null)
+const previewTreeData = ref([])
+const previewTreeSelected = ref([])
 const previewCurrentPage = ref(1)
 const previewPageSize = ref(50)
 const previewPagedFiles = computed(() => {
@@ -609,6 +610,8 @@ const handleSearchPreview = async () => {
       } catch {}
       previewAllFiles.value = result.files || []
       previewFilteredFiles.value = result.files || []
+      previewTreeData.value = result.file_tree || []
+      nextTick(() => initPreviewTree())
       reapplyPreviewFilter()
     } else {
       searchResult.value = { type: 'error', msg: result.error || '未找到作品' }
@@ -673,6 +676,76 @@ const reapplyPreviewFilter = () => {
 
 const previewSelectionChange = (selection) => {
   previewSelectedFiles.value = selection
+}
+
+
+
+// 初始化文件树：设置勾选
+function initPreviewTree() {
+  const tree = previewTreeRef.value
+  if (!tree) return
+  // 找出所有 keep=true 的叶子节点标题
+  const keepKeys = []
+  function findKeep(nodes) {
+    for (const n of nodes) {
+      if (n.children) findKeep(n.children)
+      else if (n.keep) keepKeys.push(n.title)
+    }
+  }
+  findKeep(previewTreeData.value)
+  tree.setCheckedKeys(keepKeys)
+  // 初始化选中列表
+  previewTreeSelected.value = keepKeys
+}
+
+function onTreeCheck(data, { checkedKeys }) {
+  previewTreeSelected.value = checkedKeys
+}
+
+const previewKeepCount = computed(() => previewTreeSelected.value.length)
+const previewTotalCount = computed(() => {
+  function count(nodes) {
+    let n = 0
+    for (const node of nodes) {
+      if (node.children) n += count(node.children)
+      else n++
+    }
+    return n
+  }
+  return count(previewTreeData.value)
+})
+
+function countLeafNodes(node) {
+  if (!node.children) return 1
+  let n = 0
+  for (const c of node.children) {
+    if (c.children) n += countLeafNodes(c)
+    else n++
+  }
+  return n
+}
+
+function getExt(filename) {
+  const parts = (filename || '').split('.')
+  return parts.length > 1 ? parts[parts.length - 1] : '-'
+}
+
+// 下载树形中选中的文件
+const downloadTreeSelected = async () => {
+  if (previewTreeSelected.value.length === 0) return ElMessage.warning('请先选择文件')
+  searching.value = true
+  try {
+    const result = await asmrSyncApi.downloadSelected(previewData.value.rjcode, previewTreeSelected.value)
+    if (result.success) {
+      ElMessage.success('下载任务已创建：' + result.title + '（' + result.selected_count + ' 个文件）')
+      previewDialogVisible.value = false
+      await refreshStatus()
+    }
+  } catch (error) {
+    ElMessage.error('下载失败: ' + (error.response?.data?.detail || error.message))
+  } finally {
+    searching.value = false
+  }
 }
 
 const addPreviewFilterRule = () => {
@@ -813,6 +886,11 @@ usePoller('asmr-sync-status', refreshStatus)
 .filter-rules-header h4 { margin: 0; }
 .file-list-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .file-list-header h4 { margin: 0; }
+.tree-node { display: flex; justify-content: space-between; align-items: center; width: 100%; }
+.tree-node-label { display: flex; align-items: center; gap: 6px; }
+.tree-node-info { display: flex; align-items: center; gap: 8px; margin-right: 8px; }
+.tree-node-size { color: #909399; font-size: 12px; min-width: 60px; text-align: right; }
+.tree-node-count { color: #909399; font-size: 12px; }
 .results-header { display: flex; justify-content: space-between; align-items: center; }
 .folder-name { display: flex; align-items: center; gap: 8px; }
 .preview-loading { display: flex; flex-direction: column; align-items: center; padding: 40px; gap: 12px; }
