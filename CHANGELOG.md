@@ -2,10 +2,13 @@
 
 本文件记录 KikoeruManager 的版本变化、功能更新与问题修复。更早的历史版本可通过 GitHub Tags 与提交历史查看。
 
+## v2.4.8
+
+- 修复：AI 标题汉化 _temporary_proxy 函数缺少 @contextlib.asynccontextmanager 装饰器，导致 async with 调用时报 async_generator object does not support the asynchronous context manager protocol，翻译请求全部重试后失败。
+
 ## v2.4.7
 
 - 修复：AI 标题汉化"复用 AI 配对 API 配置"功能不生效。use_ai_subtitle_api 字段写入了 config 顶层而非 ai_title_translation 下，导致保存配置时标志位丢失、翻译请求时合并跳过、model 为空报错。改为写入 ai_title_translation 下正确层级，脏追踪同步正常工作。
-
 
 ## v2.3.19
 
