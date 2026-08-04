@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -100,6 +101,7 @@ def _normalize_error(exc: Exception) -> Dict[str, str]:
     return {"code": code, "title": title, "suggestion": suggestion}
 
 
+@contextlib.asynccontextmanager
 async def _temporary_proxy(proxy_url: str):
     proxy = _safe_text(proxy_url)
     if not proxy:
