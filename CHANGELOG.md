@@ -2,6 +2,13 @@
 
 本文件记录 KikoeruManager 的版本变化、功能更新与问题修复。更早的历史版本可通过 GitHub Tags 与提交历史查看。
 
+## v2.4.9
+
+- 修复：AI 标题汉化 _completion_kwargs 缺少 custom_llm_provider 参数，当 api_base 已配置且使用非标准模型名（如 DS官/deepseek-v4-flash）时，litellm 无法识别 provider 报 BadRequestError。
+# 版本更新记录
+
+本文件记录 KikoeruManager 的版本变化、功能更新与问题修复。更早的历史版本可通过 GitHub Tags 与提交历史查看。
+
 ## v2.4.8
 
 - 修复：AI 标题汉化 _temporary_proxy 函数缺少 @contextlib.asynccontextmanager 装饰器，导致 async with 调用时报 async_generator object does not support the asynchronous context manager protocol，翻译请求全部重试后失败。
