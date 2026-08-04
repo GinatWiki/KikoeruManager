@@ -1,6 +1,7 @@
 ﻿"""AI 标题汉化服务。复用 LiteLLM 基础设施，将日文作品标题翻译为中文。"""
 from __future__ import annotations
 
+
 import asyncio
 import contextlib
 import hashlib
@@ -11,15 +12,21 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+
 import logging
+
 
 from .log_sanitizer import mask_url_for_log, sanitize_text_for_log
 
+
 logger = logging.getLogger(__name__)
+
 
 MASKED_SECRET = "********"
 _PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
 _proxy_lock = asyncio.Lock()
+
+
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -29,8 +36,12 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+
+
 def _safe_text(value: Any) -> str:
     return str(value or "").strip()
+
+
 
 
 def _config_to_dict(config: Any) -> Dict[str, Any]:
@@ -45,6 +56,8 @@ def _config_to_dict(config: Any) -> Dict[str, Any]:
         for key in dir(config)
         if not key.startswith("_") and not callable(getattr(config, key, None))
     }
+
+
 
 
 def _extract_litellm_content(response: Any) -> Tuple[str, Dict[str, int]]:
@@ -75,10 +88,14 @@ def _extract_litellm_content(response: Any) -> Tuple[str, Dict[str, int]]:
     }
 
 
+
+
 def _is_azure_config(config: Dict[str, Any]) -> bool:
     base_url = _safe_text(config.get("api_base")).lower()
     api_version = _safe_text(config.get("api_version"))
     return bool(api_version and ("azure" in base_url or ".openai.azure.com" in base_url))
+
+
 
 
 def _normalize_error(exc: Exception) -> Dict[str, str]:
@@ -99,6 +116,8 @@ def _normalize_error(exc: Exception) -> Dict[str, str]:
     elif "timeout" in lowered:
         code, title, suggestion = "timeout", "请求超时", "检查网络连接或增加超时时间"
     return {"code": code, "title": title, "suggestion": suggestion}
+
+
 
 
 @contextlib.asynccontextmanager
@@ -122,8 +141,11 @@ async def _temporary_proxy(proxy_url: str):
                     os.environ.pop(key, None)
 
 
+
+
 class AITitleTranslationService:
     """AI 标题翻译服务。将日文作品标题翻译为中文。"""
+
 
     def _normalize_runtime_config(self, raw_config: Any, *, saved_api_key: str = "") -> Dict[str, Any]:
         config = _config_to_dict(raw_config)
@@ -132,6 +154,7 @@ class AITitleTranslationService:
             config["api_key"] = saved_api_key or ""
         return config
 
+
     def _build_messages(self, config: Dict[str, Any], work_name: str) -> List[Dict[str, str]]:
         prompt_template = config.get("prompt_template") or "请将以下日文作品标题翻译成中文，只输出翻译结果：\n{work_name}"
         prompt = prompt_template.replace("{work_name}", work_name)
@@ -139,6 +162,7 @@ class AITitleTranslationService:
             {"role": "system", "content": "你是一个专业的日文标题翻译助手。请根据用户提供的标题进行翻译。"},
             {"role": "user", "content": prompt},
         ]
+
 
     def _completion_kwargs(
         self,
@@ -159,6 +183,8 @@ class AITitleTranslationService:
         api_base = _safe_text(config.get("api_base"))
         if api_base:
             kwargs["api_base"] = api_base.rstrip("/")
+        if api_base and not _is_azure_config(config):
+            kwargs["custom_llm_provider"] = "openai"
         api_version = _safe_text(config.get("api_version"))
         if api_version:
             kwargs["api_version"] = api_version
@@ -168,6 +194,7 @@ class AITitleTranslationService:
         kwargs["timeout"] = float(timeout_seconds or _safe_int(config.get("timeout_seconds"), 30))
         return kwargs
 
+
     async def _call_model(self, config: Dict[str, Any], work_name: str) -> Tuple[str, Dict[str, int]]:
         """调用 LLM 翻译标题。返回 (翻译文本, usage)。"""
         if not config.get("model"):
@@ -175,15 +202,18 @@ class AITitleTranslationService:
         if not config.get("api_key"):
             raise ValueError("missing_config: api_key 不能为空")
 
+
         try:
             import litellm
         except Exception as exc:
             raise RuntimeError(f"missing_config: 后端未安装 litellm: {exc}") from exc
 
+
         request_label = f"标题翻译[{uuid.uuid4().hex[:8]}]"
         messages = self._build_messages(config, work_name)
         kwargs = self._completion_kwargs(config, messages)
         max_retries = _safe_int(config.get("max_retries"), 2)
+
 
         last_error: Optional[Exception] = None
         for attempt in range(max_retries + 1):
@@ -229,7 +259,9 @@ class AITitleTranslationService:
                     await asyncio.sleep(wait)
                 continue
 
+
         raise last_error or RuntimeError("翻译失败")
+
 
     async def translate_single(
         self,
@@ -242,6 +274,7 @@ class AITitleTranslationService:
         cfg = self._normalize_runtime_config(config, saved_api_key=saved_api_key)
         if not cfg.get("enabled", False):
             return {"success": False, "status": "disabled", "translated_title": None}
+
 
         started = time.perf_counter()
         try:
@@ -268,6 +301,7 @@ class AITitleTranslationService:
                 "duration_ms": duration_ms,
             }
 
+
     async def translate_batch(
         self,
         items: List[Dict[str, str]],
@@ -281,6 +315,7 @@ class AITitleTranslationService:
         cfg = self._normalize_runtime_config(config, saved_api_key=saved_api_key)
         if not cfg.get("enabled", False):
             return [{"success": False, "status": "disabled", "rjcode": item.get("rjcode"), "translated_title": None} for item in items]
+
 
         batch_size = _safe_int(cfg.get("batch_size"), 5)
         results = []
@@ -299,6 +334,7 @@ class AITitleTranslationService:
                     continue
                 batch_tasks.append(self.translate_single(work_name, config, saved_api_key=saved_api_key))
 
+
             batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
             for j, result in enumerate(batch_results):
                 if isinstance(result, Exception):
@@ -313,7 +349,9 @@ class AITitleTranslationService:
                     result["rjcode"] = batch[j].get("rjcode")
                     results.append(result)
 
+
         return results
+
 
     async def test_connection(self, raw_config: Any, *, saved_api_key: str = "") -> Dict[str, Any]:
         """测试 AI 模型连接。"""
@@ -324,10 +362,12 @@ class AITitleTranslationService:
         except Exception as exc:
             return {"success": False, "error": f"缺少 litellm 依赖: {exc}"}
 
+
         if not config.get("model"):
             return {"success": False, "error": "model 不能为空"}
         if not config.get("api_key"):
             return {"success": False, "error": "api_key 不能为空"}
+
 
         messages = [
             {"role": "user", "content": "你好，请回复\"OK\"表示连接正常。"}
@@ -356,7 +396,11 @@ class AITitleTranslationService:
             }
 
 
+
+
 _ai_title_translation_service: Optional[AITitleTranslationService] = None
+
+
 
 
 def get_ai_title_translation_service() -> AITitleTranslationService:
