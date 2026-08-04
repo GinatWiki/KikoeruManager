@@ -1,6 +1,11 @@
-# 版本更新记录
+﻿# 版本更新记录
 
 本文件记录 KikoeruManager 的版本变化、功能更新与问题修复。更早的历史版本可通过 GitHub Tags 与提交历史查看。
+
+## v2.4.7
+
+- 修复：AI 标题汉化"复用 AI 配对 API 配置"功能不生效。use_ai_subtitle_api 字段写入了 config 顶层而非 ai_title_translation 下，导致保存配置时标志位丢失、翻译请求时合并跳过、model 为空报错。改为写入 ai_title_translation 下正确层级，脏追踪同步正常工作。
+
 
 ## v2.3.19
 
@@ -8,21 +13,21 @@
 
 ## v2.3.18
 
-- 修复：Windows exe 发行版无法独立启动的问题。exe 首次运行会自动引导内置 PostgreSQL / Redis，优先使用发行包内携带的 `tools/postgres`、`tools/redis` 或系统已有安装，缺失时自动下载便携版并初始化到 `data/postgresql` / `data/redis`，启动前把连接信息写入 `data/config/config.yaml`。
-- 增强：发布流水线把 PostgreSQL 18 便携版与 Redis 一起打进发行 zip；`backend/build.py` 与 `build-release.bat` 会把 `tools/redis/redis-server.exe` 打包进 exe。
+- 修复：Windows exe 发行版无法独立启动的问题。exe 首次运行会自动引导内置 PostgreSQL / Redis，优先使用发行包内携带的 	ools/postgres、	ools/redis 或系统已有安装，缺失时自动下载便携版并初始化到 data/postgresql / data/redis，启动前把连接信息写入 data/config/config.yaml。
+- 增强：发布流水线把 PostgreSQL 18 便携版与 Redis 一起打进发行 zip；ackend/build.py 与 uild-release.bat 会把 	ools/redis/redis-server.exe 打包进 exe。
 - 修复：桌面版等待后端启动超时从 20 秒放宽到 120 秒，避免首次初始化数据库耗时较长时误报失败。
 
 ## v2.3.14
 
-- 发布源切换：本仓库更名为 `GinatWiki/KikoeruManager`，README 克隆、Releases、GHCR 镜像、Docker Compose 与 Unraid 模板统一指向 `ghcr.io/ginatwiki/kikoerumanager`。
-- 文档：README 增加上游贡献徽章与“项目来源与协作”说明，明确项目由 canforgiveher 发起、Elena3939/KikoeruManager 基于原项目开发并贡献大量代码，双方均采用 MIT 许可。
-- 修复：Windows 发布流水线改用 `KikoeruManager` 产物命名，Docker 文档清理旧镜像与旧仓库链接。
+- 发布源切换：本仓库更名为 GinatWiki/KikoeruManager，README 克隆、Releases、GHCR 镜像、Docker Compose 与 Unraid 模板统一指向 ghcr.io/ginatwiki/kikoerumanager。
+- 文档：README 增加上游贡献徽章与"项目来源与协作"说明，明确项目由 canforgiveher 发起、Elena3939/KikoeruManager 基于原项目开发并贡献大量代码，双方均采用 MIT 许可。
+- 修复：Windows 发布流水线改用 KikoeruManager 产物命名，Docker 文档清理旧镜像与旧仓库链接。
 - 修复：Windows exe 发行版打包路径与产物名一致，手动触发时支持填写版本号；发布流水线新增 exe 产物校验。
 
 ## v2.3.15
 
-- 修复：DLsite 文件名使用 `s114_NN` 全局轨道号优先于 `トラックN`，解决字幕同步把附赠音轨整批错配的问题。
-- 修复：字幕同步支持音频分布在多个目录（如 `本編/WAV`、`おまけトラック/WAV`），不再只处理第一个音频目录。
+- 修复：DLsite 文件名使用 s114_NN 全局轨道号优先于 トラックN，解决字幕同步把附赠音轨整批错配的问题。
+- 修复：字幕同步支持音频分布在多个目录（如 本編/WAV、おまけトラック/WAV），不再只处理第一个音频目录。
 - 增强：剩余文件按标题相似度门控，低置信度配对不再自动重命名，保留给人工确认或 AI 自动补全。
 - 增强：RJ 字幕服务复用同一轨道号提取与相似度门控，避免顺序盲配。
 
@@ -37,7 +42,7 @@
 
 ## v2.3.13
 
-- 修复：解压入库未指定库存时优先使用“默认解压库存”，避免误落入主库存或一键移库目标库存。
+- 修复：解压入库未指定库存时优先使用"默认解压库存"，避免误落入主库存或一键移库目标库存。
 
 ## v2.3.12
 
@@ -49,17 +54,17 @@
 
 ## v2.3.10
 
-- 增强：增强下载的“默认开启过滤”、目标库存、子目录、命名与分类模式记忆上次设置。
-- 修复：“智能分类规则”按钮选中态改为紫色（浅色/暗色）。
+- 增强：增强下载的"默认开启过滤"、目标库存、子目录、命名与分类模式记忆上次设置。
+- 修复："智能分类规则"按钮选中态改为紫色（浅色/暗色）。
 
 ## v2.3.9
 
-- 增强：增强下载入库尊重“重命名”步骤开关，支持单层文件夹扁平化。
+- 增强：增强下载入库尊重"重命名"步骤开关，支持单层文件夹扁平化。
 - 优化：跳过原因输出日志。
 
 ## v2.3.8
 
-- 增强：增强下载入库支持智能分类规则（如 RJ 范围 → `RJ016xxxxx`）。
+- 增强：增强下载入库支持智能分类规则（如 RJ 范围 → RJ016xxxxx）。
 - 增强：入库前执行字幕简中化与统一字幕同步，冲突进入问题作品。
 
 ## v2.3.7
@@ -68,20 +73,20 @@
 
 ## v2.3.6
 
-- 调整：字幕同步“AI 辅助配对”改为按 AI 配对设置的模式调用（规则优先 + AI 自动补全 / 全量 AI / 仅辅助）。
+- 调整：字幕同步"AI 辅助配对"改为按 AI 配对设置的模式调用（规则优先 + AI 自动补全 / 全量 AI / 仅辅助）。
 
 ## v2.3.5
 
-- 增强：字幕同步新增“字幕内容检测优先”开关；字幕版本优先级改为正则匹配目录/版本名。
+- 增强：字幕同步新增"字幕内容检测优先"开关；字幕版本优先级改为正则匹配目录/版本名。
 
 ## v2.3.4
 
 - 调整：正常解压流程设置开关顺序修正为 解压 → 重命名 → 过滤 → 同步字幕 → 分类。
-- 文档：README 增加“项目来源与协作”说明。
+- 文档：README 增加"项目来源与协作"说明。
 
 ## v2.3.3
 
-- 修复：库存工作台“一键移库目标库存”开关不触发设置保存提示。
+- 修复：库存工作台"一键移库目标库存"开关不触发设置保存提示。
 
 ## v2.3.2
 
