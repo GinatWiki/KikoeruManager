@@ -146,8 +146,8 @@ const cfg = computed(() => props.config.ai_title_translation || {})
 const subCfg = computed(() => props.config)
 
 const useAiSubtitleApi = computed({
-  get: () => props.config.use_ai_subtitle_api === true,
-  set: (val) => { props.config.use_ai_subtitle_api = val },
+  get: () => cfg.value.use_ai_subtitle_api === true,
+  set: (val) => { cfg.value.use_ai_subtitle_api = val },
 })
 
 // API Key 显示/隐藏逻辑
