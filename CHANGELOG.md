@@ -134,3 +134,8 @@
 - 修复：获取文件树功能现在弹出对话框显示文件树文本（即使剪贴板复制失败也能手动复制）
 - 添加 clipboard.writeText 失败的 execCommand 回退机制
 - 修复 style 属性缺少双引号的问题
+
+## v2.4.20
+
+- 修复：moveIndexFencesMaterialized 函数缺少闭合大括号，导致 getFileTree 被嵌套在该函数内，无法被右键菜单调用，显示 ReferenceError
+- 获取文件树功能现在正常工作：点击后弹窗显示文件树文本，同时尝试复制到剪贴板
