@@ -289,14 +289,31 @@ class MediaAwareGZipMiddleware(GZipMiddleware):
             await self.app(scope, receive, send)
             return
 
+        import inspect as _inspect
+        _gz_kwargs = {}
+        try:
+            _gz_params = _inspect.signature(GZipResponder.__init__).parameters
+            if "thread_minimum_size" in _gz_params:
+                _gz_kwargs["thread_minimum_size"] = getattr(self, "thread_minimum_size", 1024 * 1024)
+        except Exception:
+            pass
+
+        _id_kwargs = {}
+        try:
+            _id_params = _inspect.signature(IdentityResponder.__init__).parameters
+            if "thread_minimum_size" in _id_params:
+                _id_kwargs["thread_minimum_size"] = getattr(self, "thread_minimum_size", 1024 * 1024)
+        except Exception:
+            pass
+
         path = str(scope.get("path") or "")
         if path.startswith("/assets/"):
-            responder = IdentityResponder(self.app, self.minimum_size, thread_minimum_size=getattr(self, "thread_minimum_size", 1024 * 1024))
+            responder = IdentityResponder(self.app, self.minimum_size, **_id_kwargs)
             await responder(scope, receive, send)
             return
 
         headers = Headers(scope=scope)
-        responder = MediaAwareGZipResponder(self.app, self.minimum_size, compresslevel=self.compresslevel, thread_minimum_size=getattr(self, "thread_minimum_size", 1024 * 1024)) if "gzip" in headers.get("Accept-Encoding", "") else IdentityResponder(self.app, self.minimum_size, thread_minimum_size=getattr(self, "thread_minimum_size", 1024 * 1024))
+        responder = MediaAwareGZipResponder(self.app, self.minimum_size, compresslevel=self.compresslevel, **_gz_kwargs) if "gzip" in headers.get("Accept-Encoding", "") else IdentityResponder(self.app, self.minimum_size, **_id_kwargs)
         await responder(scope, receive, send)
 
 
