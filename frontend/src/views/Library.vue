@@ -22983,8 +22983,6 @@ function moveIndexFencesMaterialized (result) {
     return acceptedSeq > 0 && Number(status?.materialized_seq || 0) >= acceptedSeq
   })
 
-}
-
 async function getFileTree (row) {
   const path = row?.path || ''
   if (!path) {
