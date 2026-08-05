@@ -846,7 +846,9 @@
         :disable-compute-size="libraryRowContextMenuProps.disableComputeSize"
 
         :disable-filter-delete="libraryRowContextMenuProps.disableFilterDelete"
-        :disable-ai-title="libraryRowContextMenuProps.disableAiTitle"`r`n        :show-file-tree="libraryRowContextMenuProps.showFileTree"`r`n        :disable-file-tree="libraryRowContextMenuProps.disableFileTree"
+        :disable-ai-title="libraryRowContextMenuProps.disableAiTitle"
+        :show-file-tree="libraryRowContextMenuProps.showFileTree"
+        :disable-file-tree="libraryRowContextMenuProps.disableFileTree"
 
         :computing-size-id="libraryRowContextMenuProps.computingSizeId"
 
@@ -22980,6 +22982,41 @@ function moveIndexFencesMaterialized (result) {
     const status = libraryIndexStateStore.statusFor(libraryId) || libraryIndexStateStore.indexViewFor(libraryId)
     return acceptedSeq > 0 && Number(status?.materialized_seq || 0) >= acceptedSeq
   })
+
+async function getFileTree (row) {
+  const path = row?.path || ''
+  if (!path) {
+    ElMessage.warning('缺少路径')
+    return
+  }
+  if (!currentLibraryId.value) {
+    ElMessage.warning('缺少库 ID')
+    return
+  }
+  try {
+    const resp = await fetch('/api/ai-title-translation/file-tree', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        library_id: currentLibraryId.value,
+        path: path,
+      }),
+    })
+    const result = await resp.json()
+    if (result.success && result.tree) {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(result.tree)
+        ElMessage.success('文件树已复制到剪贴板')
+      } else {
+        ElMessage.warning('浏览器不支持剪贴板')
+      }
+    } else {
+      ElMessage.info(result.error || '获取文件树失败')
+    }
+  } catch (e) {
+    ElMessage.error('获取文件树失败：' + (e.response?.data?.detail || e.message))
+  }
+}
 }
 
 async function waitForMoveIndexFences (result, timeoutMs = 8000) {
