@@ -251,6 +251,9 @@ class MediaAwareGZipResponder(GZipResponder):
                 await self.send(message)
             elif not more_body:
                 body = self.apply_compression(body, more_body=False)
+                import asyncio as _asyncio
+                if _asyncio.iscoroutine(body):
+                    body = await body
 
                 headers = MutableHeaders(raw=self.initial_message["headers"])
                 headers.add_vary_header("Accept-Encoding")
@@ -263,6 +266,8 @@ class MediaAwareGZipResponder(GZipResponder):
                 await self.send(message)
             else:
                 body = self.apply_compression(body, more_body=True)
+                if _asyncio.iscoroutine(body):
+                    body = await body
 
                 headers = MutableHeaders(raw=self.initial_message["headers"])
                 headers.add_vary_header("Accept-Encoding")
