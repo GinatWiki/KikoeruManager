@@ -23004,12 +23004,43 @@ async function getFileTree (row) {
     })
     const result = await resp.json()
     if (result.success && result.tree) {
+      const treeText = result.tree
+      let copied = false
       if (navigator?.clipboard?.writeText) {
-        await navigator.clipboard.writeText(result.tree)
-        ElMessage.success('文件树已复制到剪贴板')
-      } else {
-        ElMessage.warning('浏览器不支持剪贴板')
+        try {
+          await navigator.clipboard.writeText(treeText)
+          copied = true
+        } catch (_err) {
+          // HTTP 非安全上下文或权限被拒;回退到 execCommand
+        }
       }
+      if (!copied) {
+        try {
+          const textarea = document.createElement('textarea')
+          textarea.value = treeText
+          textarea.setAttribute('readonly', '')
+          textarea.style.position = 'fixed'
+          textarea.style.left = '-9999px'
+          document.body.appendChild(textarea)
+          textarea.select()
+          document.execCommand('copy')
+          document.body.removeChild(textarea)
+          copied = true
+        } catch (_err) {
+          // execCommand 也失败;弹窗让用户手动复制
+        }
+      }
+      const escapedTree = treeText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      ElMessageBox.alert(
+        '<pre style="max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-all;font-size:13px;line-height:1.6;user-select:text;cursor:text;margin:0;">' + escapedTree + '</pre>',
+        copied ? '文件树已复制到剪贴板' : '文件树（请手动复制以下内容）',
+        {
+          confirmButtonText: '关闭',
+          dangerouslyUseHTMLString: true,
+          customClass: 'file-tree-display-dialog',
+        }
+      )
+
     } else {
       ElMessage.info(result.error || '获取文件树失败')
     }
