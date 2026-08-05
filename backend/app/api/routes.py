@@ -286,12 +286,12 @@ class MediaAwareGZipMiddleware(GZipMiddleware):
 
         path = str(scope.get("path") or "")
         if path.startswith("/assets/"):
-            responder = IdentityResponder(self.app, self.minimum_size)
+            responder = IdentityResponder(self.app, self.minimum_size, thread_minimum_size=getattr(self, "thread_minimum_size", 1024 * 1024))
             await responder(scope, receive, send)
             return
 
         headers = Headers(scope=scope)
-        responder = MediaAwareGZipResponder(self.app, self.minimum_size, compresslevel=self.compresslevel) if "gzip" in headers.get("Accept-Encoding", "") else IdentityResponder(self.app, self.minimum_size)
+        responder = MediaAwareGZipResponder(self.app, self.minimum_size, compresslevel=self.compresslevel, thread_minimum_size=getattr(self, "thread_minimum_size", 1024 * 1024)) if "gzip" in headers.get("Accept-Encoding", "") else IdentityResponder(self.app, self.minimum_size, thread_minimum_size=getattr(self, "thread_minimum_size", 1024 * 1024))
         await responder(scope, receive, send)
 
 
