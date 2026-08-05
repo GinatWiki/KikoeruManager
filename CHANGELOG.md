@@ -2,6 +2,10 @@
 
 本文件记录 KikoeruManager 的版本变化、功能更新与问题修复。更早的历史版本可通过 GitHub Tags 与提交历史查看。
 
+## v2.4.10
+
+- 修复：AI 标题汉化写入 work_metadata 时变量 text 覆盖 SQLAlchemy 的 text() 函数，导致调用 text("UPDATE ...") 时报 'str' object is not callable。改为 title_text。
+- 优化：AI 标题汉化翻译成功日志不再截断 content[:60]，显示完整 AI 输出便于调试。
 ## v2.4.9
 
 - 修复：AI 标题汉化 _completion_kwargs 缺少 custom_llm_provider 参数，当 api_base 已配置且使用非标准模型名（如 DS官/deepseek-v4-flash）时，litellm 无法识别 provider 报 BadRequestError。
