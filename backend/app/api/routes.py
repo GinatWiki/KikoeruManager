@@ -2863,6 +2863,7 @@ class AITitleTranslationTestRequest(BaseModel):
 
 class AITitleTranslationBatchRequest(BaseModel):
     rjcodes: List[str] = []
+    work_names: Dict[str, str] = {}  # rjcode -> folder name override
 
 
 class AITitleTranslationFileRenameRequest(BaseModel):
@@ -3889,6 +3890,11 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
             {"rjcode": rjcode}
         ).fetchone()
         work_name = row[0] if row else rjcode
+        # 如果数据库中的 work_name 只是 RJ 号，使用前端传入的文件夹名
+        folder_name = (request.work_names or {}).get(rjcode, "")
+        import re as _re
+        if folder_name and (not work_name or _re.match(r"^RJ\d+$", work_name, _re.IGNORECASE)):
+            work_name = folder_name
         items.append({"rjcode": rjcode, "work_name": work_name})
     db.close()
 

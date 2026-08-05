@@ -67,6 +67,17 @@
           <span>复制文件名</span>
         </button>
 
+        <button
+          v-if="showFileTree"
+          type="button"
+          class="menu-item"
+          :disabled="disableFileTree"
+          @click="emit('action', 'file_tree')"
+        >
+          <TreePine :size="14" :stroke-width="2.2" class="menu-item-icon text-teal-600" />
+          <span>获取文件树</span>
+        </button>
+
         <div class="my-1 border-t border-slate-200"></div>
 
         <button
@@ -231,7 +242,7 @@
 
 <script setup>
 import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { Captions, Copy, ExternalLink, Eye, FolderCog, FolderInput, FolderOpen, FolderSync, HardDrive, MapPin, PackageOpen, Pencil, Sparkles, Tags, Trash2, UploadCloud, Languages } from 'lucide-vue-next'
+import { Captions, Copy, ExternalLink, Eye, FolderCog, FolderInput, FolderOpen, FolderSync, HardDrive, MapPin, PackageOpen, Pencil, Sparkles, Tags, Trash2, UploadCloud, Languages, TreePine } from 'lucide-vue-next'
 import baiduNetdiskIcon from '../../assets/platforms/baidu-netdisk.ico'
 
 const props = defineProps({
@@ -270,6 +281,8 @@ const props = defineProps({
   disableFolderCompletion: { type: Boolean, default: false },
   disableFilterDelete: { type: Boolean, default: false },
   disableAiTitle: { type: Boolean, default: false },
+  showFileTree: { type: Boolean, default: false },
+  disableFileTree: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['close', 'action'])

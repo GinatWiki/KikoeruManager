@@ -846,7 +846,7 @@
         :disable-compute-size="libraryRowContextMenuProps.disableComputeSize"
 
         :disable-filter-delete="libraryRowContextMenuProps.disableFilterDelete"
-        :disable-ai-title="libraryRowContextMenuProps.disableAiTitle"
+        :disable-ai-title="libraryRowContextMenuProps.disableAiTitle"`r`n        :show-file-tree="libraryRowContextMenuProps.showFileTree"`r`n        :disable-file-tree="libraryRowContextMenuProps.disableFileTree"
 
         :computing-size-id="libraryRowContextMenuProps.computingSizeId"
 
@@ -5066,6 +5066,8 @@ const libraryRowContextMenuProps = computed(() => {
     disableFilterDelete: batchMode
       ? (!selectedRealFilterDeleteRows.value.length || selectedRealFilterDeleteRows.value.some(item => !isRowWritableLibrary(item)))
       : ((!actionRow?.is_directory || !rowWritable || !circleRealRow) && !hasCircleVirtualTargets),
+    showFileTree: Boolean(hasRow && actionRow?.is_directory && extractRJCode(actionRow.name || actionRow.path || "")),
+    disableFileTree: batchMode || !rowWritable,
     computingSizeId: computingSizeId.value
   }
 })
@@ -22294,6 +22296,8 @@ async function handleLibraryRowContextMenuAction (action) {
 
   if (action === 'copy_name') return copyRowName(row)
 
+  if (action === 'file_tree') return getFileTree(row)
+
   if (action === 'rename') return renameItem(row)
 
   if (action === 'move') return openMoveDialog([row])
@@ -23405,10 +23409,11 @@ async function aiTitleRenameItem (row) {
     return
   }
   try {
+    const folderName = row.name || row.path || ''
     const resp = await fetch('/api/ai-title-translation/batch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rjcodes: [rjcode] }),
+      body: JSON.stringify({ rjcodes: [rjcode], work_names: { [rjcode]: folderName } }),
     })
     const result = await resp.json()
     if (result.success_count > 0) {
