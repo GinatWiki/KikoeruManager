@@ -2,6 +2,10 @@
 
 本文件记录 KikoeruManager 的版本变化、功能更新与问题修复。更早的历史版本可通过 GitHub Tags 与提交历史查看。
 
+## v2.4.11
+
+- 修复：AI 标题汉化第一个循环中 text 变量替换不完整，	itle_text 替换遗漏了 	ext.find、	ext.rfind、	ext[json_start:json_end] 等引用，导致报错 'function' object has no attribute 'find'。
+
 ## v2.4.10
 
 - 修复：AI 标题汉化写入 work_metadata 时变量 text 覆盖 SQLAlchemy 的 text() 函数，导致调用 text("UPDATE ...") 时报 'str' object is not callable。改为 title_text。

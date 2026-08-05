@@ -3901,8 +3901,8 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
     for r in results:
         if r.get("success") and r.get("translated_title"):
             title_text = r["translated_title"].strip()
-            json_start = text.find("{")
-            json_end = text.rfind("}") + 1
+            json_start = title_text.find("{")
+            json_end = title_text.rfind("}") + 1
             if json_start >= 0 and json_end > json_start:
                 import json as _json2
                 try:
