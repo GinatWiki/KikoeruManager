@@ -3900,13 +3900,13 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
     # 清理返回结果中的 JSON 包装，前端直接显示翻译文本
     for r in results:
         if r.get("success") and r.get("translated_title"):
-            text = r["translated_title"].strip()
+            title_text = r["translated_title"].strip()
             json_start = text.find("{")
             json_end = text.rfind("}") + 1
             if json_start >= 0 and json_end > json_start:
                 import json as _json2
                 try:
-                    parsed = _json2.loads(text[json_start:json_end])
+                    parsed = _json2.loads(title_text[json_start:json_end])
                     if isinstance(parsed, dict):
                         vals = [v.strip() for v in parsed.values() if isinstance(v, str) and v.strip()]
                         if vals:
@@ -3920,14 +3920,14 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
             for r in results:
                 if r.get("success") and r.get("translated_title"):
                     import json as _json
-                    text = r["translated_title"].strip()
+                    title_text = r["translated_title"].strip()
                     # AI 返回 JSON {key: value} 格式，提取值部分
-                    translated = text
-                    json_start = text.find('{')
-                    json_end = text.rfind('}') + 1
+                    translated = title_text
+                    json_start = title_text.find('{')
+                    json_end = title_text.rfind('}') + 1
                     if json_start >= 0 and json_end > json_start:
                         try:
-                            parsed = _json.loads(text[json_start:json_end])
+                            parsed = _json.loads(title_text[json_start:json_end])
                             if isinstance(parsed, dict):
                                 vals = [v.strip() for v in parsed.values() if isinstance(v, str) and v.strip()]
                                 if vals:

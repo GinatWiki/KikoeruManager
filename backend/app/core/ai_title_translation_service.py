@@ -244,8 +244,8 @@ class AITitleTranslationService:
                 logger.info(
                     "[AI标题] %s 翻译成功: work_name=%s -> %s tokens=%s",
                     request_label,
-                    work_name[:40],
-                    content[:60],
+                    work_name,
+                    content,
                     usage.get("total_tokens", 0),
                 )
                 return content, usage
@@ -291,7 +291,7 @@ class AITitleTranslationService:
         except Exception as exc:
             duration_ms = int((time.perf_counter() - started) * 1000)
             error_info = _normalize_error(exc)
-            logger.warning("[AI标题] 翻译失败: work_name=%s error=%s", work_name[:40], exc)
+            logger.warning("[AI标题] 翻译失败: work_name=%s error=%s", work_name, exc)
             return {
                 "success": False,
                 "status": "failed",
