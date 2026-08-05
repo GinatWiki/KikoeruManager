@@ -4015,6 +4015,58 @@ async def ai_title_translation_scan_files(request: AITitleTranslationFileRenameR
         "total_base_names": len(base_names),
     }
 
+
+@app.post("/api/ai-title-translation/file-tree")
+async def ai_title_translation_file_tree(request: AITitleTranslationFileRenameRequest):
+    """获取文件夹的完整文件树结构，返回文本格式。"""
+    library_id = request.library_id
+    path = request.path
+
+    from ..core.library_manager import get_library_manager
+    manager = get_library_manager()
+    library = manager.get_library_definition(library_id)
+    if not library:
+        raise HTTPException(status_code=404, detail="未找到库")
+
+    async def _build_tree(current_path, indent=""):
+        lines = []
+        try:
+            data = await manager.list_files(
+                library_id=library_id,
+                current_path=current_path,
+                page=1,
+                page_size=9999,
+                sort_by="name",
+                sort_order="asc",
+            )
+        except Exception:
+            return lines
+        
+        items = data.get("items", []) if isinstance(data, dict) else []
+        folders = [item for item in items if item.get("is_directory")]
+        files = [item for item in items if not item.get("is_directory")]
+        
+        for folder in folders:
+            folder_name = folder.get("name", "")
+            lines.append(f"{indent}└── {folder_name}/")
+            lines.extend(await _build_tree(folder.get("path", ""), indent + "    "))
+        
+        for f in files:
+            file_name = f.get("name", "")
+            lines.append(f"{indent}└── {file_name}")
+        
+        return lines
+
+    tree_lines = await _build_tree(path)
+    tree_text = "\n".join(tree_lines) if tree_lines else "空文件夹"
+    
+    return {
+        "success": True,
+        "tree": tree_text,
+        "path": path,
+    }
+
+
 @app.post("/api/ai-title-translation/file-rename")
 async def ai_title_translation_file_rename(request: AITitleTranslationFileRenameRequest):
     """文件级重命名：扫描文件夹中的音频/字幕文件，AI 翻译基名，执行文件+文件夹重命名。"""
