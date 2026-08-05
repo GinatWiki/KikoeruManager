@@ -156,8 +156,10 @@ class AITitleTranslationService:
 
 
     def _build_messages(self, config: Dict[str, Any], work_name: str) -> List[Dict[str, str]]:
+        logger.info("[AI标题] 构建翻译 prompt: work_name=%s", work_name)
         prompt_template = config.get("prompt_template") or "请将以下日文作品标题翻译成中文，只输出翻译结果：\n{work_name}"
         prompt = prompt_template.replace("{work_name}", work_name)
+        logger.info("[AI标题] prompt 替换后内容: %s", prompt[:200])
         return [
             {"role": "system", "content": "你是一个专业的日文标题翻译助手。请根据用户提供的标题进行翻译。"},
             {"role": "user", "content": prompt},

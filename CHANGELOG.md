@@ -2,6 +2,10 @@
 
 本文件记录 KikoeruManager 的版本变化、功能更新与问题修复。更早的历史版本可通过 GitHub Tags 与提交历史查看。
 
+## v2.4.12
+
+- 增强：AI 标题汉化增加 prompt 内容日志输出，在 _build_messages 中添加日志记录 work_name 和替换 {work_name} 后的完整 prompt 内容（截取前 200 字符），便于手动检查发送给 AI 的翻译内容是否正确。
+
 ## v2.4.11
 
 - 修复：AI 标题汉化第一个循环中 text 变量替换不完整，	itle_text 替换遗漏了 	ext.find、	ext.rfind、	ext[json_start:json_end] 等引用，导致报错 'function' object has no attribute 'find'。
