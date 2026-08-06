@@ -2886,6 +2886,8 @@ class AITitleTranslationTestRequest(BaseModel):
 class AITitleTranslationBatchRequest(BaseModel):
     rjcodes: List[str] = []
     work_names: Dict[str, str] = {}  # rjcode -> folder name override
+    library_id: str = ""  # 扫描文件树时使用
+    path: str = ""  # 扫描文件树时使用
 
 
 class AITitleTranslationFileRenameRequest(BaseModel):
@@ -3917,6 +3919,37 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
         import re as _re
         if folder_name and (not work_name or _re.match(r"^RJ\d+$", work_name, _re.IGNORECASE)):
             work_name = folder_name
+        # 如果提供了 library_id 和 path，扫描文件树并将文件名合并到 work_name
+        if request.library_id and request.path:
+            try:
+                from ..core.library_manager import get_library_manager
+                mgr = get_library_manager()
+                scan_data = await mgr.list_files(
+                    library_id=request.library_id,
+                    current_path=request.path,
+                    page=1,
+                    page_size=9999,
+                    sort_by="name",
+                    sort_order="asc",
+                )
+                scan_items = scan_data.get("files", []) if isinstance(scan_data, dict) else []
+                file_names = []
+                for sitem in scan_items:
+                    if sitem.get("is_directory"):
+                        continue
+                    name = str(sitem.get("name", "") or "")
+                    ext = os.path.splitext(name)[1].lower()
+                    if ext in AUDIO_EXTENSIONS or ext in SUBTITLE_EXTENSIONS:
+                        base = os.path.splitext(name)[0]
+                        if base not in file_names:
+                            file_names.append(base)
+                if file_names:
+                    work_name = work_name + "
+--- 文件树名称 ---
+" + "
+".join(sorted(file_names))
+            except Exception:
+                pass
         items.append({"rjcode": rjcode, "work_name": work_name})
     db.close()
 
@@ -4080,6 +4113,9 @@ async def ai_title_translation_file_tree(request: AITitleTranslationFileRenameRe
         return lines
 
     tree_lines = await _build_tree(path)
+    if tree_lines:
+        folder_name = os.path.basename(path)
+        tree_lines = ["└── " + folder_name + "/"] + ["    " + line for line in tree_lines]
     tree_text = "\n".join(tree_lines) if tree_lines else "空文件夹"
     
     return {
