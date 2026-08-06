@@ -22973,15 +22973,6 @@ function refreshAfterMoveInBackground (sourceLibraryId, targetLibraryId) {
 
 }
 
-function moveIndexFencesMaterialized (result) {
-  const fences = Array.isArray(result?.index_fences) ? result.index_fences : []
-  if (!fences.length) return false
-  return fences.every(fence => {
-    const libraryId = String(fence?.library_id || '')
-    const acceptedSeq = Number(fence?.accepted_seq || 0)
-    const status = libraryIndexStateStore.statusFor(libraryId) || libraryIndexStateStore.indexViewFor(libraryId)
-    return acceptedSeq > 0 && Number(status?.materialized_seq || 0) >= acceptedSeq
-  })
 
 async function getFileTree (row) {
   const path = row?.path || ''
@@ -23048,6 +23039,16 @@ async function getFileTree (row) {
     ElMessage.error('获取文件树失败：' + (e.response?.data?.detail || e.message))
   }
 }
+function moveIndexFencesMaterialized (result) {
+  const fences = Array.isArray(result?.index_fences) ? result.index_fences : []
+  if (!fences.length) return false
+  return fences.every(fence => {
+    const libraryId = String(fence?.library_id || '')
+    const acceptedSeq = Number(fence?.accepted_seq || 0)
+    const status = libraryIndexStateStore.statusFor(libraryId) || libraryIndexStateStore.indexViewFor(libraryId)
+    return acceptedSeq > 0 && Number(status?.materialized_seq || 0) >= acceptedSeq
+  })
+
 }
 
 async function waitForMoveIndexFences (result, timeoutMs = 8000) {
