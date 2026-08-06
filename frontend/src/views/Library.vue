@@ -22980,7 +22980,7 @@ async function getFileTree (row) {
     ElMessage.warning('缺少路径')
     return
   }
-  if (!currentLibraryId.value) {
+  if (!selectedLibraryId.value) {
     ElMessage.warning('缺少库 ID')
     return
   }
@@ -22989,7 +22989,7 @@ async function getFileTree (row) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        library_id: currentLibraryId.value,
+        library_id: selectedLibraryId.value,
         path: path,
       }),
     })
@@ -25467,7 +25467,7 @@ async function startFileLevelRename() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        library_id: currentLibraryId.value,
+        library_id: selectedLibraryId.value,
         path: currentPath.value,
       }),
     })
