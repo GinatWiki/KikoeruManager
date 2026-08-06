@@ -9590,6 +9590,17 @@ class LibraryManager:
                         item["size_status"] = "stale"
                         item["index_refresh_pending"] = True
                     items.append(item)
+
+                # 索引返回 0 条但文件系统确实有内容时，fallback 到真实文件系统（索引陈旧/未覆盖该路径）
+                if not items and library.type == "local":
+                    try:
+                        fs_entries = [n for n in os.listdir(target_path)
+                                      if not self._should_skip_entry(n)]
+                        if fs_entries:
+                            return None
+                    except OSError:
+                        pass
+
                 file_entries = [entry for entry in entries if getattr(entry, "entry_type", "") == "file"]
                 dir_entries = [entry for entry in entries if getattr(entry, "entry_type", "") == "dir"]
                 if target_entry and not target_entry_stale:
