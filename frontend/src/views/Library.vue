@@ -23479,10 +23479,12 @@ async function aiTitleRenameItem (row) {
   }
   try {
     const folderName = row.name || row.path || ''
+    const rowLibraryId = row.library_id || row.libraryId || selectedLibraryId.value || ''
+    const rowPath = row.path || ''
     const resp = await fetch('/api/ai-title-translation/batch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rjcodes: [rjcode], work_names: { [rjcode]: folderName } }),
+      body: JSON.stringify({ rjcodes: [rjcode], work_names: { [rjcode]: folderName }, library_id: rowLibraryId, path: rowPath }),
     })
     const result = await resp.json()
     if (result.success_count > 0) {
