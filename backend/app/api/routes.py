@@ -3924,18 +3924,17 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
             try:
                 from ..core.library_manager import get_library_manager
                 mgr = get_library_manager()
-                scan_data = await mgr.list_files(
+                scan_data = await mgr.folder_contents(
                     library_id=request.library_id,
-                    current_path=request.path,
-                    page=1,
-                    page_size=9999,
-                    sort_by="name",
-                    sort_order="asc",
+                    path=request.path,
+                    recursive=True,
+                    prefer_index=True,
+                    include_dirs=True,
                 )
-                scan_items = scan_data.get("files", []) if isinstance(scan_data, dict) else []
+                scan_items = scan_data.get("items", []) if isinstance(scan_data, dict) else []
                 file_names = []
                 for sitem in scan_items:
-                    if sitem.get("is_directory"):
+                    if sitem.get("is_directory") or sitem.get("type") == "dir":
                         continue
                     name = str(sitem.get("name", "") or "")
                     ext = os.path.splitext(name)[1].lower()
