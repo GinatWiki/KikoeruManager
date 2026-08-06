@@ -3944,10 +3944,7 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                         if base not in file_names:
                             file_names.append(base)
                 if file_names:
-                    work_name = work_name + "
---- 文件树名称 ---
-" + "
-".join(sorted(file_names))
+                    work_name = work_name + "\n--- 文件树名称 ---\n" + "\n".join(sorted(file_names))
             except Exception:
                 pass
         items.append({"rjcode": rjcode, "work_name": work_name})
