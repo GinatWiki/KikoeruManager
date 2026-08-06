@@ -4319,6 +4319,14 @@ class LibraryManager:
                     entries,
                     return_stale_paths=True,
                 )
+                # ???? 0 ?????????????fallback ????????????/???????
+                if not entries:
+                    try:
+                        fs_entries = [n for n in os.listdir(current_path or parent_path) if not self._should_skip_entry(n)]
+                    except OSError:
+                        fs_entries = []
+                    if fs_entries:
+                        return None
             if force_refresh and library.type == "local":
                 refresh_paths = [
                     str(getattr(entry, "absolute_path", "") or "")
