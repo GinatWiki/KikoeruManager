@@ -4064,7 +4064,7 @@ async def ai_title_translation_file_tree(request: AITitleTranslationFileRenameRe
         except Exception:
             return lines
         
-        items = data.get("items", []) if isinstance(data, dict) else []
+        items = data.get("files", []) if isinstance(data, dict) else []
         folders = [item for item in items if item.get("is_directory")]
         files = [item for item in items if not item.get("is_directory")]
         
