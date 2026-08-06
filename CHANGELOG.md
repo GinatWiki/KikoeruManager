@@ -134,3 +134,9 @@
 - 修复：获取文件树功能现在弹出对话框显示文件树文本（即使剪贴板复制失败也能手动复制）
 - 添加 clipboard.writeText 失败的 execCommand 回退机制
 - 修复 style 属性缺少双引号的问题
+
+## v2.4.21
+
+- 修复：移动 getFileTree 到顶层作用域（在 moveIndexFencesMaterialized 之前），使 handleLibraryRowContextMenuAction 能访问 getFileTree
+- 修复：为 moveIndexFencesMaterialized 添加闭合大括号
+- 移除多余的闭合大括号
