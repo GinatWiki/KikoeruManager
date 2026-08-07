@@ -7178,6 +7178,8 @@ class TaskEngine:
                                         extracted = v.strip()
                                         break
                             if extracted:
+                                # 只保留标题第一行，去掉文件树名称部分
+                                extracted = str(extracted).split("\n", 1)[0].strip()
                                 translated = extracted
                     except _json.JSONDecodeError:
                         pass
@@ -7263,6 +7265,10 @@ class TaskEngine:
                             if not folder_title:
                                 folder_title = translated
                             if folder_title:
+                                # 只保留第一行标题，避免混入文件树名称
+                                folder_title = str(folder_title).split("\n", 1)[0].strip()
+                                # 移除插件注入的 emoji
+                                folder_title = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]", "", folder_title).strip()
                                 folder_title_clean = re.sub(r'[<>:"/\\|?*]', '', folder_title).strip()
                                 if folder_title_clean:
                                     folder_src = str(folder_path_val).rstrip("/\\")
