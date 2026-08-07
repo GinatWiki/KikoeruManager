@@ -481,6 +481,8 @@ from ..core.password_utils import (
     normalize_password_value,
     normalize_rjcode_value,
 )
+from ..core.netdisk_link_parser import extract_archive_passwords, extract_baidu_urls, extract_http_urls
+from ..core.password_import_service import upsert_generic_passwords
 from ..core.google_drive_oauth import (
     google_drive_oauth_client_missing_message,
     resolve_google_drive_oauth_client,
@@ -5793,58 +5795,39 @@ async def find_password_for_archive(archive_path: str):
 
 @app.post("/api/passwords/import-from-text")
 async def import_passwords_from_text(request: Request):
-    """从文本批量导入密码 - 每行一个密码，只添加密码不解析RJ号
-    
-    格式：每行一个密码，系统自动尝试匹配
-    """
-    from ..models.database import PasswordEntry, get_db
-    import uuid
-    
+    """从文本批量导入密码 - 优先解析解压密码标签，纯文本按每行一个密码导入。"""
+    from ..models.database import get_db
+
     data = await request.json()
-    text = data.get("text", "")
-    
-    if not text.strip():
+    text = str(data.get("text", "") or "").strip()
+    if not text:
         raise HTTPException(status_code=400, detail="文本内容不能为空")
-    
+
+    passwords = extract_archive_passwords(text)
+    if not passwords:
+        passwords = [normalize_password_value(line) for line in re.split(r"[\r\n]+", text)]
+        passwords = [password for password in passwords if password]
+
     db = next(get_db())
-    entries = []
-    lines = text.strip().split('\n')
-    
     try:
-        for line in lines:
-            password = normalize_password_value(line)
-            if not password:
-                continue
-            
-            # 检查该密码是否已存在（避免重复）
-            existing = db.query(PasswordEntry).filter(PasswordEntry.password == password).first()
-            if existing:
-                # 密码已存在，跳过
-                entries.append({"password": password, "status": "skipped", "reason": "已存在"})
-            else:
-                # 创建新的密码条目（只存储密码，不关联RJ号或文件名）
-                entry = PasswordEntry(
-                    id=str(uuid.uuid4()),
-                    password=password,
-                    source='batch',
-                    description='批量导入'
-                )
-                db.add(entry)
-                entries.append({"password": password, "status": "success"})
-        
-        db.commit()
-        success_count = sum(1 for e in entries if e["status"] == "success")
-        skipped_count = sum(1 for e in entries if e["status"] == "skipped")
-        
+        result = upsert_generic_passwords(
+            db,
+            passwords,
+            source="batch",
+            description="批量导入",
+        )
+        imported = int(result["imported"])
+        skipped = int(result["skipped"])
+        entries = list(result["entries"])
         return {
-            "message": f"导入完成：新建 {success_count} 个，跳过 {skipped_count} 个（已存在）",
-            "imported": success_count,
-            "skipped": skipped_count,
-            "entries": entries
+            "message": f"导入完成：新建 {imported} 个，跳过 {skipped} 个（已存在）",
+            "imported": imported,
+            "skipped": skipped,
+            "entries": entries,
         }
     except Exception as e:
         db.rollback()
-        logger.error(f"导入密码失败: {e}")
+        logger.error("导入密码失败: %s", e)
         raise HTTPException(status_code=500, detail=f"导入失败: {str(e)}")
     finally:
         db.close()
@@ -17947,12 +17930,14 @@ class ASMRSyncLocateRJRequest(BaseModel):
 
 class HttpDownloadPreviewRequest(BaseModel):
     urls: List[str]
+    source_text: str = ""
     target_subdir: str = ""
     conflict_policy: str = ""
 
 
 class HttpDownloadStartRequest(BaseModel):
     urls: List[str]
+    source_text: str = ""
     target_subdir: str = ""
     conflict_policy: str = ""
     batch_name: str = ""
@@ -17970,6 +17955,7 @@ class BaiduNetdiskRetryFileRequest(BaseModel):
 
 class BaiduNetdiskPreviewRequest(BaseModel):
     urls: List[str]
+    source_text: str = ""
     target_subdir: str = ""
     output_folder_name: str = ""
     batch_name: str = ""
@@ -17980,6 +17966,7 @@ class BaiduNetdiskPreviewRequest(BaseModel):
 
 class BaiduNetdiskStartRequest(BaseModel):
     urls: List[str]
+    source_text: str = ""
     target_subdir: str = ""
     output_folder_name: str = ""
     batch_name: str = ""
@@ -18353,58 +18340,35 @@ def _serialize_rj_subtitle_task_status(task) -> dict:
     }
 
 
+def _source_text_from_payload(request) -> str:
+    source_text = str(getattr(request, "source_text", "") or "").strip()
+    if source_text:
+        return source_text
+    return "\n".join(str(value or "") for value in (getattr(request, "urls", None) or []))
+
+
 def _http_download_urls_from_payload(urls: List[str]) -> list[str]:
-    result = []
-    last_pikpak_index: Optional[int] = None
-    for raw in urls or []:
-        for line in re.split(r"[\r\n]+", str(raw or "")):
-            value = line.strip()
-            if not value:
-                continue
-            if last_pikpak_index is not None and not value.lower().startswith(("http://", "https://")):
-                match = re.search(r"(?:pwd|pass_code|passcode|password|code)\s*[=:：]\s*([A-Za-z0-9]{4,12})|(?:提取码|访问码|密[码碼])[:：\s]*([A-Za-z0-9]{4,12})|^([A-Za-z0-9]{4,12})$", value, re.IGNORECASE)
-                if match and ("mypikpak.com" in result[last_pikpak_index] or "drive.mypikpak.com" in result[last_pikpak_index]):
-                    code = next((group for group in match.groups() if group), "")
-                    if code and "pwd=" not in result[last_pikpak_index] and "pass_code=" not in result[last_pikpak_index]:
-                        separator = "&" if "?" in result[last_pikpak_index] else "?"
-                        result[last_pikpak_index] = f"{result[last_pikpak_index]}{separator}pwd={quote(code)}"
-                        continue
-            result.append(value)
-            last_pikpak_index = len(result) - 1 if "mypikpak.com" in value or "drive.mypikpak.com" in value else None
-    return result
+    return extract_http_urls("\n".join(str(value or "") for value in urls or []))
 
 
 def _baidu_netdisk_urls_from_payload(urls: List[str]) -> list[str]:
-    config = get_config()
-    separator = str(getattr(config.baidu_netdisk, "share_code_separator", "") or "----").strip()
-    result = []
-    seen: dict[str, int] = {}
-    last_baidu_index: Optional[int] = None
-    for raw in urls or []:
-        for line in re.split(r"[\r\n]+", str(raw or "")):
-            value = line.strip()
-            if not value:
-                continue
-            normalized = _normalize_baidu_netdisk_share_line(value, separator)
-            if _is_baidu_netdisk_share_url(normalized):
-                key = _baidu_netdisk_share_identity(normalized)
-                if key in seen:
-                    existing_index = seen[key]
-                    if not _baidu_netdisk_share_has_code(result[existing_index]) and _baidu_netdisk_share_has_code(normalized):
-                        result[existing_index] = normalized
-                    last_baidu_index = existing_index
-                    continue
-                result.append(normalized)
-                seen[key] = len(result) - 1
-                last_baidu_index = len(result) - 1
-                continue
-            code = _baidu_netdisk_pass_code_from_text(value)
-            if code and last_baidu_index is not None:
-                if not _baidu_netdisk_share_has_code(result[last_baidu_index]):
-                    result[last_baidu_index] = _append_baidu_netdisk_pass_code(result[last_baidu_index], code)
-                continue
-            result.append(normalized)
-    return result
+    return extract_baidu_urls("\n".join(str(value or "") for value in urls or []))
+
+def _import_archive_passwords_from_request(request) -> Dict[str, object]:
+    password_import: Dict[str, object] = {"imported": 0, "skipped": 0, "passwords": []}
+    try:
+        passwords = extract_archive_passwords(_source_text_from_payload(request))
+        if passwords:
+            db = next(get_db())
+            try:
+                password_import = upsert_generic_passwords(db, passwords)
+            finally:
+                db.close()
+    except Exception as exc:
+        logger.warning("导入解压密码失败: %s", sanitize_text_for_log(exc))
+        password_import["error"] = sanitize_text_for_log(exc)
+    return password_import
+
 
 
 def _broadcast_processed_archive_changed_safe(archive) -> None:
@@ -18719,7 +18683,9 @@ async def http_download_preview(request: HttpDownloadPreviewRequest):
             target_subdir=request.target_subdir,
             conflict_policy=request.conflict_policy,
         )
-        return sanitize_http_download_preview(preview)
+        payload = sanitize_http_download_preview(preview)
+        payload["extracted_archive_passwords"] = extract_archive_passwords(_source_text_from_payload(request))
+        return payload
     except Exception as exc:
         logger.warning("HTTP 下载预览失败: %s", sanitize_text_for_log(exc))
         raise HTTPException(status_code=500, detail=f"预览失败: {str(exc)}")
@@ -18858,6 +18824,7 @@ async def http_download_start(request: HttpDownloadStartRequest):
         await engine.submit(task)
         created_tasks.append({"task_id": task.id, "id": task.id, "platform": source, "platform_label": platform_label})
 
+    password_import = _import_archive_passwords_from_request(request)
     message = (
         f"已按平台创建 {len(created_tasks)} 个 HTTP 下载任务，共 {len(ok_items)} 个直链"
         if len(created_tasks) > 1
@@ -18869,6 +18836,7 @@ async def http_download_start(request: HttpDownloadStartRequest):
         "task": created_tasks[0],
         "tasks": created_tasks,
         "preview": public_preview,
+        "password_import": password_import,
     }
 
 
@@ -19074,7 +19042,9 @@ async def baidu_netdisk_preview(request: BaiduNetdiskPreviewRequest):
             conflict_policy=request.conflict_policy,
             output_folder_name=request.output_folder_name,
         )
-        return sanitize_baidu_netdisk_preview(preview)
+        payload = sanitize_baidu_netdisk_preview(preview)
+        payload["extracted_archive_passwords"] = extract_archive_passwords(_source_text_from_payload(request))
+        return payload
     except Exception as exc:
         logger.warning("百度网盘预览失败: %s", sanitize_text_for_log(exc))
         raise HTTPException(status_code=500, detail=f"预览失败: {str(exc)}")
@@ -19171,12 +19141,14 @@ async def baidu_netdisk_start(request: BaiduNetdiskStartRequest):
         },
     )
     await get_task_engine().submit(task)
+    password_import = _import_archive_passwords_from_request(request)
     return {
         "success": True,
         "message": f"已创建百度网盘下载任务，共 {len(ok_items)} 项",
         "task": {"task_id": task.id, "id": task.id, "platform": "baidu_netdisk", "platform_label": "百度网盘"},
         "tasks": [{"task_id": task.id, "id": task.id, "platform": "baidu_netdisk", "platform_label": "百度网盘"}],
         "preview": public_preview,
+        "password_import": password_import,
     }
 
 

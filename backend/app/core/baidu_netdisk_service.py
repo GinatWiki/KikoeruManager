@@ -29,6 +29,7 @@ import requests
 from ..config.settings import get_config, save_config
 from .fs_utils import move_path_efficient
 from .http_download_service import sanitize_http_download_item
+from .netdisk_link_parser import extract_share_inputs as parse_netdisk_share_inputs
 from .resource_budget_service import get_resource_budget_service
 
 logger = logging.getLogger(__name__)
@@ -902,38 +903,11 @@ class BaiduNetdiskService:
         rows: List[str] = []
         for raw in urls or []:
             rows.extend(line.strip() for line in re.split(r"[\r\n]+", str(raw or "")) if line.strip())
-        shares: List[Dict[str, str]] = []
-        seen: Dict[str, int] = {}
-        last_index: Optional[int] = None
-        for row in rows:
-            if self._looks_like_baidu_url(row):
-                parsed = self._parse_share_url(row)
-                identity = self._share_input_identity(parsed.get("share_url") or row)
-                if identity in seen:
-                    existing_index = seen[identity]
-                    if parsed.get("pass_code") and not shares[existing_index].get("pass_code"):
-                        shares[existing_index]["pass_code"] = parsed["pass_code"]
-                        shares[existing_index]["share_url"] = self._append_share_pass_code(
-                            shares[existing_index].get("share_url") or "",
-                            parsed["pass_code"],
-                        )
-                    last_index = existing_index
-                    continue
-                shares.append(parsed)
-                seen[identity] = len(shares) - 1
-                last_index = len(shares) - 1
-                continue
-            code = self._parse_pass_code_text(row)
-            if code and last_index is not None:
-                if not shares[last_index].get("pass_code"):
-                    shares[last_index]["pass_code"] = code
-                    shares[last_index]["share_url"] = self._append_share_pass_code(
-                        shares[last_index].get("share_url") or "",
-                        code,
-                    )
-                continue
-            raise BaiduNetdiskError(f"无法识别百度网盘分享链接或提取码: {row[:80]}")
-        return shares
+        parsed = parse_netdisk_share_inputs("\n".join(rows), platform="baidu")
+        if not parsed:
+            raise BaiduNetdiskError("无法识别百度网盘分享链接或提取码")
+        return parsed
+
 
     def _looks_like_baidu_url(self, value: str) -> bool:
         text = str(value or "").strip().lower()

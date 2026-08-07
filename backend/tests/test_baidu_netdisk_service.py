@@ -2647,3 +2647,19 @@ async def test_baidu_start_download_prefers_raw_selected_items_without_preview(m
     }]
     assert not any(item["args"][0] == "transfer" for item in command_log)
     assert task.task_metadata["download_files"][0]["status"] == "completed"
+
+def test_routes_baidu_payload_accepts_prose_and_markdown_text():
+    urls = routes._baidu_netdisk_urls_from_payload([
+        "分享：[网盘](https://pan.baidu.com/s/13EU1GlLvUULM43mkqhoZxA) 提取码：38a2",
+    ])
+
+    assert urls == ["https://pan.baidu.com/s/13EU1GlLvUULM43mkqhoZxA?pwd=38a2"]
+
+
+def test_routes_baidu_payload_accepts_obfuscated_domain_and_next_line_code():
+    urls = routes._baidu_netdisk_urls_from_payload([
+        "pan点baidu点com/s/13EU1GlLvUULM43mkqhoZxA",
+        "提取码：38a2",
+    ])
+
+    assert urls == ["https://pan.baidu.com/s/13EU1GlLvUULM43mkqhoZxA?pwd=38a2"]
