@@ -666,6 +666,63 @@ async def test_common_preview_uses_ready_linked_target_for_duplicate_when_subtit
 
 
 @pytest.mark.asyncio
+async def test_existing_subtitle_without_library_target_is_auto_skipped(monkeypatch):
+    service = object.__new__(LinkedSubtitleImportService)
+    service.EXISTING_SUBTITLE_REASON = LinkedSubtitleImportService.EXISTING_SUBTITLE_REASON
+    preview = {
+        "stage_reason": LinkedSubtitleImportService.EXISTING_SUBTITLE_REASON,
+        "source_rjcode": "RJ01303631",
+        "target_rjcode": "RJ01291089",
+        "selected_candidate": None,
+        "candidates": [],
+    }
+    monkeypatch.setattr(
+        linked_subtitle_module,
+        "get_db",
+        Mock(side_effect=AssertionError("没有实体库存目录时不应写入问题作品")),
+    )
+
+    result = await service.create_existing_subtitle_problem(
+        source_path="/down_asmr/RJ01303631.mp4",
+        preview=preview,
+        task_id="task-1",
+    )
+
+    assert result == {
+        "handled": True,
+        "auto_skipped": True,
+        "reason": LinkedSubtitleImportService.EXISTING_SUBTITLE_REASON,
+    }
+
+
+def test_existing_subtitle_conflict_includes_target_work_details():
+    service = object.__new__(LinkedSubtitleImportService)
+    service.subtitle_service = SimpleNamespace(
+        extract_rjcode=lambda value: str(value or "").strip().upper()
+    )
+
+    linked_works = service._build_target_linked_works_info(
+        {
+            "target_rjcode": "RJ01291089",
+            "kikoeru_title": "原作标题",
+        },
+        {
+            "folder_path": "/library/原作/[社团][RJ01291089]",
+            "folder_name": "[社团][RJ01291089]",
+        },
+    )
+
+    assert linked_works == [{
+        "rjcode": "RJ01291089",
+        "work_type": "original",
+        "lang": "JPN",
+        "path": "/library/原作/[社团][RJ01291089]",
+        "work_name": "原作标题",
+        "source": "linked_subtitle_preflight",
+    }]
+
+
+@pytest.mark.asyncio
 async def test_common_preview_marks_unverified_translation_page_as_uncertain():
     service = object.__new__(LinkedSubtitleImportService)
     service.EXISTING_SUBTITLE_REASON = LinkedSubtitleImportService.EXISTING_SUBTITLE_REASON
@@ -926,6 +983,71 @@ async def test_collect_archive_subtitles_cancel_marks_probe_task_cancelled():
     assert probe_cancelled.is_set()
 
 
+@pytest.mark.asyncio
+async def test_collect_archive_subtitles_inherits_parent_password_metadata(tmp_path):
+    """字幕补配临时解压必须继承父任务/下载条目里的指定密码。"""
+    extracted_dir = tmp_path / "probe-output"
+    extracted_dir.mkdir()
+    (extracted_dir / "track.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\n字幕\n", encoding="utf-8")
+    service = object.__new__(LinkedSubtitleImportService)
+    service.subtitle_service = SimpleNamespace(SUBTITLE_EXTENSIONS={".srt"})
+    captured = {}
+
+    async def fake_extract(probe_task):
+        captured.update(probe_task.task_metadata)
+        return str(extracted_dir)
+
+    service.extract_service = SimpleNamespace(
+        config=SimpleNamespace(storage=SimpleNamespace(temp_path=str(tmp_path))),
+        extract=AsyncMock(side_effect=fake_extract),
+    )
+    parent_task = Task(
+        task_type=TaskType.EXTRACT,
+        source_path="D:/input/RJ01672831.zip",
+        metadata={
+            "manual_retry_passwords": [" 我觉得我是 "],
+            "selected_items": [{"custom_extract_password": "备用密码"}],
+        },
+    )
+
+    stage_dir, subtitles, result = await service._collect_archive_subtitles_to_stage(
+        "D:/input/RJ01672831.zip",
+        task=parent_task,
+    )
+
+    assert result["status"] == "ok"
+    assert subtitles and subtitles[0]["name"] == "track.srt"
+    assert captured["manual_retry_passwords"] == ["我觉得我是", "备用密码"]
+    assert captured["manual_retry_password"] == "我觉得我是"
+    assert captured["manual_retry_password_only"] is True
+    assert stage_dir
+
+
+@pytest.mark.asyncio
+async def test_collect_archive_subtitles_does_not_classify_generic_password_text_as_missing_password(tmp_path):
+    """错误文本提到密码但结构化原因不是密码错时，必须保留 extract_failed。"""
+    extracted_dir = tmp_path / "probe-output"
+    extracted_dir.mkdir()
+    service = object.__new__(LinkedSubtitleImportService)
+    service.subtitle_service = SimpleNamespace(SUBTITLE_EXTENSIONS={".srt"})
+
+    async def fake_extract(probe_task):
+        probe_task.task_metadata["extract_failure_reason"] = "light_probe_unknown"
+        probe_task.error_message = "解压失败：密码探测阶段无法定性"
+        return ""
+
+    service.extract_service = SimpleNamespace(extract=AsyncMock(side_effect=fake_extract))
+
+    stage_dir, subtitles, result = await service._collect_archive_subtitles_to_stage(
+        "D:/input/RJ01656747.7z",
+    )
+
+    assert stage_dir == ""
+    assert subtitles == []
+    assert result["status"] == "extract_failed"
+    assert result["reason"] == "解压失败：密码探测阶段无法定性"
+
+
 def test_refresh_preview_execution_state_keeps_timeout_archive_executable(tmp_path):
     archive_path = tmp_path / "RJ01620917.7z.001"
     archive_path.write_bytes(b"placeholder")
@@ -1026,6 +1148,36 @@ async def test_archive_subtitle_probe_reports_nested_extract_failure(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_archive_subtitle_probe_accepts_nested_archive_without_subtitles(tmp_path):
+    """嵌套包清单确认无字幕时应返回 no_subtitles，不能误报嵌套解压失败。"""
+    extracted_dir = tmp_path / "probe-output"
+    extracted_dir.mkdir()
+
+    service = object.__new__(LinkedSubtitleImportService)
+    service.subtitle_service = SimpleNamespace(
+        SUBTITLE_EXTENSIONS={".vtt", ".lrc", ".srt", ".ass", ".ssa"}
+    )
+
+    async def fake_extract(probe_task):
+        probe_task.task_metadata["nested_archives_without_subtitles"] = ["RJ01656747"]
+        return str(extracted_dir)
+
+    service.extract_service = SimpleNamespace(
+        config=SimpleNamespace(storage=SimpleNamespace(temp_path=str(tmp_path))),
+        extract=AsyncMock(side_effect=fake_extract),
+    )
+
+    stage_dir, subtitles, probe_result = await service._collect_archive_subtitles_to_stage(
+        "D:/input/RJ01656747.7z",
+    )
+
+    assert stage_dir == ""
+    assert subtitles == []
+    assert probe_result == {"status": "no_subtitles", "reason": ""}
+    assert not extracted_dir.exists()
+
+
+@pytest.mark.asyncio
 async def test_queue_pending_archive_import_preserves_timeout_as_pending(db_session, monkeypatch):
     def fake_get_db():
         yield db_session
@@ -1102,6 +1254,14 @@ async def test_queue_pending_archive_import_preserves_timeout_as_pending(db_sess
     assert row.analysis_info["candidate_index_view_token"] == "index-unavailable"
     assert row.analysis_info["candidate_refreshed_at"]
     assert row.analysis_info["candidate_next_refresh_at"]
+    assert row.linked_works_info == [{
+        "rjcode": "RJ01608823",
+        "work_type": "original",
+        "lang": "JPN",
+        "path": "D:/library/RJ01608823",
+        "work_name": "RJ01608823",
+        "source": "linked_subtitle_preflight",
+    }]
 
 
 @pytest.mark.asyncio
@@ -1271,7 +1431,11 @@ async def test_execute_pending_import_rejects_running_record(db_session, monkeyp
         conflict_type=LinkedSubtitleImportService.PENDING_CONFLICT_TYPE,
         new_path="D:/input/RJ01620917.7z",
         status=LinkedSubtitleImportService.PENDING_EXECUTING_STATUS,
-        analysis_info={"preview": {"source_rjcode": "RJ01620917", "target_rjcode": "RJ01608823"}},
+        analysis_info={
+            "preview": {"source_rjcode": "RJ01620917", "target_rjcode": "RJ01608823"},
+            "execution_started_at": datetime.now().isoformat(),
+            "execution_lease_until": (datetime.now() + timedelta(minutes=5)).isoformat(),
+        },
         new_metadata={},
     )
     db_session.add(row)
@@ -1322,6 +1486,104 @@ async def test_execute_pending_import_resets_status_when_long_io_fails(db_sessio
     assert refreshed.status == "PENDING"
     assert refreshed.analysis_info["execution_status"] == "failed"
     assert "模拟解压失败" in refreshed.analysis_info["execution_error"]
+
+
+@pytest.mark.asyncio
+async def test_execute_pending_import_takes_over_expired_execution_lease(db_session, monkeypatch):
+    def fake_get_db():
+        yield db_session
+
+    monkeypatch.setattr(linked_subtitle_module, "get_db", fake_get_db)
+
+    service = object.__new__(LinkedSubtitleImportService)
+    service.PENDING_CONFLICT_TYPE = LinkedSubtitleImportService.PENDING_CONFLICT_TYPE
+    service.PENDING_EXECUTING_STATUS = LinkedSubtitleImportService.PENDING_EXECUTING_STATUS
+    service.PENDING_SOURCE_MODE = LinkedSubtitleImportService.PENDING_SOURCE_MODE
+    service._repair_cached_preview_rj_fields = AsyncMock(return_value={
+        "source_rjcode": "RJ01620917",
+        "target_rjcode": "RJ01608823",
+    })
+    service._refresh_pending_preview_candidates = AsyncMock(return_value={
+        "source_rjcode": "RJ01620917",
+        "target_rjcode": "RJ01608823",
+        "can_execute": True,
+    })
+    service.execute_archive_import = AsyncMock(return_value={
+        "success": False,
+        "import_result": {"error": "未找到可导入字幕"},
+    })
+
+    row = ConflictWork(
+        id="pending-expired-lease",
+        rjcode="RJ01608823",
+        conflict_type=LinkedSubtitleImportService.PENDING_CONFLICT_TYPE,
+        new_path="D:/input/RJ01620917.7z",
+        status=LinkedSubtitleImportService.PENDING_EXECUTING_STATUS,
+        analysis_info={
+            "preview": {"source_rjcode": "RJ01620917", "target_rjcode": "RJ01608823"},
+            "execution_owner_id": "dead-owner",
+            "execution_started_at": (datetime.now() - timedelta(hours=1)).isoformat(),
+            "execution_lease_until": (datetime.now() - timedelta(minutes=1)).isoformat(),
+        },
+        new_metadata={},
+    )
+    db_session.add(row)
+    db_session.commit()
+
+    result = await service.execute_pending_import("pending-expired-lease")
+
+    assert result["success"] is False
+    refreshed = db_session.query(ConflictWork).filter(
+        ConflictWork.id == "pending-expired-lease"
+    ).one()
+    assert refreshed.status == "PENDING"
+    assert refreshed.analysis_info["execution_status"] == "failed"
+    assert refreshed.analysis_info["execution_owner_id"] == ""
+    assert refreshed.analysis_info["execution_lease_until"] == ""
+
+
+@pytest.mark.asyncio
+async def test_execute_pending_import_cancellation_releases_execution_lease(db_session, monkeypatch):
+    def fake_get_db():
+        yield db_session
+
+    monkeypatch.setattr(linked_subtitle_module, "get_db", fake_get_db)
+
+    service = object.__new__(LinkedSubtitleImportService)
+    service.PENDING_CONFLICT_TYPE = LinkedSubtitleImportService.PENDING_CONFLICT_TYPE
+    service.PENDING_EXECUTING_STATUS = LinkedSubtitleImportService.PENDING_EXECUTING_STATUS
+    service.PENDING_SOURCE_MODE = LinkedSubtitleImportService.PENDING_SOURCE_MODE
+    service._repair_cached_preview_rj_fields = AsyncMock(return_value={
+        "source_rjcode": "RJ01620917",
+        "target_rjcode": "RJ01608823",
+    })
+    service._refresh_pending_preview_candidates = AsyncMock(return_value={
+        "source_rjcode": "RJ01620917",
+        "target_rjcode": "RJ01608823",
+        "can_execute": True,
+    })
+    service.execute_archive_import = AsyncMock(side_effect=asyncio.CancelledError())
+
+    row = ConflictWork(
+        id="pending-cancelled",
+        rjcode="RJ01608823",
+        conflict_type=LinkedSubtitleImportService.PENDING_CONFLICT_TYPE,
+        new_path="D:/input/RJ01620917.7z",
+        status="PENDING",
+        analysis_info={"preview": {"source_rjcode": "RJ01620917", "target_rjcode": "RJ01608823"}},
+        new_metadata={},
+    )
+    db_session.add(row)
+    db_session.commit()
+
+    with pytest.raises(asyncio.CancelledError):
+        await service.execute_pending_import("pending-cancelled")
+
+    refreshed = db_session.query(ConflictWork).filter(ConflictWork.id == "pending-cancelled").one()
+    assert refreshed.status == "PENDING"
+    assert refreshed.analysis_info["execution_status"] == "failed"
+    assert refreshed.analysis_info["execution_owner_id"] == ""
+    assert refreshed.analysis_info["execution_lease_until"] == ""
 
 
 @pytest.mark.asyncio

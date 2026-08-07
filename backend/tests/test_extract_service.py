@@ -539,8 +539,8 @@ class TestExtractService:
 
         assert FileProcessor().is_archive(disguised_path) is True
 
-    def test_format_command_for_log_keeps_passwords_visible(self, extract_service):
-        """日志里的 7z / unar 命令保留明文密码，方便现场排查密码命中。"""
+    def test_format_command_for_log_redacts_text_and_bytes_passwords(self, extract_service):
+        """str / bytes argv 都不能把密码写入日志。"""
         cmd = [
             "7zz",
             "x",
@@ -549,14 +549,53 @@ class TestExtractService:
             "archive.zip",
             "-p",
             "another_secret",
+            b"-p\xce\xd2\xbe\xf5\xb5\xc3\xce\xd2\xca\xc7",
         ]
 
         redacted = extract_service._format_command_for_log(cmd)
 
-        assert "super_secret" in redacted
-        assert "another_secret" in redacted
-        assert "-psuper_secret" in redacted
-        assert "-p another_secret" in redacted
+        assert "super_secret" not in redacted
+        assert "another_secret" not in redacted
+        assert "\\xce\\xd2" not in redacted
+        assert redacted.count("********") == 3
+
+    def test_winzip_aes_detection_accepts_method_99(self, extract_service, temp_dir):
+        archive_path = os.path.join(temp_dir, "aes-method.zip")
+        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_STORED) as zf:
+            zf.writestr("payload.bin", b"payload")
+
+        raw = bytearray(open(archive_path, "rb").read())
+        local_offset = raw.index(b"PK\x03\x04")
+        central_offset = raw.index(b"PK\x01\x02")
+        raw[local_offset + 8:local_offset + 10] = (99).to_bytes(2, "little")
+        raw[central_offset + 10:central_offset + 12] = (99).to_bytes(2, "little")
+        with open(archive_path, "wb") as fp:
+            fp.write(raw)
+
+        assert extract_service._zip_uses_winzip_aes(archive_path) is True
+
+    @pytest.mark.asyncio
+    async def test_python_zip_backend_reports_winzip_aes_as_unsupported_encryption(
+        self, extract_service, temp_dir,
+    ):
+        archive_path = os.path.join(temp_dir, "aes.zip")
+        output_path = os.path.join(temp_dir, "output")
+        os.makedirs(output_path)
+        with open(archive_path, "wb") as fp:
+            fp.write(b"placeholder")
+        extract_service._zip_uses_winzip_aes = Mock(return_value=True)
+        extract_service._probe_zip_password_bytes = Mock(
+            side_effect=AssertionError("WinZip AES 不应交给 Python zipfile 密码探测")
+        )
+
+        success, reason = await extract_service._try_extract_zip_with_python(
+            ArchiveInfo(archive_path, []),
+            output_path,
+            "我觉得我是",
+        )
+
+        assert success is False
+        assert reason == "unsupported_encryption"
 
     @pytest.mark.asyncio
     async def test_get_archive_info_plain_zip_uses_zipfile_fast_path(self, extract_service, temp_dir):
@@ -1218,6 +1257,68 @@ class TestExtractService:
         )
 
         assert await extract_service._verify_extraction(archive_info, root) is True
+
+    @pytest.mark.asyncio
+    async def test_verify_extraction_accepts_archive_listed_size_equivalent_to_actual_size(
+        self, extract_service, temp_dir,
+    ):
+        """清单大小存在格式级等价差异时，不应误判为解压不完整。"""
+        root = os.path.join(temp_dir, "output")
+        os.makedirs(root, exist_ok=True)
+        actual_size = 5_869_256_704
+        listed_size = actual_size - (1 << 32)
+        tar_path = os.path.join(root, "large-stream.tar")
+        with open(tar_path, "wb") as fp:
+            fp.truncate(actual_size)
+
+        archive_info = ArchiveInfo(
+            path=os.path.join(temp_dir, "large-stream.tar.gz"),
+            file_list=[{
+                "name": "large-stream.tar",
+                "size": listed_size,
+                "is_dir": False,
+            }],
+            password="",
+        )
+
+        assert extract_service._archive_listed_size_matches_actual_size(
+            archive_info.path,
+            listed_size,
+            actual_size,
+        )
+        assert await extract_service._verify_extraction(archive_info, root) is True
+
+    @pytest.mark.parametrize(
+        "archive_name, listed_size, actual_size, expected",
+        [
+            ("large-stream.tar.gz", 1_574_289_408, 5_869_256_704, True),
+            ("large-stream.tgz", 1_574_289_408, 5_869_256_704, True),
+            ("large-stream.gz", 1_574_289_408, 5_869_256_704, True),
+            ("large-stream.zip", 1_574_289_408, 5_869_256_704, False),
+            ("large-stream.tar.gz", 1_574_289_409, 5_869_256_704, False),
+            ("large-stream.tar.gz", 5_869_256_704, 5_869_256_704, True),
+        ],
+    )
+    def test_archive_listed_size_matches_actual_size(
+        self,
+        extract_service,
+        temp_dir,
+        archive_name,
+        listed_size,
+        actual_size,
+        expected,
+    ):
+        """大小等价策略只接受已知格式规则，不放宽普通压缩包错配。"""
+        archive_path = os.path.join(temp_dir, archive_name)
+
+        assert (
+            extract_service._archive_listed_size_matches_actual_size(
+                archive_path,
+                listed_size,
+                actual_size,
+            )
+            is expected
+        )
 
     @pytest.mark.asyncio
     async def test_verify_extraction_accepts_zstd_7z_name_mismatch_when_sizes_match(
@@ -2187,6 +2288,15 @@ class TestExtractService:
             extract_service.config.extract.filename_password_sniff_templates = old_templates
             extract_service.config.extract.filename_password_sniff_enabled = old_enabled
 
+    def test_normalize_filename_preserves_download_password_suffix(self, extract_service):
+        """监听器规范化 RJ 文件名时不能删除下载工作台写入的密码后缀。"""
+        old_templates = extract_service.config.extract.filename_password_sniff_templates
+        try:
+            extract_service.config.extract.filename_password_sniff_templates = ["{name}({password})"]
+            assert extract_service._normalize_filename("RJ01583291(secret-pass).zip") == "RJ01583291(secret-pass)"
+        finally:
+            extract_service.config.extract.filename_password_sniff_templates = old_templates
+
     def test_extract_7z_progress_ignores_terminal_control_open(self, extract_service):
         """7z 的 Open + 退格控制序列不能当成当前文件名展示。"""
         assert extract_service._extract_7z_progress_entry_name("0% - Open\b\b\b\b\b\b --") == ""
@@ -2238,6 +2348,45 @@ class TestExtractService:
             extract_service.config.extract.filename_password_sniff_templates = old_templates
             extract_service.config.extract.filename_password_sniff_enabled = old_enabled
             extract_service.config.extract.password_list = old_password_list
+
+    @pytest.mark.asyncio
+    async def test_nested_extract_includes_manual_retry_password(self, extract_service, temp_dir):
+        """手动重试指定密码必须传递到外层解压发现的内层压缩包。"""
+        archive_path = os.path.join(temp_dir, "密码：3个多月了还是0进展.rrar")
+        output_path = os.path.join(temp_dir, "out")
+        os.makedirs(output_path, exist_ok=True)
+        task = Task(
+            TaskType.EXTRACT,
+            os.path.join(temp_dir, "RJ01652675.rar"),
+            task_id="manual-nested-password",
+            metadata={
+                "manual_retry_passwords": ["3个多月了还是0进展"],
+                "manual_retry_password_only": True,
+            },
+        )
+
+        extract_service._get_password_candidates_for_archive = AsyncMock(return_value=[
+            {"password": "vault-password"},
+        ])
+        extract_service._is_rar_archive = Mock(return_value=False)
+        extract_service._run_7z_command = AsyncMock(return_value=subprocess.CompletedProcess(
+            args=[],
+            returncode=2,
+            stdout=b"",
+            stderr=b"Wrong password",
+        ))
+
+        await extract_service._try_extract_nested_direct(
+            archive_path,
+            output_path,
+            task=task,
+        )
+
+        tried_passwords = [
+            next((arg[2:] for arg in call.args[0] if str(arg).startswith("-p")), "")
+            for call in extract_service._run_7z_command.await_args_list
+        ]
+        assert tried_passwords == ["", "3个多月了还是0进展"]
 
     @pytest.mark.asyncio
     async def test_nested_extract_retries_unsupported_method_with_zstd_backend(
@@ -3089,6 +3238,201 @@ Encrypted = +
         assert reason in {"wrong_password", "unar_failed"}
         extract_service._try_unar_extract.assert_awaited_once()
         extract_service._try_extract_zip_with_python.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_try_extract_large_zip_with_listed_password_uses_python_compat_path(
+        self, extract_service, temp_dir,
+    ):
+        """清单已确认的中文密码不能因大包 unar 策略跳过 Python 兼容解压。"""
+        archive_path = os.path.join(temp_dir, "large-cn-password-listed.zip")
+        self.create_test_zip(archive_path)
+        output_path = os.path.join(temp_dir, "large-cn-password-listed-output")
+        os.makedirs(output_path, exist_ok=True)
+        task = Task(task_type=TaskType.EXTRACT, source_path=archive_path)
+        password_value = "我觉得我是"
+
+        extract_service.ZIP_COMPAT_UNAR_FIRST_MIN_BYTES = 1
+        extract_service._find_unar_executable = Mock(return_value="/usr/bin/unar")
+        extract_service._probe_password = AsyncMock(return_value="wrong_password")
+        extract_service._try_unar_extract = AsyncMock(
+            side_effect=AssertionError("已确认密码时不应先走 unar")
+        )
+        extract_service._try_extract_zip_with_python = AsyncMock(return_value=(True, "utf-8"))
+        extract_service._reject_if_garbled_after_extract = AsyncMock(return_value=False)
+        extract_service._verify_extraction = AsyncMock(return_value=True)
+        extract_service._cleanup_extract_attempt = AsyncMock()
+        extract_service._run_7z_command = AsyncMock(side_effect=AssertionError("不应进入完整 7zz 解压"))
+
+        success, password, reason = await extract_service._try_extract(
+            ArchiveInfo(
+                archive_path,
+                [{"name": "20260604161913.zip", "size": 10, "is_dir": False}],
+                password_value,
+            ),
+            output_path,
+            task,
+            password_candidates=[{
+                "password": password_value,
+                "source": "指定密码",
+                "entry_id": None,
+                "rjcode": None,
+            }],
+        )
+
+        assert success is True
+        assert password == password_value
+        assert reason == ""
+        extract_service._try_extract_zip_with_python.assert_awaited_once()
+        extract_service._try_unar_extract.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_try_extract_manual_large_zip_prefers_python_password_probe(
+        self, extract_service, temp_dir,
+    ):
+        """用户手动指定中文密码时，大 ZIP 也必须先做 Python 多编码验证。"""
+        archive_path = os.path.join(temp_dir, "large-cn-password-manual.zip")
+        self.create_test_zip(archive_path)
+        output_path = os.path.join(temp_dir, "large-cn-password-manual-output")
+        os.makedirs(output_path, exist_ok=True)
+        password_value = "我觉得我是"
+        task = Task(
+            task_type=TaskType.EXTRACT,
+            source_path=archive_path,
+            metadata={
+                "manual_retry_password": password_value,
+                "manual_retry_password_only": True,
+            },
+        )
+
+        extract_service.ZIP_COMPAT_UNAR_FIRST_MIN_BYTES = 1
+        extract_service._find_unar_executable = Mock(return_value="/usr/bin/unar")
+        extract_service._probe_zip_no_password_status = Mock(return_value="encrypted")
+        extract_service._probe_password = AsyncMock(return_value="wrong_password")
+        extract_service._try_extract_zip_with_python = AsyncMock(return_value=(True, "utf-8"))
+        extract_service._try_unar_extract = AsyncMock(
+            side_effect=AssertionError("手动密码命中 Python 兼容后端后不应再走 unar")
+        )
+        extract_service._reject_if_garbled_after_extract = AsyncMock(return_value=False)
+        extract_service._verify_extraction = AsyncMock(return_value=True)
+        extract_service._cleanup_extract_attempt = AsyncMock()
+        extract_service._run_7z_command = AsyncMock(side_effect=AssertionError("不应进入完整 7zz 解压"))
+
+        success, password, reason = await extract_service._try_extract(
+            ArchiveInfo(
+                archive_path,
+                [{"name": "20260604161913.zip", "size": 10, "is_dir": False}],
+            ),
+            output_path,
+            task,
+            password_candidates=[{
+                "password": password_value,
+                "source": "指定密码",
+                "entry_id": None,
+                "rjcode": None,
+            }],
+        )
+
+        assert success is True
+        assert password == password_value
+        assert reason == ""
+        extract_service._try_extract_zip_with_python.assert_awaited_once()
+        extract_service._try_unar_extract.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_try_extract_subtitle_probe_allows_large_unencrypted_unknown_probe(
+        self, extract_service, temp_dir,
+    ):
+        """字幕补配不能因未加密大包轻量探测 unknown 而直接放弃扫描字幕。"""
+        archive_path = os.path.join(temp_dir, "RJ01656747.7z")
+        with open(archive_path, "wb") as fp:
+            fp.write(b"placeholder")
+        output_path = os.path.join(temp_dir, "subtitle-probe-output")
+        os.makedirs(output_path, exist_ok=True)
+        task = Task(
+            task_type=TaskType.EXTRACT,
+            source_path=archive_path,
+            metadata={"subtitle_probe_mode": True},
+        )
+
+        extract_service.UNKNOWN_PROBE_LARGE_ARCHIVE_BYTES = 1
+        extract_service._probe_7z_no_password_status = AsyncMock(return_value="plain")
+        extract_service._pick_magic_entries = Mock(return_value=[])
+        extract_service._pick_probe_entry = Mock(return_value=None)
+        extract_service._probe_password = AsyncMock(return_value="unknown")
+        extract_service._run_7z_command = AsyncMock(return_value=subprocess.CompletedProcess(
+            args=["7zz"],
+            returncode=0,
+            stdout=b"",
+            stderr=b"",
+        ))
+        extract_service._reject_if_garbled_after_extract = AsyncMock(return_value=False)
+        extract_service._verify_extraction = AsyncMock(return_value=True)
+        extract_service._cleanup_extract_attempt = AsyncMock()
+
+        success, password, reason = await extract_service._try_extract(
+            ArchiveInfo(
+                archive_path,
+                [{"name": "subtitle.srt", "size": 10, "is_dir": False}],
+            ),
+            output_path,
+            task,
+            password_candidates=[],
+        )
+
+        assert success is True
+        assert password == ""
+        assert reason == ""
+        extract_service._run_7z_command.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_try_extract_subtitle_probe_prefers_no_password_before_candidates(
+        self, extract_service, temp_dir,
+    ):
+        """字幕预检遇到 unknown 时，不能因密码库候选跳过无密码完整解压。"""
+        archive_path = os.path.join(temp_dir, "RJ01656747-no-password.7z")
+        with open(archive_path, "wb") as fp:
+            fp.write(b"placeholder")
+        output_path = os.path.join(temp_dir, "subtitle-probe-no-password-output")
+        os.makedirs(output_path, exist_ok=True)
+        task = Task(
+            task_type=TaskType.EXTRACT,
+            source_path=archive_path,
+            metadata={"subtitle_probe_mode": True},
+        )
+
+        extract_service._probe_7z_no_password_status = AsyncMock(return_value=None)
+        extract_service._probe_password = AsyncMock(return_value="unknown")
+        extract_service._run_7z_command = AsyncMock(return_value=subprocess.CompletedProcess(
+            args=["7zz"],
+            returncode=0,
+            stdout=b"",
+            stderr=b"",
+        ))
+        extract_service._reject_if_garbled_after_extract = AsyncMock(return_value=False)
+        extract_service._verify_extraction = AsyncMock(return_value=True)
+        extract_service._cleanup_extract_attempt = AsyncMock()
+
+        success, password, reason = await extract_service._try_extract(
+            ArchiveInfo(
+                archive_path,
+                [{"name": "subtitle.srt", "size": 10, "is_dir": False}],
+            ),
+            output_path,
+            task,
+            password_candidates=[{
+                "password": "RJ01656747",
+                "source": "RJ号",
+                "entry_id": None,
+                "rjcode": "RJ01656747",
+            }],
+        )
+
+        assert success is True
+        assert password == ""
+        assert reason == ""
+        extract_service._run_7z_command.assert_awaited_once()
+        command = extract_service._run_7z_command.await_args.args[0]
+        assert not any(str(arg).startswith("-p") for arg in command)
 
     def test_probe_zip_password_bytes_ignores_plain_entries(self, extract_service, temp_dir):
         """ZIP 密码字节探测必须用加密条目，不能被未加密小文件误导。"""
@@ -3944,6 +4288,108 @@ Encrypted = +
     # 嵌套解压软失败：覆盖合集包内单个嵌套 zip 失败导致整任务被毙的回归
     # ------------------------------------------------------------------
 
+    @pytest.mark.asyncio
+    async def test_subtitle_probe_skips_large_opaque_rar_without_subtitles(
+        self, extract_service, temp_dir,
+    ):
+        output_path = os.path.join(temp_dir, "probe-output")
+        os.makedirs(output_path)
+        nested_rar = os.path.join(output_path, "RJ01656747")
+        with open(nested_rar, "wb") as fp:
+            fp.write(b"Rar!\x1a\x07\x01\x00")
+            fp.write(b"placeholder")
+        task = Task(
+            task_type=TaskType.EXTRACT,
+            source_path=os.path.join(temp_dir, "RJ01656747.7z"),
+            metadata={"subtitle_probe_mode": True},
+        )
+        archive_info = ArchiveInfo(
+            nested_rar,
+            [{"name": "说明.txt", "size": 128, "is_dir": False}],
+            "",
+        )
+
+        with patch.object(
+            extract_service,
+            "_get_archive_info",
+            new=AsyncMock(return_value=archive_info),
+        ), patch.object(
+            extract_service,
+            "extract_selected_entries",
+            new=AsyncMock(side_effect=AssertionError("无字幕时不应提取任何条目")),
+        ), patch.object(
+            extract_service,
+            "_try_extract_nested_direct",
+            new=AsyncMock(side_effect=AssertionError("字幕预检禁止完整解压嵌套 RAR")),
+        ):
+            result = await extract_service._extract_nested_archives(
+                output_path,
+                task,
+                max_depth=1,
+            )
+
+        assert result == 0
+        assert task.task_metadata.get("nested_archive_failures") is None
+        assert task.task_metadata["nested_archives_without_subtitles"] == ["RJ01656747"]
+        assert os.path.exists(nested_rar)
+
+    @pytest.mark.asyncio
+    async def test_subtitle_probe_selectively_extracts_entries_from_large_opaque_rar(
+        self, extract_service, temp_dir,
+    ):
+        output_path = os.path.join(temp_dir, "probe-output")
+        os.makedirs(output_path)
+        nested_rar = os.path.join(output_path, "RJ01656747")
+        with open(nested_rar, "wb") as fp:
+            fp.write(b"Rar!\x1a\x07\x01\x00")
+            fp.write(b"placeholder")
+        task = Task(
+            task_type=TaskType.EXTRACT,
+            source_path=os.path.join(temp_dir, "RJ01656747.7z"),
+            metadata={"subtitle_probe_mode": True},
+        )
+        archive_info = ArchiveInfo(
+            nested_rar,
+            [
+                {"name": "track/voice.lrc", "size": 128, "is_dir": False},
+                {"name": "说明.txt", "size": 64, "is_dir": False},
+            ],
+            "",
+        )
+
+        async def fake_extract_selected(_archive, entries, selected_output, **_kwargs):
+            assert entries == ["track/voice.lrc"]
+            target = os.path.join(selected_output, "track")
+            os.makedirs(target, exist_ok=True)
+            with open(os.path.join(target, "voice.lrc"), "wb") as fp:
+                fp.write(b"[00:00.00]subtitle")
+            return selected_output
+
+        with patch.object(
+            extract_service,
+            "_get_archive_info",
+            new=AsyncMock(return_value=archive_info),
+        ), patch.object(
+            extract_service,
+            "extract_selected_entries",
+            new=AsyncMock(side_effect=fake_extract_selected),
+        ) as selected_mock, patch.object(
+            extract_service,
+            "_try_extract_nested_direct",
+            new=AsyncMock(side_effect=AssertionError("字幕预检禁止完整解压嵌套 RAR")),
+        ):
+            result = await extract_service._extract_nested_archives(
+                output_path,
+                task,
+                max_depth=1,
+            )
+
+        assert result == 1
+        assert task.task_metadata.get("nested_archive_failures") is None
+        selected_mock.assert_awaited_once()
+        assert os.path.exists(os.path.join(output_path, "RJ01656747_1", "track", "voice.lrc"))
+        assert os.path.exists(nested_rar)
+
     def test_extract_nested_archives_part_failure_does_not_raise(
         self, extract_service, temp_dir
     ):
@@ -3990,6 +4436,53 @@ Encrypted = +
 
         # 失败的源 zip 应仍留在原位，方便后续按 RJ 子任务重试或人工处理
         assert os.path.exists(nested_zip)
+
+    @pytest.mark.asyncio
+    async def test_extract_nested_archives_repairs_disguised_sfx_rar_volumes(
+        self, extract_service, temp_dir
+    ):
+        """`.part1.exe + .partN.ra删除r` 应作为一组嵌套 RAR 解压。"""
+        output_path = os.path.join(temp_dir, "extract_out")
+        os.makedirs(output_path)
+
+        first_volume = os.path.join(output_path, "RJ353111.part1.exe")
+        with open(first_volume, "wb") as fp:
+            fp.write(b"MZ" + (b"\\0" * 64) + b"Rar!\\x1a\\x07\\x01\\x00")
+        for index in (2, 3, 4):
+            with open(
+                os.path.join(output_path, f"RJ353111.part{index}.ra删除r"),
+                "wb",
+            ) as fp:
+                fp.write(b"Rar!\\x1a\\x07\\x01\\x00payload")
+
+        task = Task(
+            task_type=TaskType.EXTRACT,
+            source_path=os.path.join(temp_dir, "outer.7z"),
+        )
+
+        with patch.object(
+            ExtractService,
+            "_classify_nested_small_archive",
+            new=AsyncMock(return_value="non_subtitle"),
+        ), patch.object(
+            ExtractService,
+            "_try_extract_nested_direct",
+            new=AsyncMock(return_value=(True, None)),
+        ) as extract_mock:
+            result = await extract_service._extract_nested_archives(
+                output_path,
+                task,
+                max_depth=1,
+            )
+
+        assert result == 1
+        assert extract_mock.await_count == 1
+        assert extract_mock.await_args.args[0].endswith("RJ353111.part1.rar")
+        assert not os.path.exists(first_volume)
+        assert not any(
+            name.startswith("RJ353111.part")
+            for name in os.listdir(output_path)
+        )
 
     def test_extract_nested_archives_failure_metadata_dedupes(
         self, extract_service, temp_dir

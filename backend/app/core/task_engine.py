@@ -18,6 +18,7 @@ import logging
 from sqlalchemy import or_
 
 from .archive_volume_utils import get_archive_total_size, get_archive_volume_paths, sort_archive_volumes
+from .failure_reason_formatter import format_problem_failure_message
 
 logger = logging.getLogger(__name__)
 
@@ -822,9 +823,10 @@ class TaskEngine:
             return
 
         state = str(state or "").strip()
-        if action == "RETRY" and state == TaskStatus.WAITING_MANUAL.value:
-            # 问题作品里触发的重试再次失败时，AUTO_PROCESS 会收口到 waiting_manual。
-            # 对原 conflict 来说这已经是本次重试终态，不能继续展示为“重试中”。
+        if action in {"RETRY", "KEEP_NEW"} and state == TaskStatus.WAITING_MANUAL.value:
+            # 问题作品里触发的重试 / 保留新版任务再次解压失败时，AUTO_PROCESS
+            # 会收口到 waiting_manual。对原 conflict 来说这已经是本次处理终态，
+            # 不能继续展示为“处理中”。
             state = "failed"
             if not error:
                 error = str(getattr(task, "error_message", "") or getattr(task, "current_step", "") or "重试失败，仍需人工处理").strip()
@@ -1500,7 +1502,11 @@ class TaskEngine:
         metadata["error_message"] = reason
         metadata["available_actions"] = ["RETRY", "SKIP"]
         metadata = self._sanitize_failure_metadata(metadata, reason)
-
+        display_reason = format_problem_failure_message(metadata, reason, stage="extract")
+        if display_reason != reason:
+            metadata["raw_error_message"] = reason
+        metadata["error_message"] = display_reason
+        task.error_message = display_reason
         classifier = SmartClassifier()
         classifier._add_to_conflict_works(
             task.id,
@@ -1659,6 +1665,12 @@ class TaskEngine:
             "retry_source_path": problem_source_path,
         })
         metadata = self._sanitize_failure_metadata(metadata, reason)
+        display_reason = format_problem_failure_message(metadata, reason, stage=failure_stage)
+        if display_reason != reason:
+            metadata["raw_error_message"] = reason
+        metadata["error_message"] = display_reason
+        if failure_stage == "extract":
+            task.error_message = display_reason
         task.task_metadata = metadata
         task.touch_metadata("failure_stage")
 
@@ -1978,7 +1990,7 @@ class TaskEngine:
                         )
                     except Exception:
                         logger.warning("写入保留新版操作记录失败: task_id=%s conflict_id=%s", task.id, conflict_id, exc_info=True)
-            elif task.status == TaskStatus.FAILED:
+            elif task.status in {TaskStatus.FAILED, TaskStatus.WAITING_MANUAL}:
                 conflict.status = "PENDING"
                 next_metadata["resolution_task_state"] = "failed"
                 next_metadata["resolution_progress"] = int(getattr(task, "progress", 0) or 0)
@@ -2704,20 +2716,38 @@ class TaskEngine:
                                     queue_origin="auto_process",
                                 )
                                 if existing_subtitle_problem.get("handled"):
+                                    auto_skipped = bool(existing_subtitle_problem.get("auto_skipped"))
                                     task.task_metadata = {
                                         **(task.task_metadata or {}),
                                         "linked_subtitle_preview": preview,
                                         "linked_subtitle_problem": existing_subtitle_problem,
-                                        "source_mode": "linked_translation_archive_existing_subtitle_conflict",
+                                        "source_mode": (
+                                            "linked_translation_archive_existing_subtitle_skipped"
+                                            if auto_skipped
+                                            else "linked_translation_archive_existing_subtitle_conflict"
+                                        ),
                                     }
                                     task.output_path = ""
                                     task.status = TaskStatus.COMPLETED
-                                    task.update_progress(100, "原作目录已有字幕，已加入问题作品列表")
-                                    task.completed_at = datetime.now()
-                                    logger.info(
-                                        f"[{rjcode}] 原作目录已有字幕，已转入问题作品列表: "
-                                        f"target={preview.get('target_rjcode', '')} conflict={existing_subtitle_problem.get('conflict_id', '')}"
+                                    task.update_progress(
+                                        100,
+                                        (
+                                            "原作已在 Kikoeru 端有字幕，库存未命中可操作目录，已自动跳过"
+                                            if auto_skipped
+                                            else "原作目录已有字幕，已加入问题作品列表"
+                                        ),
                                     )
+                                    task.completed_at = datetime.now()
+                                    if auto_skipped:
+                                        logger.info(
+                                            f"[{rjcode}] 原作仅在 Kikoeru 端确认已有字幕，库存未命中目录，已自动跳过: "
+                                            f"target={preview.get('target_rjcode', '')}"
+                                        )
+                                    else:
+                                        logger.info(
+                                            f"[{rjcode}] 原作目录已有字幕，已转入问题作品列表: "
+                                            f"target={preview.get('target_rjcode', '')} conflict={existing_subtitle_problem.get('conflict_id', '')}"
+                                        )
                                     await self._abort_precheck(precheck_task)
                                     return
                             else:

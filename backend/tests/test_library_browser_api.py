@@ -1160,11 +1160,21 @@ def test_notify_index_move_batch_filters_workbench_subtitles_but_indexes_audio(m
             "scope": "exact",
             "target_library_id": "local-a",
             "target_path": "RJ01000001/new.wav",
+            "payload": {
+                "old_absolute_path": str(work_dir / "old.wav"),
+                "new_absolute_path": str(work_dir / "new.wav"),
+            },
         },
         {
-            "kind": "reconcile",
+            "kind": "move_target",
             "relative_path": "RJ01000001/new.wav",
             "scope": "exact",
+            "payload": {
+                "source_library_id": "local-a",
+                "source_path": "RJ01000001/old.wav",
+                "old_absolute_path": str(work_dir / "old.wav"),
+                "new_absolute_path": str(work_dir / "new.wav"),
+            },
         },
     ]
 
@@ -1319,7 +1329,11 @@ def test_record_index_move_many_returns_finalize_response(monkeypatch, tmp_path)
     assert response["operation_id"] == "circle-move-operation"
     assert response["index_fences"][0]["accepted_seq"] == 12
     effects = captured["finalize"]["actual_effects_by_library"][library.id]
-    assert [effect["kind"] for effect in effects] == ["move", "reconcile"]
+    assert [effect["kind"] for effect in effects] == ["move", "move_target"]
+    assert effects[0]["payload"] == {
+        "old_absolute_path": str(source_path),
+        "new_absolute_path": str(destination),
+    }
 
 
 def test_local_move_preview_prefers_index_and_versions_redis_plan(monkeypatch, tmp_path):
@@ -2126,9 +2140,20 @@ def test_local_api_rename_commits_mutation_fence(monkeypatch, tmp_path):
         def mark_reconcile_required(self, *_args, **_kwargs):
             raise AssertionError("成功重命名不应进入 reconcile_required")
 
+    class FakeRenameService:
+        async def _get_japanese_metadata(self, _rjcode):
+            raise AssertionError("未启用日语元数据时不应请求")
+
+        def _compile_name(self, metadata, japanese_metadata):
+            assert japanese_metadata is None
+            return f"[{metadata['maker_name']}][{metadata['rjcode']}]"
+
+        def _sanitize_filename(self, value):
+            return value
+
     fake_config = SimpleNamespace(
         rename=SimpleNamespace(
-            template="",
+            template="[{maker_name}][{rjcode}]",
             api_rename_follow_template=False,
             use_japanese_metadata=False,
         )
@@ -2137,6 +2162,7 @@ def test_local_api_rename_commits_mutation_fence(monkeypatch, tmp_path):
     monkeypatch.setattr(routes_module, "get_library_index_mutation_service", lambda: FakeMutationService())
     monkeypatch.setattr(routes_module, "get_config", lambda: fake_config)
     monkeypatch.setattr("app.core.metadata_service.MetadataService", lambda: FakeMetadataService())
+    monkeypatch.setattr("app.core.rename_service.RenameService", lambda: FakeRenameService())
     monkeypatch.setattr("app.core.activity_log_service.log_api_rename_action", lambda **_kwargs: None)
 
     response = asyncio.run(routes_module.api_rename_library_file(_FakeJsonRequest(
@@ -2155,11 +2181,11 @@ def test_local_api_rename_commits_mutation_fence(monkeypatch, tmp_path):
             "relative_path": source.name,
             "scope": "subtree",
             "target_library_id": library.id,
-            "target_path": "RJ01572763 目标作品",
+            "target_path": "[目标社团][RJ01572763]",
         },
         {
             "kind": "reconcile",
-            "relative_path": "RJ01572763 目标作品",
+            "relative_path": "[目标社团][RJ01572763]",
             "scope": "subtree",
         },
     ]
@@ -2392,6 +2418,11 @@ def test_batch_api_rename_skips_minimal_metadata_without_batch_renaming(monkeypa
     assert response["results"][0]["skipped"] is True
     assert "DLsite 元数据短熔断中" in response["results"][0]["error"]
     assert response["results"][0]["metadata_source"] == "minimal"
+    assert response["results"][0]["metadata_verification_status"] == "unverified"
+    assert (
+        response["results"][0]["metadata_verification_reason"]
+        == "元数据来源缺少可验证的结构化证据"
+    )
     assert captured["metadata_task_rjcode"] == "RJ01572763"
     assert captured["metadata_task_metadata"] == {
         "rjcode": "RJ01572763",
@@ -2472,8 +2503,20 @@ def test_local_batch_api_rename_fence_contains_only_successful_items(monkeypatch
         def mark_reconcile_required(self, *_args, **_kwargs):
             raise AssertionError("确定的部分失败不应进入 reconcile_required")
 
+    class FakeRenameService:
+        async def _get_japanese_metadata(self, _rjcode):
+            raise AssertionError("未启用日语元数据时不应请求")
+
+        def _compile_name(self, metadata, japanese_metadata):
+            assert japanese_metadata is None
+            return f"[{metadata['maker_name']}][{metadata['rjcode']}]"
+
+        def _sanitize_filename(self, value):
+            return value
+
     fake_config = SimpleNamespace(
         rename=SimpleNamespace(
+            template="[{maker_name}][{rjcode}]",
             api_rename_follow_template=False,
             use_japanese_metadata=False,
         )
@@ -2482,6 +2525,7 @@ def test_local_batch_api_rename_fence_contains_only_successful_items(monkeypatch
     monkeypatch.setattr(routes_module, "get_library_index_mutation_service", lambda: FakeMutationService())
     monkeypatch.setattr(routes_module, "get_config", lambda: fake_config)
     monkeypatch.setattr("app.core.metadata_service.MetadataService", lambda: FakeMetadataService())
+    monkeypatch.setattr("app.core.rename_service.RenameService", lambda: FakeRenameService())
     monkeypatch.setattr("app.core.activity_log_service.log_api_rename_action", lambda **_kwargs: None)
     monkeypatch.setattr("app.core.activity_log_service.log_batch_api_rename_result", lambda **_kwargs: None)
 

@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import mimetypes
+import inspect
 import os
 import secrets
 import sys
@@ -227,6 +228,12 @@ def _is_media_response_for_gzip(headers: Headers, status_code: int) -> bool:
 
 
 class MediaAwareGZipResponder(GZipResponder):
+    async def _apply_compression_compat(self, body: bytes, *, more_body: bool) -> bytes:
+        compressed = self.apply_compression(body, more_body=more_body)
+        if inspect.isawaitable(compressed):
+            compressed = await compressed
+        return compressed
+
     async def send_with_compression(self, message):
         message_type = message["type"]
         if message_type == "http.response.start":
@@ -250,10 +257,7 @@ class MediaAwareGZipResponder(GZipResponder):
                 await self.send(self.initial_message)
                 await self.send(message)
             elif not more_body:
-                body = self.apply_compression(body, more_body=False)
-                import asyncio as _asyncio
-                if _asyncio.iscoroutine(body):
-                    body = await body
+                body = await self._apply_compression_compat(body, more_body=False)
 
                 headers = MutableHeaders(raw=self.initial_message["headers"])
                 headers.add_vary_header("Accept-Encoding")
@@ -265,9 +269,7 @@ class MediaAwareGZipResponder(GZipResponder):
                 await self.send(self.initial_message)
                 await self.send(message)
             else:
-                body = self.apply_compression(body, more_body=True)
-                if _asyncio.iscoroutine(body):
-                    body = await body
+                body = await self._apply_compression_compat(body, more_body=True)
 
                 headers = MutableHeaders(raw=self.initial_message["headers"])
                 headers.add_vary_header("Accept-Encoding")
@@ -278,9 +280,25 @@ class MediaAwareGZipResponder(GZipResponder):
 
                 await self.send(self.initial_message)
                 await self.send(message)
+        elif message_type == "http.response.body":
+            body = message.get("body", b"")
+            more_body = message.get("more_body", False)
+            message["body"] = await self._apply_compression_compat(body, more_body=more_body)
+            await self.send(message)
         elif message_type == "http.response.pathsend":  # pragma: no branch
             await self.send(self.initial_message)
             await self.send(message)
+
+
+def _create_media_gzip_responder(app, minimum_size: int, compresslevel: int):
+    kwargs = {"compresslevel": compresslevel}
+    try:
+        parameters = inspect.signature(GZipResponder.__init__).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "thread_minimum_size" in parameters:
+        kwargs["thread_minimum_size"] = 0
+    return MediaAwareGZipResponder(app, minimum_size, **kwargs)
 
 
 class MediaAwareGZipMiddleware(GZipMiddleware):
@@ -289,31 +307,18 @@ class MediaAwareGZipMiddleware(GZipMiddleware):
             await self.app(scope, receive, send)
             return
 
-        import inspect as _inspect
-        _gz_kwargs = {}
-        try:
-            _gz_params = _inspect.signature(GZipResponder.__init__).parameters
-            if "thread_minimum_size" in _gz_params:
-                _gz_kwargs["thread_minimum_size"] = getattr(self, "thread_minimum_size", 1024 * 1024)
-        except Exception:
-            pass
-
-        _id_kwargs = {}
-        try:
-            _id_params = _inspect.signature(IdentityResponder.__init__).parameters
-            if "thread_minimum_size" in _id_params:
-                _id_kwargs["thread_minimum_size"] = getattr(self, "thread_minimum_size", 1024 * 1024)
-        except Exception:
-            pass
-
         path = str(scope.get("path") or "")
         if path.startswith("/assets/"):
-            responder = IdentityResponder(self.app, self.minimum_size, **_id_kwargs)
+            responder = IdentityResponder(self.app, self.minimum_size)
             await responder(scope, receive, send)
             return
 
         headers = Headers(scope=scope)
-        responder = MediaAwareGZipResponder(self.app, self.minimum_size, compresslevel=self.compresslevel, **_gz_kwargs) if "gzip" in headers.get("Accept-Encoding", "") else IdentityResponder(self.app, self.minimum_size, **_id_kwargs)
+        responder = (
+            _create_media_gzip_responder(self.app, self.minimum_size, self.compresslevel)
+            if "gzip" in headers.get("Accept-Encoding", "")
+            else IdentityResponder(self.app, self.minimum_size)
+        )
         await responder(scope, receive, send)
 
 
@@ -421,6 +426,12 @@ def _circle_bonus_probe_business_key(
 def _api_rename_metadata_skip_reason(metadata: Dict[str, Any], rjcode: str) -> str:
     from ..core.dlsite_metadata_trust import attach_dlsite_metadata_verification
 
+    source = str(metadata.get("metadata_source") or "").strip().lower()
+    if source == "minimal":
+        if metadata.get("dlsite_circuit_open"):
+            return "DLsite 元数据短熔断中，已跳过重命名"
+        return "DLsite 元数据不可用，已跳过重命名"
+
     attach_dlsite_metadata_verification(metadata, rjcode)
     verification_status = str(
         metadata.get("metadata_verification_status") or ""
@@ -431,7 +442,6 @@ def _api_rename_metadata_skip_reason(metadata: Dict[str, Any], rjcode: str) -> s
     if verification_status != "verified":
         return verification_reason or "DLsite 元数据未经验证，已跳过重命名"
 
-    source = str(metadata.get("metadata_source") or "").strip().lower()
     normalized_rj = str(rjcode or metadata.get("rjcode") or "").strip().upper()
     work_name = str(metadata.get("work_name") or "").strip()
     maker_name = str(metadata.get("maker_name") or "").strip()
@@ -444,10 +454,6 @@ def _api_rename_metadata_skip_reason(metadata: Dict[str, Any], rjcode: str) -> s
         ]
     )
 
-    if source == "minimal":
-        if metadata.get("dlsite_circuit_open"):
-            return "DLsite 元数据短熔断中，已跳过重命名"
-        return "DLsite 元数据不可用，已跳过重命名"
     if not maker_name and work_name.upper() == normalized_rj and not has_any_detail:
         return "元数据不完整，已跳过重命名"
     return ""
@@ -4730,7 +4736,14 @@ def get_library_index_runtime_status():
         "replay_count": int(mutation.get("replay_count") or 0),
         "materializer": {
             "worker_alive": bool(mutation.get("worker_alive")),
+            "publisher_alive": bool(mutation.get("publisher_alive")),
+            "listener_alive": bool(mutation.get("listener_alive")),
+            "listener_hint_batches": int(
+                mutation.get("listener_hint_batches") or 0
+            ),
             "consumer": mutation.get("consumer"),
+            "fast_path": mutation.get("fast_path") or {},
+            "pool": mutation.get("materializer_pool") or {},
         },
         "watcher": watcher,
         "redis": redis_status,
@@ -6937,13 +6950,20 @@ async def get_conflicts(include_stats: bool = False):
                         str(_nm.get("resolution_action") or "").upper() == "RETRY"
                         and linked_task_status == "waiting_manual"
                     )
-                    if linked_task_status not in active_task_statuses or _is_stale_keep_new or _is_retry_waiting_manual_done:
+                    _is_keep_new_waiting_manual_done = (
+                        str(_nm.get("resolution_action") or "").upper() == "KEEP_NEW"
+                        and linked_task_status == "waiting_manual"
+                    )
+                    if linked_task_status not in active_task_statuses or _is_stale_keep_new or _is_retry_waiting_manual_done or _is_keep_new_waiting_manual_done:
                         conflict.status = "PENDING"
                         next_metadata = _normalize_conflict_metadata(conflict.new_metadata)
-                        if _is_retry_waiting_manual_done:
+                        if _is_retry_waiting_manual_done or _is_keep_new_waiting_manual_done:
                             next_metadata["retry_result"] = "failed"
                             next_metadata["resolution_task_state"] = "failed"
-                            next_metadata.setdefault("resolution_error", "重试失败，仍需人工处理")
+                            next_metadata.setdefault(
+                                "resolution_error",
+                                "保留新版解压失败，仍需人工处理" if _is_keep_new_waiting_manual_done else "重试失败，仍需人工处理",
+                            )
                         else:
                             next_metadata["resolution_task_state"] = "stale_processing_recovered"
                             next_metadata["resolution_recovered_at"] = datetime.now().isoformat()
@@ -7376,6 +7396,23 @@ async def retry_extract_failed_conflict(conflict_id: str, payload: Optional[Conf
         if conflict.rjcode:
             task.task_metadata["inferred_rjcode"] = conflict.rjcode
 
+        # 问题作品重试会创建新的引擎任务，但旧的 waiting_manual 任务仍然保留。
+        # 标记旧任务已被本次重试替代，任务中心据此隐藏旧行；状态保持原样，审计仍可追溯。
+        if failed_task_id:
+            failed_task = engine.get_task(failed_task_id)
+            if failed_task and failed_task.id != task.id:
+                failed_metadata = dict(failed_task.task_metadata or {})
+                failed_metadata["superseded_by_task_id"] = task.id
+                failed_metadata["superseded_at"] = datetime.now().isoformat()
+                failed_metadata["superseded_reason"] = "retry_replaced"
+                failed_metadata["hidden_in_task_lists"] = True
+                failed_task.task_metadata = failed_metadata
+                failed_task.touch_metadata("retry_superseded")
+                with contextlib.suppress(Exception):
+                    from ..core.task_center_materialization_service import get_task_center_materialization_service
+
+                    get_task_center_materialization_service().delete_engine_item(failed_task.id)
+
         conflict.status = "PROCESSING"
         next_metadata = dict(conflict.new_metadata or {})
         next_metadata["resolution_task_state"] = "queued"
@@ -7703,6 +7740,36 @@ async def resolve_conflict(conflict_id: str, action: dict):
         resolution_diff_items = []
 
         try:
+            if action_type == "CANCEL":
+                linked_task_id = str(
+                    (conflict.new_metadata or {}).get("resolution_task_id") or conflict.task_id or ""
+                ).strip()
+                linked_task = engine.get_task(linked_task_id) if linked_task_id else None
+                if linked_task and linked_task.status in {
+                    TaskStatus.PENDING,
+                    TaskStatus.PROCESSING,
+                    TaskStatus.PAUSED,
+                    TaskStatus.WAITING_MANUAL,
+                    TaskStatus.WAITING_RETRY,
+                }:
+                    engine.cancel_task(linked_task.id)
+                conflict.status = "PENDING"
+                next_metadata = dict(conflict.new_metadata or {})
+                next_metadata.update({
+                    "resolution_task_id": linked_task_id,
+                    "resolution_task_state": "cancelled",
+                    "resolution_error": "用户已终止后台处理",
+                    "resolution_cancelled_at": datetime.now().isoformat(),
+                })
+                conflict.new_metadata = next_metadata
+                db.commit()
+                return {
+                    "success": True,
+                    "conflict_id": conflict.id,
+                    "action": action_type,
+                    "task_id": linked_task_id,
+                    "message": "已终止保留新版后台处理，可重新选择重试或其它操作",
+                }
             if action_type == "KEEP_NEW":
                 if not confirmed:
                     raise HTTPException(status_code=400, detail="保留新版前必须先完成删除审查确认")
@@ -7806,6 +7873,25 @@ async def resolve_conflict(conflict_id: str, action: dict):
                     },
                     rjcode=conflict.rjcode or None,
                 )
+                # 下载工作台指定的密码会随 selected_items / preview_items 落在原失败任务元数据中。
+                # KEEP_NEW 新建任务时显式转成 extract_service 的手动密码候选，避免依赖文件名嗅探。
+                specified_passwords: list[str] = []
+                seen_passwords: set[str] = set()
+                for source_key in ("selected_items", "preview_items", "download_files"):
+                    for item in list(next_metadata.get(source_key) or []):
+                        if not isinstance(item, dict):
+                            continue
+                        password = normalize_password_value(
+                            item.get("custom_extract_password") or item.get("extract_password")
+                        )
+                        if password and password not in seen_passwords:
+                            seen_passwords.add(password)
+                            specified_passwords.append(password)
+                if specified_passwords:
+                    task.task_metadata["manual_retry_passwords"] = specified_passwords
+                    task.task_metadata["manual_retry_password"] = specified_passwords[0]
+                    task.task_metadata["manual_retry_password_only"] = True
+                    task.task_metadata["manual_retry_password_requested"] = True
                 if conflict.task_id:
                     task.task_metadata["parent_conflict_task_id"] = str(conflict.task_id)
                 await engine.submit(task)
@@ -13224,51 +13310,32 @@ async def api_rename_library_file(request: Request):
         
         config = get_config()
         logger.info(f"[API RENAME] 读取到的模板: '{config.rename.template}' (长度: {len(config.rename.template)})")
-        logger.info(f"[API RENAME] api_rename_follow_template: {config.rename.api_rename_follow_template}")
         logger.info(f"[API RENAME] use_japanese_metadata: {config.rename.use_japanese_metadata}")
 
-        # 根据配置决定是否遵循重命名模板
-        if config.rename.api_rename_follow_template:
-            # 使用重命名服务生成名称
-            from ..core.rename_service import RenameService
-            rename_service = RenameService()
+        from ..core.rename_service import RenameService
+        rename_service = RenameService()
 
-            # 创建临时任务对象用于重命名
-            from ..core.task_engine import Task, TaskType
-            temp_task = Task(
-                task_type=TaskType.RENAME,
-                source_path=file_path
-            )
-            temp_task.task_metadata = metadata
+        # 创建临时任务对象用于重命名
+        from ..core.task_engine import Task, TaskType
+        temp_task = Task(
+            task_type=TaskType.RENAME,
+            source_path=file_path
+        )
+        temp_task.task_metadata = metadata
 
-            # 如果启用了日语元数据，获取日语版本
-            japanese_metadata = None
-            if config.rename.use_japanese_metadata:
-                logger.info(f"[{rjcode}] 启用日语元数据，正在获取...")
-                japanese_metadata = await rename_service._get_japanese_metadata(rjcode)
-                if japanese_metadata:
-                    logger.info(f"[{rjcode}] 日语元数据获取成功: maker_name={japanese_metadata.get('maker_name')}")
-                else:
-                    logger.warning(f"[{rjcode}] 日语元数据获取失败，将使用当前语言元数据")
+        # 如果启用了日语元数据，获取日语版本
+        japanese_metadata = None
+        if config.rename.use_japanese_metadata:
+            logger.info(f"[{rjcode}] 启用日语元数据，正在获取...")
+            japanese_metadata = await rename_service._get_japanese_metadata(rjcode)
+            if japanese_metadata:
+                logger.info(f"[{rjcode}] 日语元数据获取成功: maker_name={japanese_metadata.get('maker_name')}")
+            else:
+                logger.warning(f"[{rjcode}] 日语元数据获取失败，将使用当前语言元数据")
 
-            # 编译名称
-            new_name = rename_service._compile_name(metadata, japanese_metadata)
-            new_name = rename_service._sanitize_filename(new_name)
-            logger.info(f"[{rjcode}] 使用重命名模板生成名称: {new_name}")
-        else:
-            # 简单格式：RJ号 + 作品名
-            import re
-            def sanitize_filename(name):
-                # 移除或替换Windows不允许的字符
-                name = re.sub(r'[<>:"/\\|?*]', '_', name)
-                # 移除控制字符
-                name = re.sub(r'[\x00-\x1f\x7f]', '', name)
-                # 移除末尾的空格和点
-                name = name.rstrip(' .')
-                return name
-            
-            new_name = f"{rjcode} {sanitize_filename(work_name)}"
-            logger.info(f"[{rjcode}] 使用简单格式生成名称: {new_name}")
+        new_name = rename_service._compile_name(metadata, japanese_metadata)
+        new_name = rename_service._sanitize_filename(new_name)
+        logger.info(f"[{rjcode}] 使用重命名模板生成名称: {new_name}")
         
         # 构建新路径
         if is_remote_library:
@@ -13841,22 +13908,11 @@ async def batch_api_rename_library_items(request: Request, background_tasks: Bac
 
                         # 生成新名称
                         config = get_config()
-                        if config.rename.api_rename_follow_template:
-                            japanese_metadata = None
-                            if config.rename.use_japanese_metadata:
-                                japanese_metadata = await rename_service._get_japanese_metadata(rjcode)
-                            new_name = rename_service._compile_name(metadata, japanese_metadata)
-                            new_name = rename_service._sanitize_filename(new_name)
-                        else:
-                            work_name = metadata.get('work_name', '')
-
-                            def sanitize_filename(name):
-                                name = re.sub(r'[<>:"/\\|?*]', '_', name)
-                                name = re.sub(r'[\x00-\x1f\x7f]', '', name)
-                                name = name.rstrip(' .')
-                                return name
-
-                            new_name = f"{rjcode} {sanitize_filename(work_name)}"
+                        japanese_metadata = None
+                        if config.rename.use_japanese_metadata:
+                            japanese_metadata = await rename_service._get_japanese_metadata(rjcode)
+                        new_name = rename_service._compile_name(metadata, japanese_metadata)
+                        new_name = rename_service._sanitize_filename(new_name)
 
                         # 只生成计划；真实重命名按 library 聚合后一次 manager.batch_rename()。
                         if item_is_remote:
