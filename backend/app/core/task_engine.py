@@ -7066,6 +7066,11 @@ class TaskEngine:
                 folder_name = raw_rj_keys[0] if raw_rj_keys else ""
                 if folder_name and (not work_name or re.match(r"^RJ\d+$", work_name, re.IGNORECASE)):
                     work_name = folder_name
+                # work_name 仍只有 RJ 号时，用真实目录名（索引路径 basename）作为标题，避免 AI 拿到空标题
+                if not work_name or re.match(r"^RJ\d+$", work_name, re.IGNORECASE):
+                    dir_name = os.path.basename(str(clean_path).rstrip("/\\")) if clean_path else ""
+                    if dir_name:
+                        work_name = dir_name
 
                 rename_data = {}
                 if library_id and clean_path:
