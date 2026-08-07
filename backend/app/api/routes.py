@@ -4052,7 +4052,9 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                                         except Exception as exc:
                                             logger.warning("[AI标题] 文件重命名失败: %s -> %s error=%s", entry["path"], new_name, exc)
                             # 重命名项目文件夹：使用 AI 翻译后的标题
-                            if rd.get("path"):
+                            folder_path_val = rd.get("path") if isinstance(rd, dict) else None
+                            logger.info("[AI标题] 文件夹重命名条件检查 rd=%s path=%s", bool(rd), folder_path_val)
+                            if folder_path_val:
                                 try:
                                     from sqlalchemy import text as _sql_text
                                     from ..models.database import get_db as _get_db
@@ -4066,12 +4068,15 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                                     folder_title = None
                                     if frow:
                                         folder_title = frow[0] or frow[1]
+                                    logger.info("[AI标题] 文件夹标题查询 rj=%s folder_title=%s", rj, folder_title)
                                     if folder_title:
                                         folder_title_clean = re.sub(r'[<>:"/\|?*]', '', folder_title).strip()
                                         if folder_title_clean:
-                                            folder_src = str(rd.get("path") or "").rstrip("/\\")
+                                            folder_src = str(folder_path_val).rstrip("/\\")
                                             if folder_src:
-                                                await rn_mgr.rename(
+                                                from ..core.library_manager import get_library_manager as _get_rn_mgr
+                                                rn_mgr2 = _get_rn_mgr()
+                                                await rn_mgr2.rename(
                                                     rd.get("library_id") or request.library_id,
                                                     folder_src,
                                                     folder_title_clean,
@@ -4079,8 +4084,10 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                                                     sync_index_mutation=False,
                                                 )
                                                 logger.info("[AI标题] 项目文件夹重命名成功: %s -> %s", folder_src, folder_title_clean)
+                                        else:
+                                            logger.warning("[AI标题] 文件夹标题清理后为空: %s", folder_title)
                                 except Exception as exc:
-                                    logger.warning("[AI标题] 项目文件夹重命名失败: %s error=%s", rd.get("path"), exc)
+                                    logger.warning("[AI标题] 项目文件夹重命名失败: %s error=%s", folder_path_val, exc)
         except Exception as exc:
             logger.warning("[AI标题] 写入 ai_title 失败: %s", exc)
 
