@@ -2,6 +2,10 @@
 
 本文件记录 KikoeruManager 的版本变化、功能更新与问题修复。更早的历史版本可通过 GitHub Tags 与提交历史查看。
 
+## v2.4.47
+
+- 修复：HTTP/PikPak 预览响应处理改为强类型数组判断，避免返回字段类型异常时前端直接报错。
+- 修复：PikPak 预览的 `items` 与 `extracted_archive_passwords` 非数组时不再中断解析。
 ## v2.4.46
 
 - 修复：PikPak 分享链接统一解析回归，不再重复输出无提取码原始链接，并支持 `#提取码` 片段解析。
