@@ -3920,6 +3920,7 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
         if folder_name and (not work_name or _re.match(r"^RJ\d+$", work_name, _re.IGNORECASE)):
             work_name = folder_name
         # 如果提供了 library_id 和 path，扫描文件树并将文件名合并到 work_name
+        rename_data = {}
         if request.library_id and request.path:
             try:
                 from ..core.library_manager import get_library_manager
@@ -3933,6 +3934,7 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                 )
                 scan_items = scan_data.get("items", []) if isinstance(scan_data, dict) else []
                 file_names = []
+                base_to_entries = {}
                 for sitem in scan_items:
                     if sitem.get("is_directory") or sitem.get("type") == "dir":
                         continue
@@ -3942,11 +3944,15 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                         base = os.path.splitext(name)[0]
                         if base not in file_names:
                             file_names.append(base)
+                        if base not in base_to_entries:
+                            base_to_entries[base] = []
+                        base_to_entries[base].append({"name": name, "path": sitem.get("path", ""), "ext": ext})
                 if file_names:
                     work_name = work_name + "\n--- 文件树名称 ---\n" + "\n".join(sorted(file_names))
+                rename_data = {"library_id": request.library_id, "base_to_entries": base_to_entries}
             except Exception:
                 pass
-        items.append({"rjcode": rjcode, "work_name": work_name})
+        items.append({"rjcode": rjcode, "work_name": work_name, "rename_data": rename_data})
     db.close()
 
     service = get_ai_title_translation_service()
@@ -3999,6 +4005,40 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                         )
                         db.commit()
                         db.close()
+                    # 文件重命名：解析 AI 返回的 JSON 映射，重命名音频/字幕文件
+                    if r.get("rename_data") and r["rename_data"].get("base_to_entries"):
+                        import json as _rn_json
+                        try:
+                            rn_parsed = _rn_json.loads(title_text[json_start:json_end]) if json_start >= 0 and json_end > json_start else None
+                        except _rn_json.JSONDecodeError:
+                            rn_parsed = None
+                        if isinstance(rn_parsed, dict):
+                            base_to_entries = r["rename_data"]["base_to_entries"]
+                            rn_map = {}
+                            for orig_key, trans_val in rn_parsed.items():
+                                if isinstance(orig_key, str) and isinstance(trans_val, str) and trans_val.strip():
+                                    rn_map[orig_key.strip()] = trans_val.strip()
+                            if rn_map:
+                                for base, entries_list in base_to_entries.items():
+                                    if base not in rn_map:
+                                        continue
+                                    new_base = re.sub(r'[<>:"/\\|?*]', '', rn_map[base]).strip()
+                                    if not new_base:
+                                        continue
+                                    for entry in entries_list:
+                                        new_name = f"{new_base}{entry['ext']}"
+                                        try:
+                                            from ..core.library_manager import get_library_manager
+                                            rn_mgr = get_library_manager()
+                                            await rn_mgr.rename(
+                                                request.library_id,
+                                                entry["path"],
+                                                new_name,
+                                                skip_index_mutation=False,
+                                                sync_index_mutation=False,
+                                            )
+                                        except Exception:
+                                            pass
         except Exception as exc:
             logger.warning("[AI标题] 写入 ai_title 失败: %s", exc)
 
