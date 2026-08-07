@@ -11,7 +11,7 @@ ENV KIKOERUMANAGER_VERSION=${KIKOERUMANAGER_VERSION}
 # 复制前端依赖清单；TanStack Table 等前端交互依赖由 lock 文件锁定并通过 npm ci 安装
 COPY frontend/package*.json ./
 # 增大 Node.js 堆内存上限，避免大型 Vite 项目 OOM
-RUN NODE_OPTIONS="--max-old-space-size=4096" npm ci
+RUN npm config set registry https://registry.npmjs.org/ && npm config set replace-registry-host always && NODE_OPTIONS="--max-old-space-size=4096" npm ci --fetch-retries=5 --fetch-retry-mintimeout=20000 --fetch-retry-maxtimeout=120000
 
 # 复制前端源码并构建
 COPY frontend/ ./
