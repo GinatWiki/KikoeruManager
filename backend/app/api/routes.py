@@ -3960,7 +3960,7 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
 
     success_count = sum(1 for r in results if r.get("success"))
 
-    # 清理返回结果中的 JSON 包装，前端直接显示翻译文本
+    # 保存完整 JSON 响应供重命名逻辑使用，不覆盖 translated_title
     for r in results:
         if r.get("success") and r.get("translated_title"):
             title_text = r["translated_title"].strip()
@@ -3973,7 +3973,7 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                     if isinstance(parsed, dict):
                         vals = [v.strip() for v in parsed.values() if isinstance(v, str) and v.strip()]
                         if vals:
-                            r["translated_title"] = vals[0]
+                            r["parsed_title"] = vals[0]
                 except _json2.JSONDecodeError:
                     pass
 
@@ -4014,9 +4014,9 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                         db.commit()
                         db.close()
                     # 文件重命名：解析 AI 返回的 JSON 映射，重命名音频/字幕文件
-                        rd = rename_data_by_rjcode.get(r.get("rjcode", ""))
-                        if rd and rd.get("base_to_entries"):
-                            import json as _rn_json
+                    rd = rename_data_by_rjcode.get(r.get("rjcode", ""))
+                    if rd and rd.get("base_to_entries"):
+                        import json as _rn_json
                         try:
                             rn_parsed = _rn_json.loads(title_text[json_start:json_end]) if json_start >= 0 and json_end > json_start else None
                         except _rn_json.JSONDecodeError:
@@ -4028,10 +4028,11 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                                 if isinstance(orig_key, str) and isinstance(trans_val, str) and trans_val.strip():
                                     rn_map[orig_key.strip()] = trans_val.strip()
                             if rn_map:
+                                logger.info("[AI标题] 开始重命名 rjcode=%s 映射数=%s", r.get("rjcode"), len(rn_map))
                                 for base, entries_list in base_to_entries.items():
                                     if base not in rn_map:
                                         continue
-                                    new_base = re.sub(r'[<>:"/\\|?*]', '', rn_map[base]).strip()
+                                    new_base = re.sub(r'[<>:"/\|?*]', '', rn_map[base]).strip()
                                     if not new_base:
                                         continue
                                     for entry in entries_list:
@@ -4046,8 +4047,9 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                                                 skip_index_mutation=False,
                                                 sync_index_mutation=False,
                                             )
-                                        except Exception:
-                                            pass
+                                            logger.info("[AI标题] 文件重命名成功: %s -> %s", entry["path"], new_name)
+                                        except Exception as exc:
+                                            logger.warning("[AI标题] 文件重命名失败: %s -> %s error=%s", entry["path"], new_name, exc)
         except Exception as exc:
             logger.warning("[AI标题] 写入 ai_title 失败: %s", exc)
 
