@@ -3978,6 +3978,14 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                     pass
 
     # 翻译成功的结果写回 work_metadata
+    # 建立 rename_data 查找表（results 不包含 rename_data）
+    rename_data_by_rjcode = {}
+    for item in items:
+        rj = item.get("rjcode", "")
+        rd = item.get("rename_data")
+        if rj and rd:
+            rename_data_by_rjcode[rj] = rd
+
     if success_count > 0:
         try:
             for r in results:
@@ -4006,14 +4014,15 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                         db.commit()
                         db.close()
                     # 文件重命名：解析 AI 返回的 JSON 映射，重命名音频/字幕文件
-                    if r.get("rename_data") and r["rename_data"].get("base_to_entries"):
-                        import json as _rn_json
+                        rd = rename_data_by_rjcode.get(r.get("rjcode", ""))
+                        if rd and rd.get("base_to_entries"):
+                            import json as _rn_json
                         try:
                             rn_parsed = _rn_json.loads(title_text[json_start:json_end]) if json_start >= 0 and json_end > json_start else None
                         except _rn_json.JSONDecodeError:
                             rn_parsed = None
                         if isinstance(rn_parsed, dict):
-                            base_to_entries = r["rename_data"]["base_to_entries"]
+                            base_to_entries = rd["base_to_entries"]
                             rn_map = {}
                             for orig_key, trans_val in rn_parsed.items():
                                 if isinstance(orig_key, str) and isinstance(trans_val, str) and trans_val.strip():
