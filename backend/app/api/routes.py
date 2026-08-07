@@ -4122,13 +4122,32 @@ async def task_center_ai_title_translation(request: AITitleTranslationBatchReque
         raise HTTPException(status_code=400, detail="缺少有效的 RJ 编号")
 
     library_id = str(request.library_id or "").strip()
-    path = str(request.path or "").strip()
+    fallback_path = str(request.path or "").strip()
     # 清理插件注入的 emoji（VoiceLink 会在 RJ 号后插入 🟢）
-    path = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]", "", path).strip()
-    if not library_id or not path:
+    fallback_path = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]", "", fallback_path).strip()
+    if not library_id or not fallback_path:
         raise HTTPException(status_code=400, detail="缺少库存或路径")
 
     rj = rjcodes[0]
+    # 优先从库存索引获取真实目录路径，避免前端 DOM 被插件注入 emoji 污染
+    path = fallback_path
+    try:
+        from ..core.library_manager import get_library_manager as _get_lib_mgr
+        index_hits = _get_lib_mgr().find_rj_in_ready_index(
+            rj,
+            library_ids=[library_id],
+            include_subtitle_state=False,
+            per_rj_limit=1,
+        )
+        hits = list(index_hits.get(rj) or [])
+        if hits:
+            hit_path = str(hits[0].get("path") or "").strip()
+            if hit_path:
+                path = hit_path
+                library_id = str(hits[0].get("library_id") or library_id)
+    except Exception:
+        logger.warning("[AI标题] 索引查 RJ 路径失败，回退前端 path: rj=%s", rj)
+
     source_label = os.path.basename(str(path).rstrip("/\\")) or rj
     task = Task(
         task_type=TaskType.AI_TITLE_TRANSLATION,
