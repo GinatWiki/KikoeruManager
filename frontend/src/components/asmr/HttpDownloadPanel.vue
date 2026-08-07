@@ -156,6 +156,15 @@
                   </div>
                 </section>
 
+                <section v-if="previewExtractedPasswords.length" class="space-y-4">
+                  <div class="section-head compact-head">
+                    <h2>预计添加密码</h2>
+                  </div>
+                  <div class="flex flex-wrap gap-2">
+                    <span v-for="password in previewExtractedPasswords" :key="password" class="http-preview-pass-chip">{{ password }}</span>
+                  </div>
+                </section>
+
                 <section class="space-y-4">
                   <div class="section-head compact-head">
                     <h2>落盘信息</h2>
@@ -383,7 +392,7 @@ import {
 } from './httpDownloadInput.js'
 
 const DOWNLOAD_PANEL_CONFLICT_POLICIES = ['resume', 'rename', 'skip']
-const DOWNLOAD_PREVIEW_CACHE_VERSION = 3
+const DOWNLOAD_PREVIEW_CACHE_VERSION = 4
 const DOWNLOAD_PREVIEW_CACHE_TTL_MS = 30 * 60 * 1000
 const DOWNLOAD_PREVIEW_CACHE_SESSION_ID = getDownloadPreviewCacheSessionId()
 
@@ -417,6 +426,7 @@ const previewItems = ref([])
 const previewNeedsMaterialize = ref(false)
 const previewLogs = ref([])
 const previewProgress = ref(0)
+const previewExtractedPasswords = ref([])
 const selectedPreviewKeys = ref(new Set())
 const failedSourceIcons = ref(new Set())
 const expandedPreviewTreeKeys = ref(new Set())
@@ -483,6 +493,7 @@ function normalizePreviewCache(value = {}) {
     logs: Array.isArray(value.logs) ? value.logs.slice(-80) : [],
     progress: Number(value.progress || 100),
     expandedKeys: Array.isArray(value.expandedKeys) ? value.expandedKeys.map(key => String(key || '')).filter(Boolean) : [],
+    extractedPasswords: Array.isArray(value.extractedPasswords) ? value.extractedPasswords.map(String).filter(Boolean).slice(0, 50) : [],
     cachedAt,
   }
 }
@@ -501,6 +512,7 @@ function previewCacheSignature(cache) {
     logs: normalized.logs,
     progress: normalized.progress,
     expandedKeys: normalized.expandedKeys,
+    extractedPasswords: normalized.extractedPasswords,
   })
 }
 
@@ -529,6 +541,7 @@ function currentPreviewCache() {
     logs: previewLogs.value.slice(-80),
     progress: Number(previewProgress.value || 100),
     expandedKeys: [...expandedPreviewTreeKeys.value],
+    extractedPasswords: previewExtractedPasswords.value.slice(0, 50),
     cachedAt: Date.now(),
   }
 }
@@ -548,6 +561,7 @@ function restorePreviewCache(cache) {
   previewLogs.value = normalized.logs || []
   previewProgress.value = Number(normalized.progress || 100)
   expandedPreviewTreeKeys.value = new Set(normalized.expandedKeys || [])
+  previewExtractedPasswords.value = normalized.extractedPasswords || []
   previewCacheInputSignature.value = normalized.inputSignature
   if (!expandedPreviewTreeKeys.value.size) expandDefaultPreviewTreeRows(previewItems.value)
   return true
@@ -571,6 +585,7 @@ function clearPreviewCacheState() {
   previewLogs.value = []
   previewProgress.value = 0
   selectedPreviewKeys.value = new Set()
+  previewExtractedPasswords.value = []
   expandedPreviewTreeKeys.value = new Set()
   previewCacheInputSignature.value = ''
   closePreviewContextMenu()
@@ -896,6 +911,7 @@ async function preview(options = {}) {
       const failedCount = Number(result.failed_count ?? failedPreviewItemCount.value)
       const extractedPasswords = result.extracted_archive_passwords || []
       const needsPassCodeCount = Number(result.needs_pass_code_count || 0)
+      previewExtractedPasswords.value = extractedPasswords
       addPreviewLog(
         `解析完成，可下载 ${okPreviewCount.value} 项，失败 ${failedCount} 项，需补提取码 ${needsPassCodeCount} 项`,
         okPreviewCount.value ? 'success' : 'warning',
@@ -952,6 +968,7 @@ async function preview(options = {}) {
     }
     previewProgress.value = 100
     previewCacheInputSignature.value = previewInputSignature()
+    previewExtractedPasswords.value = [...extractedPasswordSet]
     if (extractedPasswordSet.size) {
       addPreviewLog(`识别到 ${extractedPasswordSet.size} 个解压密码，开始下载后写入密码库`, 'success')
       ElMessage.info(`识别到 ${extractedPasswordSet.size} 个解压密码，开始下载后写入密码库`)
