@@ -275,10 +275,16 @@ watch(mobileNavOpen, (open) => {
   }
 })
 const isGateRoute = computed(() => Boolean(route.meta?.gatePage))
+const frontendVersion = String(typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev')
 const appVersionLabel = computed(() => {
-  const version = String(appVersion.value || '').trim()
-  if (!version || version.toLowerCase() === 'dev') return 'dev'
-  return version.startsWith('v') ? version : `v${version}`
+  const front = String(frontendVersion || '').trim()
+  const back = String(appVersion.value || '').trim()
+  const frontLabel = front && front.toLowerCase() !== 'dev' ? (front.startsWith('v') ? front : `v${front}`) : ''
+  const backLabel = back && back.toLowerCase() !== 'dev' ? (back.startsWith('v') ? back : `v${back}`) : ''
+  if (frontLabel && backLabel) return `前端 ${frontLabel} · 后端 ${backLabel}`
+  if (frontLabel) return frontLabel
+  if (backLabel) return `后端 ${backLabel}`
+  return 'dev'
 })
 const cachedViews = computed(() =>
   router

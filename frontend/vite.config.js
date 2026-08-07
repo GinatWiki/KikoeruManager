@@ -24,6 +24,13 @@ const buildAssetPrefix = resolveBuildAssetPrefix()
 
 export default defineConfig({
   assetsInclude: ['**/*.lottie'],
+  define: {
+    __APP_VERSION__: JSON.stringify(
+      process.env.KIKOERUMANAGER_VERSION
+        || process.env.APP_VERSION
+        || 'dev'
+    )
+  },
   plugins: [vue(), tailwindcss()],
   resolve: {
     alias: {
