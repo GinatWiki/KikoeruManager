@@ -909,7 +909,7 @@ async function preview(options = {}) {
       selectAllPreviewTreeFiles()
       previewProgress.value = 100
       const failedCount = Number(result.failed_count ?? failedPreviewItemCount.value)
-      const extractedPasswords = result.extracted_archive_passwords || []
+      const extractedPasswords = Array.isArray(result.extracted_archive_passwords) ? result.extracted_archive_passwords : []
       const needsPassCodeCount = Number(result.needs_pass_code_count || 0)
       previewExtractedPasswords.value = extractedPasswords
       addPreviewLog(
@@ -945,9 +945,12 @@ async function preview(options = {}) {
           conflictPolicy: conflictPolicy.value,
           timeout: previewTimeoutForUrl(url)
         })
-        const nextItems = attachInputUrlToPreviewItems(result.items || [], url)
+        const rawItems = Array.isArray(result.items) ? result.items : []
+        const nextItems = attachInputUrlToPreviewItems(rawItems, url)
         previewItems.value = [...previewItems.value, ...nextItems]
-        (result.extracted_archive_passwords || []).forEach(p => extractedPasswordSet.add(p))
+        const rawPasswords = result.extracted_archive_passwords
+        if (Array.isArray(rawPasswords)) rawPasswords.forEach(p => extractedPasswordSet.add(p))
+        else if (typeof rawPasswords === 'string' && String(rawPasswords).trim()) extractedPasswordSet.add(String(rawPasswords).trim())
         if (result.needs_materialize) previewNeedsMaterialize.value = true
         selectAllPreviewTreeFiles()
         const okCount = nextItems.filter(item => item.ok).length
