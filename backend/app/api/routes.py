@@ -1,4 +1,4 @@
-﻿from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse, FileResponse, Response
@@ -3868,7 +3868,12 @@ def reveal_ai_title_translation_secret(payload: AITitleTranslationSecretRevealRe
 @app.post("/api/ai-title-translation/batch")
 async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
     """批量翻译多个作品标题。"""
-    rjcodes = list(set([rc.upper() for rc in (request.rjcodes or []) if rc]))
+    # 清理 rjcode 中的插件注入符号（如 🟢），只保留 RJ 编号
+    def _clean_rj(value):
+        text = str(value or '')
+        m = re.search(r'RJ\d+', text, re.IGNORECASE)
+        return m.group(0).upper() if m else text.strip()
+    rjcodes = list(set([_clean_rj(rc) for rc in (request.rjcodes or []) if _clean_rj(rc)]))
     if not rjcodes:
         return {"total": 0, "success_count": 0, "results": []}
 
@@ -3915,7 +3920,8 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
         ).fetchone()
         work_name = row[0] if row else rjcode
         # 如果数据库中的 work_name 只是 RJ 号，使用前端传入的文件夹名
-        folder_name = (request.work_names or {}).get(rjcode, "")
+        raw_rj_keys = [k for k in (request.work_names or {}) if _clean_rj(k) == rjcode]
+        folder_name = raw_rj_keys[0] if raw_rj_keys else ""
         import re as _re
         if folder_name and (not work_name or _re.match(r"^RJ\d+$", work_name, _re.IGNORECASE)):
             work_name = folder_name
@@ -3923,11 +3929,14 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
         rename_data = {}
         if request.library_id and request.path:
             try:
+                import re as _path_re
+                # 清理插件注入的 emoji（VoiceLink 会在 RJ 号后插入 🟢）
+                clean_path = _path_re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]", "", str(request.path or "")).strip()
                 from ..core.library_manager import get_library_manager
                 mgr = get_library_manager()
                 scan_data = await mgr.folder_contents(
                     library_id=request.library_id,
-                    path=request.path,
+                    path=clean_path,
                     recursive=True,
                     prefer_index=True,
                     include_dirs=True,
@@ -3949,7 +3958,7 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                         base_to_entries[base].append({"name": name, "path": sitem.get("path", ""), "ext": ext})
                 if file_names:
                     work_name = work_name + "\n--- 文件树名称 ---\n" + "\n".join(sorted(file_names))
-                rename_data = {"library_id": request.library_id, "path": request.path, "base_to_entries": base_to_entries}
+                rename_data = {"library_id": request.library_id, "path": clean_path, "base_to_entries": base_to_entries}
             except Exception:
                 pass
         items.append({"rjcode": rjcode, "work_name": work_name, "rename_data": rename_data})
@@ -4097,6 +4106,59 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
         "results": results,
     }
 
+
+@app.post("/api/task-center/ai-title-translation")
+async def task_center_ai_title_translation(request: AITitleTranslationBatchRequest):
+    """创建 AI 标题翻译 + 文件重命名后台任务，立即返回 task_id。"""
+    from ..core.task_engine import Task, TaskType, get_task_engine
+
+    def _clean_rj(value):
+        text = str(value or '')
+        m = re.search(r'RJ\d+', text, re.IGNORECASE)
+        return m.group(0).upper() if m else text.strip()
+
+    rjcodes = list(set([_clean_rj(rc) for rc in (request.rjcodes or []) if _clean_rj(rc)]))
+    if not rjcodes:
+        raise HTTPException(status_code=400, detail="缺少有效的 RJ 编号")
+
+    library_id = str(request.library_id or "").strip()
+    path = str(request.path or "").strip()
+    if not library_id or not path:
+        raise HTTPException(status_code=400, detail="缺少库存或路径")
+
+    rj = rjcodes[0]
+    source_label = os.path.basename(str(path).rstrip("/\\")) or rj
+    task = Task(
+        task_type=TaskType.AI_TITLE_TRANSLATION,
+        source_path=path,
+        auto_classify=False,
+        metadata={
+            "library_id": library_id,
+            "path": path,
+            "rjcodes": rjcodes,
+            "work_names": dict(request.work_names or {}),
+            "rjcode": rj,
+            "task_domain": "ai_title",
+            "source_page": "library",
+            "source_action": "ai_title_translation",
+            "source_label": source_label,
+            "business_key": rj,
+            "progress_log": [],
+        },
+    )
+    task.ensure_business_context("ai_title", {
+        "source_page": "library",
+        "source_action": "ai_title_translation",
+        "source_label": source_label,
+        "business_key": rj,
+    })
+    engine = get_task_engine()
+    task_id = await engine.submit(task)
+    return {
+        "success": True,
+        "task_id": task_id,
+        "message": "AI 标题汉化任务已提交",
+    }
 
 @app.post("/api/ai-title-translation/scan-files")
 async def ai_title_translation_scan_files(request: AITitleTranslationFileRenameRequest):

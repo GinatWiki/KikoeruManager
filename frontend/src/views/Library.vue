@@ -23481,28 +23481,22 @@ async function aiTitleRenameItem (row) {
     const folderName = row.name || row.path || ''
     const rowLibraryId = row.library_id || row.libraryId || selectedLibraryId.value || ''
     const rowPath = row.path || ''
-    const resp = await fetch('/api/ai-title-translation/batch', {
+    const resp = await fetch('/api/task-center/ai-title-translation', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ rjcodes: [rjcode], work_names: { [rjcode]: folderName }, library_id: rowLibraryId, path: rowPath }),
     })
     const result = await resp.json()
-    if (result.success_count > 0) {
-      const details = (result.results || [])
-        .filter(function(r2) { return r2.success && r2.translated_title; })
-        .map(function(r2) { return r2.rjcode + ': ' + (r2.original_title || '').slice(0, 20) + ' \u2192 ' + (r2.translated_title || '').slice(0, 30); })
-        .join('\n')
-      ElMessage.success(details ? 'AI 标题汉化完成\n' + details : 'AI 标题汉化完成')
-      refreshCurrentLibraryAndStatsInBackground('AI 标题汉化已完成')
+    if (result.success) {
+      ElMessage.success('AI 标题汉化任务已提交，请到任务中心查看进度')
+      refreshCurrentLibraryAndStatsInBackground('AI 标题汉化任务已提交')
     } else {
-      const errors = (result.results || []).filter(function(r) { return !r.success; }).map(function(r) { return r.rjcode + ': ' + (r.error || r.status || '未知'); }).join('; ')
-      ElMessage.info(errors || '没有需要翻译的作品')
+      ElMessage.info(result.detail || result.message || '提交失败')
     }
   } catch (e) {
-    ElMessage.error('AI 标题汉化失败：' + (e.response?.data?.detail || e.message))
+    ElMessage.error('AI 标题汉化提交失败：' + (e.response?.data?.detail || e.message))
   }
 }
-
 
 async function apiRenameItem (row) {
 

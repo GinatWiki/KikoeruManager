@@ -49,6 +49,7 @@ class TaskType(str, Enum):
     CIRCLE_COMPLETION_REFRESH_SELECTED = "circle_completion_refresh_selected"
     CIRCLE_COMPLETION_DOWNLOAD_BATCH = "circle_completion_download_batch"
     CIRCLE_COMPLETION_BONUS_PROBE = "circle_completion_bonus_probe"
+    AI_TITLE_TRANSLATION = "ai_title_translation"  # AI 标题翻译 + 文件重命名后台任务
 
 class Task:
     """任务对象"""
@@ -949,6 +950,8 @@ class TaskEngine:
             TaskType.CIRCLE_COMPLETION_BONUS_PROBE,
         }:
             return "circle_completion"
+        if task.type == TaskType.AI_TITLE_TRANSLATION:
+            return "ai_title"
         return "system"
 
     def _ensure_task_context(self, task: Task):
@@ -3715,6 +3718,8 @@ class TaskEngine:
                     task.update_progress(100, "完成")
                 elif task.type == TaskType.CIRCLE_COMPLETION_BONUS_PROBE:
                     await self._process_circle_completion_bonus_probe(task)
+                elif task.type == TaskType.AI_TITLE_TRANSLATION:
+                    await self._process_ai_title_translation(task)
 
                 # 只有当任务没有被设置为其他状态（如 waiting_retry）时才标记为完成
                 if task.status == TaskStatus.PROCESSING:
@@ -6974,6 +6979,307 @@ class TaskEngine:
             + (f"，{incomplete_count} 个发售日未产出完整结论" if incomplete_count else ""),
         )
         task.complete()
+
+    async def _process_ai_title_translation(self, task: Task):
+        """处理 AI 标题翻译 + 文件重命名后台任务。"""
+        from ..config.settings import get_config
+        from .ai_title_translation_service import get_ai_title_translation_service
+        from .library_manager import get_library_manager
+        from sqlalchemy import text as _sql_text
+        from ..models.database import get_db as _get_db
+
+        AUDIO_EXTENSIONS = {".mp3", ".flac", ".wav", ".ogg", ".wma", ".m4a", ".wv", ".tta", ".ape", ".aac", ".opus"}
+        SUBTITLE_EXTENSIONS = {".ass", ".srt", ".ssa", ".vtt", ".lrc", ".sub", ".idx", ".sup", ".pgs"}
+
+        def _clean_rj(value):
+            m = re.search(r"RJ\d+", str(value or ""), re.IGNORECASE)
+            return m.group(0).upper() if m else str(value or "").strip()
+
+        def append_progress_log(message: str, progress: Optional[int] = None, level: str = "info"):
+            logs = list(task.task_metadata.get("progress_log") or [])
+            last = logs[-1] if logs else None
+            if last and last.get("message") == message and last.get("progress") == progress and last.get("level") == level:
+                return
+            logs.append({
+                "time": datetime.now().isoformat(),
+                "progress": task.progress if progress is None else progress,
+                "message": message,
+                "level": level,
+            })
+            task.task_metadata["progress_log"] = logs[-40:]
+
+        task.task_metadata = dict(task.task_metadata or {})
+        library_id = str(task.task_metadata.get("library_id") or "").strip()
+        project_path = str(task.task_metadata.get("path") or "").strip()
+        raw_rjcodes = list(task.task_metadata.get("rjcodes") or [])
+        work_names = dict(task.task_metadata.get("work_names") or {})
+
+        rjcodes = list(set([_clean_rj(rc) for rc in raw_rjcodes if _clean_rj(rc)]))
+        if not rjcodes:
+            task.update_progress(100, "没有可翻译的 RJ 编号")
+            task.task_metadata["error_message"] = "没有可翻译的 RJ 编号"
+            raise ValueError("没有可翻译的 RJ 编号")
+
+        clean_path = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]", "", project_path).strip()
+
+        cfg = get_config()
+        raw_config = cfg.ai_title_translation if hasattr(cfg, "ai_title_translation") else None
+        if raw_config is None or not getattr(raw_config, "enabled", False):
+            task.update_progress(100, "AI 标题汉化未启用")
+            raise ValueError("AI 标题汉化未启用")
+
+        if getattr(raw_config, "use_ai_subtitle_api", False):
+            sub_raw = cfg.ai_subtitle_matching if hasattr(cfg, "ai_subtitle_matching") else None
+            if sub_raw:
+                import copy as _copy
+                merged = _copy.copy(raw_config)
+                merged.model = sub_raw.model
+                merged.api_key = sub_raw.api_key
+                merged.api_base = sub_raw.api_base
+                merged.api_version = sub_raw.api_version
+                merged.organization = sub_raw.organization
+                merged.proxy_url = sub_raw.proxy_url
+                merged.timeout_seconds = sub_raw.timeout_seconds
+                merged.max_retries = sub_raw.max_retries
+                merged.temperature = sub_raw.temperature
+                raw_config = merged
+
+        try:
+            from ..api.routes import _read_ai_title_translation_api_key_from_disk
+            saved_api_key = _read_ai_title_translation_api_key_from_disk() or ""
+        except Exception:
+            saved_api_key = ""
+
+        append_progress_log("准备 AI 标题翻译", 5)
+        task.update_progress(5, "准备 AI 标题翻译")
+
+        items = []
+        db = next(_get_db())
+        try:
+            for rjcode in rjcodes:
+                row = db.execute(
+                    _sql_text("SELECT work_name FROM work_metadata WHERE rjcode = :rjcode"),
+                    {"rjcode": rjcode}
+                ).fetchone()
+                work_name = row[0] if row else rjcode
+                raw_rj_keys = [k for k in work_names if _clean_rj(k) == rjcode]
+                folder_name = raw_rj_keys[0] if raw_rj_keys else ""
+                if folder_name and (not work_name or re.match(r"^RJ\d+$", work_name, re.IGNORECASE)):
+                    work_name = folder_name
+
+                rename_data = {}
+                if library_id and clean_path:
+                    try:
+                        mgr = get_library_manager()
+                        scan_data = await mgr.folder_contents(
+                            library_id=library_id,
+                            path=clean_path,
+                            recursive=True,
+                            prefer_index=True,
+                            include_dirs=True,
+                        )
+                        scan_items = scan_data.get("items", []) if isinstance(scan_data, dict) else []
+                        file_names = []
+                        base_to_entries = {}
+                        for sitem in scan_items:
+                            if sitem.get("is_directory") or sitem.get("type") == "dir":
+                                continue
+                            name = str(sitem.get("name", "") or "")
+                            ext = os.path.splitext(name)[1].lower()
+                            if ext in AUDIO_EXTENSIONS or ext in SUBTITLE_EXTENSIONS:
+                                base = os.path.splitext(name)[0]
+                                if base not in file_names:
+                                    file_names.append(base)
+                                if base not in base_to_entries:
+                                    base_to_entries[base] = []
+                                base_to_entries[base].append({"name": name, "path": sitem.get("path", ""), "ext": ext})
+                        if file_names:
+                            work_name = work_name + "\n--- 文件树名称 ---\n" + "\n".join(sorted(file_names))
+                        rename_data = {"library_id": library_id, "path": clean_path, "base_to_entries": base_to_entries}
+                    except Exception as exc:
+                        logger.warning("[AI标题] 扫描文件树失败: %s", exc)
+                        append_progress_log(f"扫描文件树失败: {exc}", None, "error")
+                items.append({"rjcode": rjcode, "work_name": work_name, "rename_data": rename_data})
+        finally:
+            db.close()
+
+        append_progress_log("调用 AI 翻译", 40)
+        task.update_progress(40, "调用 AI 翻译")
+
+        service = get_ai_title_translation_service()
+        results = await service.translate_batch(items, raw_config, saved_api_key=saved_api_key)
+        success_count = sum(1 for r in results if r.get("success"))
+
+        for r in results:
+            if r.get("success") and r.get("translated_title"):
+                title_text = r["translated_title"].strip()
+                json_start = title_text.find("{")
+                json_end = title_text.rfind("}") + 1
+                if json_start >= 0 and json_end > json_start:
+                    try:
+                        parsed = json.loads(title_text[json_start:json_end])
+                        if isinstance(parsed, dict):
+                            vals = [v.strip() for v in parsed.values() if isinstance(v, str) and v.strip()]
+                            if vals:
+                                r["parsed_title"] = vals[0]
+                    except json.JSONDecodeError:
+                        pass
+
+        if success_count == 0:
+            task.update_progress(100, "AI 翻译失败")
+            task.task_metadata["error_message"] = "AI 翻译失败"
+            raise RuntimeError("AI 翻译失败")
+
+        rename_data_by_rjcode = {}
+        for item in items:
+            rj = item.get("rjcode", "")
+            rd = item.get("rename_data")
+            if rj and rd:
+                rename_data_by_rjcode[rj] = rd
+
+        all_renamed_files = []
+        all_folder_results = []
+        ai_translation_results = []
+
+        try:
+            for r in results:
+                if not (r.get("success") and r.get("translated_title")):
+                    continue
+                import json as _json
+                title_text = r["translated_title"].strip()
+                translated = title_text
+                json_start = title_text.find("{")
+                json_end = title_text.rfind("}") + 1
+                if json_start >= 0 and json_end > json_start:
+                    try:
+                        parsed = _json.loads(title_text[json_start:json_end])
+                        if isinstance(parsed, dict):
+                            vals = [v.strip() for v in parsed.values() if isinstance(v, str) and v.strip()]
+                            if vals:
+                                translated = vals[0]
+                    except _json.JSONDecodeError:
+                        pass
+
+                rj = r.get("rjcode", "")
+                if translated:
+                    try:
+                        fdb = next(_get_db())
+                        fdb.execute(
+                            _sql_text("UPDATE work_metadata SET ai_title = :ai_title WHERE rjcode = :rjcode"),
+                            {"ai_title": translated, "rjcode": rj}
+                        )
+                        fdb.commit()
+                        fdb.close()
+                    except Exception as exc:
+                        logger.warning("[AI标题] 写入 ai_title 失败: %s", exc)
+
+                ai_translation_results.append({
+                    "rjcode": rj,
+                    "original_title": r.get("original_title") or "",
+                    "translated_title": translated,
+                })
+
+                rd = rename_data_by_rjcode.get(rj)
+                if rd and rd.get("base_to_entries"):
+                    try:
+                        rn_parsed = _json.loads(title_text[json_start:json_end]) if json_start >= 0 and json_end > json_start else None
+                    except _json.JSONDecodeError:
+                        rn_parsed = None
+                    if isinstance(rn_parsed, dict):
+                        base_to_entries = rd["base_to_entries"]
+                        rn_map = {}
+                        for orig_key, trans_val in rn_parsed.items():
+                            if isinstance(orig_key, str) and isinstance(trans_val, str) and trans_val.strip():
+                                rn_map[orig_key.strip().replace("*", "_")] = trans_val.strip().replace("*", "_")
+                        if rn_map:
+                            task.update_progress(75, f"重命名内部文件 {rj}")
+                            for base, entries_list in base_to_entries.items():
+                                base_key = str(base or "").replace("*", "_")
+                                if base_key not in rn_map:
+                                    continue
+                                new_base = re.sub(r'[<>:"/\\|?*]', '', rn_map[base_key]).strip()
+                                if not new_base:
+                                    continue
+                                for entry in entries_list:
+                                    new_name = f"{new_base}{entry['ext']}"
+                                    try:
+                                        rn_mgr = get_library_manager()
+                                        await rn_mgr.rename(
+                                            library_id,
+                                            entry["path"],
+                                            new_name,
+                                            skip_index_mutation=False,
+                                            sync_index_mutation=False,
+                                        )
+                                        all_renamed_files.append({
+                                            "old_name": entry["name"],
+                                            "new_name": new_name,
+                                            "status": "ok",
+                                            "error": "",
+                                        })
+                                    except Exception as exc:
+                                        all_renamed_files.append({
+                                            "old_name": entry["name"],
+                                            "new_name": new_name,
+                                            "status": "failed",
+                                            "error": str(exc),
+                                        })
+
+                    folder_path_val = rd.get("path") if isinstance(rd, dict) else None
+                    if folder_path_val:
+                        try:
+                            fdb = next(_get_db())
+                            frow = fdb.execute(
+                                _sql_text("SELECT ai_title, work_name FROM work_metadata WHERE rjcode = :rjcode"),
+                                {"rjcode": rj}
+                            ).fetchone()
+                            fdb.close()
+                            folder_title = None
+                            if frow:
+                                folder_title = frow[0] or frow[1]
+                            if folder_title:
+                                folder_title_clean = re.sub(r'[<>:"/\\|?*]', '', folder_title).strip()
+                                if folder_title_clean:
+                                    folder_src = str(folder_path_val).rstrip("/\\")
+                                    if folder_src:
+                                        rn_mgr2 = get_library_manager()
+                                        await rn_mgr2.rename(
+                                            rd.get("library_id") or library_id,
+                                            folder_src,
+                                            folder_title_clean,
+                                            skip_index_mutation=False,
+                                            sync_index_mutation=False,
+                                        )
+                                        all_folder_results.append({
+                                            "rjcode": rj,
+                                            "success": True,
+                                            "old_name": os.path.basename(folder_src),
+                                            "new_name": folder_title_clean,
+                                            "error": "",
+                                        })
+                        except Exception as exc:
+                            all_folder_results.append({
+                                "rjcode": rj,
+                                "success": False,
+                                "old_name": os.path.basename(str(folder_path_val).rstrip("/\\")),
+                                "new_name": "",
+                                "error": str(exc),
+                            })
+
+                task.update_progress(90, "AI 标题翻译完成")
+        except Exception as exc:
+            logger.warning("[AI标题] 翻译后处理失败: %s", exc)
+            append_progress_log(f"翻译后处理失败: {exc}", None, "error")
+
+        task.task_metadata["ai_translation"] = ai_translation_results
+        task.task_metadata["renamed_files"] = all_renamed_files
+        task.task_metadata["folder_renamed"] = all_folder_results
+        task.task_metadata["renamed_count"] = sum(1 for f in all_renamed_files if f.get("status") == "ok")
+        task.task_metadata["failed_count"] = sum(1 for f in all_renamed_files if f.get("status") != "ok")
+        task.task_metadata["folder_renamed_count"] = sum(1 for f in all_folder_results if f.get("success"))
+
+        append_progress_log(f"翻译完成: 重命名文件 {task.task_metadata['renamed_count']} 个，文件夹 {task.task_metadata['folder_renamed_count']} 个", 100)
+        task.update_progress(100, "AI 标题翻译完成")
 
     async def _process_local_library_upload(self, task: Task):
         from .circle_completion_service import get_circle_completion_service

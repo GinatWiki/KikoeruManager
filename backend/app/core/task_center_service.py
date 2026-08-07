@@ -127,6 +127,14 @@ class TaskCenterService:
         "manual_match_applied_pairs",
         "manual_match_deleted_subtitles",
         "redis_runtime_updated_at",
+        # AI 标题翻译结果展示
+        "ai_translation",
+        "renamed_files",
+        "folder_renamed",
+        "renamed_count",
+        "failed_count",
+        "folder_renamed_count",
+        "folder_new_name",
     )
 
     REDIS_RUNTIME_METADATA_KEYS: tuple = (
@@ -146,6 +154,13 @@ class TaskCenterService:
         "ai_low_confidence_count",
         "ai_unmatched_audio_count",
         "ai_unmatched_subtitle_count",
+        "ai_translation",
+        "renamed_files",
+        "folder_renamed",
+        "renamed_count",
+        "failed_count",
+        "folder_renamed_count",
+        "folder_new_name",
     )
 
     # summary 模式下 pending preview 仅保留这些键
@@ -171,6 +186,7 @@ class TaskCenterService:
         "baidu_netdisk": "百度网盘",
         "upload": "库存上传",
         "circle_completion": "社团补全",
+        "ai_title": "AI 标题汉化",
         "system": "系统任务",
     }
 
@@ -208,7 +224,8 @@ class TaskCenterService:
         "baidu_netdisk": 6,
         "upload": 7,
         "circle_completion": 8,
-        "system": 9,
+        "ai_title": 9,
+        "system": 10,
     }
 
     TASK_TYPE_TO_DOMAIN = {
@@ -225,6 +242,7 @@ class TaskCenterService:
         TaskType.CIRCLE_COMPLETION_REFRESH_SELECTED: "circle_completion",
         TaskType.CIRCLE_COMPLETION_DOWNLOAD_BATCH: "circle_completion",
         TaskType.CIRCLE_COMPLETION_BONUS_PROBE: "circle_completion",
+        TaskType.AI_TITLE_TRANSLATION: "ai_title",
         TaskType.EXTRACT: "system",
         TaskType.FILTER: "system",
         TaskType.METADATA: "system",
@@ -243,6 +261,7 @@ class TaskCenterService:
         "baidu_netdisk_upload": "/library",
         "upload": "/library",
         "circle_completion": "/circle-completion",
+        "ai_title": "/library",
         "system": "/tasks",
     }
 
@@ -1421,6 +1440,22 @@ class TaskCenterService:
                 source_action = "batch_download"
             source_page = source_page or "circle-completion"
             route_hint = self._circle_completion_route_hint(metadata, rjcode)
+        elif domain == "ai_title":
+            ai_translation = list(metadata.get("ai_translation") or [])
+            renamed_files = list(metadata.get("renamed_files") or [])
+            folder_renamed = list(metadata.get("folder_renamed") or [])
+            first_ai = dict(ai_translation[0]) if ai_translation else {}
+            folder_path_val = self._safe_text(metadata.get("path")) or source_path
+            title = self._basename(folder_path_val) or rjcode or "AI 标题汉化任务"
+            subtitle = self._safe_text(first_ai.get("translated_title")) or self._safe_text(metadata.get("folder_name"))
+            source_label = source_label or "库存页 / AI 标题汉化"
+            source_action = source_action or "ai_title_translation"
+            source_page = source_page or "library"
+            self._append_metric(metrics, "RJ", rjcode)
+            self._append_metric(metrics, "文件", metadata.get("renamed_count"))
+            self._append_metric(metrics, "文件夹", metadata.get("folder_renamed_count"))
+            self._append_metric(metrics, "失败", metadata.get("failed_count"))
+            route_hint = self.DOMAIN_ROUTE_HINT.get("ai_title", "/library")
         elif domain == "http_download":
             download_files = list(metadata.get("download_files") or [])
             failed_files = list(metadata.get("failed_files") or [])

@@ -185,6 +185,53 @@
         </div>
       </section>
 
+      <!-- AI 标题汉化结果 -->
+      <section v-if="aiTitleResult(item)" class="border-b border-slate-200 px-4 pt-3.5 pb-3.5">
+        <span class="mb-2.5 flex items-center gap-1.5 text-[11.5px] font-bold uppercase tracking-[0.06em] text-slate-500">
+          <span class="h-1 w-1 rounded-full bg-cyan-500" />
+          AI 标题汉化结果
+        </span>
+
+        <div v-for="(tr, trIndex) in aiTitleResult(item).translations" :key="`${item.id}-ai-${trIndex}`" class="mb-3">
+          <div class="mb-1.5 text-[11px] font-bold text-slate-500">翻译 {{ trIndex + 1 }}</div>
+          <div class="rounded-[10px] border border-slate-200 bg-slate-50 px-3 py-2">
+            <div class="text-[11px] text-slate-400 line-through">{{ tr.original_title || tr.rjcode }}</div>
+            <div class="mt-0.5 text-[12.5px] font-bold text-slate-900">{{ tr.translated_title || '—' }}</div>
+          </div>
+        </div>
+
+        <div v-if="aiTitleResult(item).folderResults.length" class="mb-3">
+          <div class="mb-1.5 text-[11px] font-bold text-slate-500">项目文件夹重命名</div>
+          <div
+            v-for="(fr, fIndex) in aiTitleResult(item).folderResults"
+            :key="`${item.id}-folder-${fIndex}`"
+            class="rounded-[10px] border px-3 py-2 text-[11.5px]"
+            :class="fr.success ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-rose-200 bg-rose-50 text-rose-700'"
+          >
+            <span v-if="fr.success">{{ fr.old_name }} -&gt; <b>{{ fr.new_name }}</b></span>
+            <span v-else>{{ fr.old_name }} · 失败：{{ fr.error }}</span>
+          </div>
+        </div>
+
+        <div v-if="aiTitleResult(item).renamedFiles.length">
+          <div class="mb-1.5 flex items-center justify-between">
+            <span class="text-[11px] font-bold text-slate-500">内部文件重命名</span>
+            <span class="text-[10.5px] font-bold text-slate-600">成功 {{ aiTitleResult(item).renamedCount }} / 失败 {{ aiTitleResult(item).failedCount }}</span>
+          </div>
+          <div class="max-h-[260px] overflow-y-auto rounded-[10px] border border-slate-200 detail-scroll">
+            <div
+              v-for="(rf, rfIndex) in aiTitleResult(item).renamedFiles"
+              :key="`${item.id}-file-${rfIndex}`"
+              class="grid grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-slate-100 px-2.5 py-2 text-[11px] last:border-b-0"
+            >
+              <span class="min-w-0 truncate text-slate-600">{{ rf.old_name }}</span>
+              <ArrowRight :size="12" :stroke-width="2.4" class="flex-shrink-0 text-slate-400" />
+              <span class="min-w-0 truncate font-semibold" :class="rf.status === 'ok' ? 'text-emerald-700' : 'text-rose-700'">{{ rf.new_name }}</span>
+              <span v-if="rf.status !== 'ok'" class="col-span-3 mt-0.5 text-[10px] text-rose-500">{{ rf.error }}</span>
+            </div>
+          </div>
+        </div>
+      </section>
       <!-- 进度元信息：定义列表 2 列，无独立边框 -->
       <section v-if="circleMeta.length" class="border-b border-slate-200 px-4 pt-3.5 pb-3.5">
         <span class="mb-2.5 flex items-center gap-1.5 text-[11.5px] font-bold uppercase tracking-[0.06em] text-slate-500">
@@ -555,6 +602,22 @@ function isTreeDirectory(entry) {
   if (type === 'dir' || type === 'directory') return true
   if (entry.is_directory === true) return true
   return Boolean(entry.hasChildren)
+}
+
+function aiTitleResult(item) {
+  const metadata = item?.details?.metadata || item?.metadata || {}
+  const translations = Array.isArray(metadata.ai_translation) ? metadata.ai_translation : []
+  const renamedFiles = Array.isArray(metadata.renamed_files) ? metadata.renamed_files : []
+  const folderResults = Array.isArray(metadata.folder_renamed) ? metadata.folder_renamed : []
+  if (!translations.length && !renamedFiles.length && !folderResults.length) return null
+  return {
+    translations,
+    renamedFiles,
+    folderResults,
+    renamedCount: Number(metadata.renamed_count || 0),
+    failedCount: Number(metadata.failed_count || 0),
+    folderRenamedCount: Number(metadata.folder_renamed_count || 0),
+  }
 }
 
 function getGarbledDiagnostic(item) {
