@@ -376,6 +376,7 @@ import {
   httpDownloadPlatformsFromUrl,
 } from '../common/httpDownloadPlatformMeta.js'
 import {
+  extractBaiduShareUrls,
   isPikPakPassCodeLine,
   normalizeHttpDownloadInputRows,
   pikPakShareIdentity,
@@ -439,7 +440,7 @@ const activeApi = computed(() => isBaidu.value ? baiduNetdiskApi : httpDownloadA
 const panelTitle = computed(() => isBaidu.value ? '百度网盘下载' : 'HTTP 外链下载')
 const panelSubtitle = computed(() => isBaidu.value ? '百度分享链接 / 提取码 / 官方登录态直下' : 'HTTP 直链 / Gofile / Transfer.it / OneDrive / Google Drive / PikPak')
 const inputPlaceholder = computed(() => isBaidu.value
-  ? '粘贴百度网盘分享链接，一行一个。支持链接----提取码、提取码下一行，或带 ?pwd= 的分享链接。'
+  ? '粘贴网盘分享文本，支持整段文字、链接----提取码、下一行提取码；解压密码会在开始下载后写入密码库。'
   : '粘贴 HTTP/HTTPS 直链或分享链接，一行一个。PikPak 提取码可跟在链接后或放在下一行。'
 )
 const healthActionLabel = computed(() => isBaidu.value ? '检测百度登录态' : '检测 aria2')
@@ -605,40 +606,8 @@ const parsedUrls = computed(() => {
     .filter(Boolean)
   return isBaidu.value ? normalizeBaiduInputRows(rows) : normalizeHttpDownloadInputRows(rows)
 })
-
 function normalizeBaiduInputRows(rows) {
-  const result = []
-  const seen = new Map()
-  let lastBaiduIndex = null
-  for (const row of rows || []) {
-    const value = String(row || '').trim()
-    if (!value) continue
-    const normalized = normalizeBaiduShareLine(value)
-    if (isBaiduShareUrl(normalized)) {
-      const key = baiduShareIdentity(normalized)
-      if (seen.has(key)) {
-        const existingIndex = seen.get(key)
-        if (!baiduShareHasCode(result[existingIndex]) && baiduShareHasCode(normalized)) {
-          result[existingIndex] = normalized
-        }
-        lastBaiduIndex = existingIndex
-        continue
-      }
-      result.push(normalized)
-      seen.set(key, result.length - 1)
-      lastBaiduIndex = result.length - 1
-      continue
-    }
-    const code = baiduPassCodeFromText(value)
-    if (code && lastBaiduIndex !== null) {
-      if (!baiduShareHasCode(result[lastBaiduIndex])) {
-        result[lastBaiduIndex] = appendBaiduPassCode(result[lastBaiduIndex], code)
-      }
-      continue
-    }
-    result.push(value)
-  }
-  return result
+  return extractBaiduShareUrls(rows)
 }
 
 function normalizeBaiduShareLine(value) {
@@ -911,6 +880,7 @@ async function preview(options = {}) {
     const urls = parsedUrls.value
     if (isBaidu.value) {
       const result = await baiduNetdiskApi.preview({
+        sourceText: urlText.value,
         urls,
         targetSubdir: targetSubdir.value,
         outputFolderName: outputFolderName.value,
@@ -924,6 +894,7 @@ async function preview(options = {}) {
       selectAllPreviewTreeFiles()
       previewProgress.value = 100
       const failedCount = Number(result.failed_count ?? failedPreviewItemCount.value)
+      const extractedPasswords = result.extracted_archive_passwords || []
       const needsPassCodeCount = Number(result.needs_pass_code_count || 0)
       addPreviewLog(
         `解析完成，可下载 ${okPreviewCount.value} 项，失败 ${failedCount} 项，需补提取码 ${needsPassCodeCount} 项`,
@@ -937,16 +908,22 @@ async function preview(options = {}) {
         })
       if (result.svip_speed) addPreviewLog('当前百度账号为 SVIP，将使用官方登录态直接下载', 'success')
       if (okPreviewCount.value) ElMessage.success(`可下载 ${okPreviewCount.value} 个文件`)
+      if (extractedPasswords.length) {
+        addPreviewLog(`识别到 ${extractedPasswords.length} 个解压密码，开始下载后写入密码库`, 'success')
+        ElMessage.info(`识别到 ${extractedPasswords.length} 个解压密码，开始下载后写入密码库`)
+      }
       if (needsPassCodeCount) ElMessage.warning(`${needsPassCodeCount} 个分享需要补提取码`)
       else if (!okPreviewCount.value && failedCount) ElMessage.error(previewItemReason(previewItems.value.find(item => !item.ok)) || '百度网盘预览失败')
       persistPreviewCacheFromState()
       return
     }
+    const extractedPasswordSet = new Set()
     for (let index = 0; index < urls.length; index += 1) {
       const url = urls[index]
       previewProgress.value = Math.max(8, Math.round((index / urls.length) * 92))
       try {
         const result = await httpDownloadApi.preview({
+          sourceText: urlText.value,
           urls: [url],
           targetSubdir: targetSubdir.value,
           conflictPolicy: conflictPolicy.value,
@@ -954,6 +931,7 @@ async function preview(options = {}) {
         })
         const nextItems = attachInputUrlToPreviewItems(result.items || [], url)
         previewItems.value = [...previewItems.value, ...nextItems]
+        (result.extracted_archive_passwords || []).forEach(p => extractedPasswordSet.add(p))
         if (result.needs_materialize) previewNeedsMaterialize.value = true
         selectAllPreviewTreeFiles()
         const okCount = nextItems.filter(item => item.ok).length
@@ -974,6 +952,10 @@ async function preview(options = {}) {
     }
     previewProgress.value = 100
     previewCacheInputSignature.value = previewInputSignature()
+    if (extractedPasswordSet.size) {
+      addPreviewLog(`识别到 ${extractedPasswordSet.size} 个解压密码，开始下载后写入密码库`, 'success')
+      ElMessage.info(`识别到 ${extractedPasswordSet.size} 个解压密码，开始下载后写入密码库`)
+    }
     expandDefaultPreviewTreeRows(previewItems.value)
     addPreviewLog(`解析完成，可下载 ${okPreviewCount.value} 项，失败 ${failedPreviewItemCount.value} 项`, okPreviewCount.value ? 'success' : 'warning')
     if (previewNeedsMaterialize.value) addPreviewLog('部分分享链接会在开始下载时通过官方接口解析直链', 'warning')
@@ -993,6 +975,7 @@ async function start() {
   try {
     addPreviewLog(`提交 ${selectedOkCount.value} 个选中下载项`)
     const result = await activeApi.value.start({
+      sourceText: urlText.value,
       urls: parsedUrls.value,
       targetSubdir: targetSubdir.value,
       outputFolderName: outputFolderName.value,
@@ -1006,6 +989,12 @@ async function start() {
     previewNeedsMaterialize.value = false
     addPreviewLog(result.message || `${panelTitle.value}任务已创建`, 'success')
     ElMessage.success(result.message || `${panelTitle.value}任务已创建`)
+    const passwordImport = result.password_import || {}
+    if (passwordImport.imported || passwordImport.skipped) {
+      const passwordMessage = `已写入密码库 ${passwordImport.imported} 个${passwordImport.skipped ? `，跳过 ${passwordImport.skipped} 个` : ``}`
+      addPreviewLog(passwordMessage, 'success')
+      ElMessage.success(passwordMessage)
+    }
     clearStartedInputUrls(selectedOkItems.value)
     previewDialogVisible.value = false
   } catch (error) {

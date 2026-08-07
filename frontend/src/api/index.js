@@ -1844,6 +1844,7 @@ export const httpDownloadApi = {
   preview: async (payload = {}) => {
     const response = await apiClient.post('/http-download/preview', {
       urls: payload.urls || [],
+      source_text: payload.sourceText || payload.source_text || '',
       target_subdir: payload.targetSubdir || payload.target_subdir || '',
       conflict_policy: payload.conflictPolicy || payload.conflict_policy || ''
     }, {
@@ -1856,6 +1857,7 @@ export const httpDownloadApi = {
   start: async (payload = {}) => {
     const response = await apiClient.post('/http-download/start', {
       urls: payload.urls || [],
+      source_text: payload.sourceText || payload.source_text || '',
       target_subdir: payload.targetSubdir || payload.target_subdir || '',
       conflict_policy: payload.conflictPolicy || payload.conflict_policy || '',
       batch_name: payload.batchName || payload.batch_name || '',
@@ -1987,6 +1989,7 @@ export const baiduNetdiskApi = {
   preview: async (payload = {}) => {
     const response = await apiClient.post('/baidu-netdisk/preview', {
       urls: payload.urls || [],
+      source_text: payload.sourceText || payload.source_text || '',
       target_subdir: payload.targetSubdir || payload.target_subdir || '',
       output_folder_name: payload.outputFolderName || payload.output_folder_name || '',
       batch_name: payload.batchName || payload.batch_name || '',
@@ -2003,6 +2006,7 @@ export const baiduNetdiskApi = {
   start: async (payload = {}) => {
     const response = await apiClient.post('/baidu-netdisk/start', {
       urls: payload.urls || [],
+      source_text: payload.sourceText || payload.source_text || '',
       target_subdir: payload.targetSubdir || payload.target_subdir || '',
       output_folder_name: payload.outputFolderName || payload.output_folder_name || '',
       batch_name: payload.batchName || payload.batch_name || '',
