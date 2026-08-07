@@ -41,6 +41,7 @@ function cleanUrlCandidate(raw) {
     }
   }
   while (/[。，；：、！？)\]}>》」】'"`]$/.test(url)) url = url.slice(0, -1)
+  while (url.endsWith('#')) url = url.slice(0, -1)
   if (!/^https?:\/\//i.test(url)) url = `https://${url}`
   try {
     new URL(url)
@@ -131,7 +132,7 @@ function shareHasCode(value) {
 }
 
 function appendSharePassCode(shareUrl, code) {
-  const normalizedUrl = String(shareUrl || '').trim()
+  const normalizedUrl = String(shareUrl || '').trim().replace(/#$/, '')
   const normalizedCode = validPassCode(code)
   if (!normalizedUrl || !normalizedCode || shareHasCode(normalizedUrl)) return normalizedUrl
   try {

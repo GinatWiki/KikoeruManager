@@ -16,3 +16,14 @@ def test_http_download_input_pairs_multiline_pikpak_share_text():
     assert routes._http_download_urls_from_payload([
         "https://drive.mypikpak.com/s/share-b\n访问码: 9z8y",
     ]) == ["https://drive.mypikpak.com/s/share-b?pwd=9z8y"]
+
+def test_http_download_input_does_not_duplicate_pikpak_url_with_code():
+    assert routes._http_download_urls_from_payload([
+        "分享给你：https://mypikpak.com/s/share-b 访问码: 9z8y",
+    ]) == ["https://mypikpak.com/s/share-b?pwd=9z8y"]
+
+
+def test_http_download_input_pikpak_fragment_code_single_url():
+    assert routes._http_download_urls_from_payload([
+        "https://mypikpak.com/s/share-b#提取码:9z8y",
+    ]) == ["https://mypikpak.com/s/share-b?pwd=9z8y"]

@@ -116,6 +116,8 @@ def _clean_url_candidate(raw: str) -> tuple[str, str]:
             url = url[: bare_trailing.start()]
     while url and url[-1] in "。，；：、！？)]}>》」】'\"`":
         url = url[:-1]
+    while url.endswith("#"):
+        url = url[:-1]
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
     try:
@@ -257,7 +259,7 @@ def _share_identity(url: str) -> str:
 
 
 def _append_pass_code(url: str, code: str) -> str:
-    value = str(url or "").strip()
+    value = str(url or "").strip().rstrip("#")
     if not value or not code:
         return value
     if _pass_code_from_url(value):
@@ -366,7 +368,7 @@ def extract_http_urls(text: str) -> List[str]:
         for candidate in _url_candidates(line):
             url = candidate["url"]
             platform_name = _platform_for_url(url)
-            if platform_name or url not in seen:
+            if not platform_name and url not in seen:
                 if url not in seen:
                     result.append(url)
                     seen.add(url)

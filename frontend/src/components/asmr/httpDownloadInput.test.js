@@ -32,3 +32,16 @@ describe('PikPak 下载输入', () => {
     expect(isPikPakPassCodeLine('https://mypikpak.com/s/share-c')).toBe(false)
   })
 })
+
+  it('不重复输出PikPak链接并支持片段提取码', () => {
+    expect(normalizeHttpDownloadInputRows([
+      '分享给你：https://mypikpak.com/s/share-b 访问码: 9z8y',
+    ])).toEqual([
+      'https://mypikpak.com/s/share-b?pwd=9z8y',
+    ])
+    expect(normalizeHttpDownloadInputRows([
+      'https://mypikpak.com/s/share-b#提取码:9z8y',
+    ])).toEqual([
+      'https://mypikpak.com/s/share-b?pwd=9z8y',
+    ])
+  })
