@@ -3949,7 +3949,7 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                         base_to_entries[base].append({"name": name, "path": sitem.get("path", ""), "ext": ext})
                 if file_names:
                     work_name = work_name + "\n--- 文件树名称 ---\n" + "\n".join(sorted(file_names))
-                rename_data = {"library_id": request.library_id, "base_to_entries": base_to_entries}
+                rename_data = {"library_id": request.library_id, "path": request.path, "base_to_entries": base_to_entries}
             except Exception:
                 pass
         items.append({"rjcode": rjcode, "work_name": work_name, "rename_data": rename_data})
@@ -4050,6 +4050,36 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                                             logger.info("[AI标题] 文件重命名成功: %s -> %s", entry["path"], new_name)
                                         except Exception as exc:
                                             logger.warning("[AI标题] 文件重命名失败: %s -> %s error=%s", entry["path"], new_name, exc)
+                            # 重命名项目文件夹：使用 AI 翻译后的标题
+                            if rd.get("path"):
+                                try:
+                                    from sqlalchemy import text as _sql_text
+                                    from ..models.database import get_db as _get_db
+                                    rj = r.get("rjcode", "")
+                                    fdb = next(_get_db())
+                                    frow = fdb.execute(
+                                        _sql_text("SELECT ai_title, work_name FROM work_metadata WHERE rjcode = :rjcode"),
+                                        {"rjcode": rj}
+                                    ).fetchone()
+                                    fdb.close()
+                                    folder_title = None
+                                    if frow:
+                                        folder_title = frow[0] or frow[1]
+                                    if folder_title:
+                                        folder_title_clean = re.sub(r'[<>:"/\|?*]', '', folder_title).strip()
+                                        if folder_title_clean:
+                                            folder_src = str(rd.get("path") or "").rstrip("/\\")
+                                            if folder_src:
+                                                await rn_mgr.rename(
+                                                    rd.get("library_id") or request.library_id,
+                                                    folder_src,
+                                                    folder_title_clean,
+                                                    skip_index_mutation=False,
+                                                    sync_index_mutation=False,
+                                                )
+                                                logger.info("[AI标题] 项目文件夹重命名成功: %s -> %s", folder_src, folder_title_clean)
+                                except Exception as exc:
+                                    logger.warning("[AI标题] 项目文件夹重命名失败: %s error=%s", rd.get("path"), exc)
         except Exception as exc:
             logger.warning("[AI标题] 写入 ai_title 失败: %s", exc)
 
