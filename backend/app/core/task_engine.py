@@ -7237,6 +7237,9 @@ class TaskEngine:
                             folder_title = None
                             if frow:
                                 folder_title = frow[0] or frow[1]
+                            # work_metadata 可能没有该 RJ 记录或 ai_title 为空，回退到本次 AI 翻译结果
+                            if not folder_title:
+                                folder_title = translated
                             if folder_title:
                                 folder_title_clean = re.sub(r'[<>:"/\\|?*]', '', folder_title).strip()
                                 if folder_title_clean:

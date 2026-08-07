@@ -4123,6 +4123,8 @@ async def task_center_ai_title_translation(request: AITitleTranslationBatchReque
 
     library_id = str(request.library_id or "").strip()
     path = str(request.path or "").strip()
+    # 清理插件注入的 emoji（VoiceLink 会在 RJ 号后插入 🟢）
+    path = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]", "", path).strip()
     if not library_id or not path:
         raise HTTPException(status_code=400, detail="缺少库存或路径")
 
