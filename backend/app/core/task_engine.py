@@ -7154,9 +7154,31 @@ class TaskEngine:
                     try:
                         parsed = _json.loads(title_text[json_start:json_end])
                         if isinstance(parsed, dict):
-                            vals = [v.strip() for v in parsed.values() if isinstance(v, str) and v.strip()]
-                            if vals:
-                                translated = vals[0]
+                            # 按原始标题精确匹配翻译值，避免取到纯 RJ 号
+                            original_title = r.get("original_title") or ""
+                            extracted = None
+                            if original_title and parsed.get(original_title):
+                                v = parsed[original_title]
+                                if isinstance(v, str) and v.strip():
+                                    extracted = v.strip()
+                            if extracted is None and original_title:
+                                first_line = str(original_title).split("\n", 1)[0].strip()
+                                for k, v in parsed.items():
+                                    if isinstance(k, str) and isinstance(v, str) and v.strip() and str(k).strip() == first_line:
+                                        extracted = v.strip()
+                                        break
+                            if extracted is None:
+                                for k, v in parsed.items():
+                                    if isinstance(v, str) and v.strip() and not re.fullmatch(r"RJ\d+", v.strip(), re.IGNORECASE):
+                                        extracted = v.strip()
+                                        break
+                            if extracted is None:
+                                for v in parsed.values():
+                                    if isinstance(v, str) and v.strip():
+                                        extracted = v.strip()
+                                        break
+                            if extracted:
+                                translated = extracted
                     except _json.JSONDecodeError:
                         pass
 
