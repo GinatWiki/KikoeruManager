@@ -69,12 +69,16 @@ _ARCHIVE_PASSWORD_LABEL_RE = re.compile(
     r"(?:解压密码|解壓密碼|压缩包密码|壓縮包密碼|压缩密码|壓縮密碼|解压码|解壓碼|"
     r"rar密码|rar密碼|zip密码|zip密碼|7z密码|7z密碼|7z压缩密码|7z壓縮密碼|"
     r"archive\s*password|unzip\s*password|extract\s*password)"
-    r"\s*[:：=]?\s*([^\s,，。;；、]+)",
+    r"(?:\s*(?:[:：=]|是|为|為)?\s*)([^\s,，。;；、]+)",
     re.IGNORECASE,
 )
 
 _ARCHIVE_KEYWORDS = ("解压", "解壓", "压缩", "壓縮", "rar", "zip", "7z", "archive", "unzip", "extract")
-_GENERIC_PASSWORD_RE = re.compile(r"密[码碼]\s*[:：=]?\s*([^\s,，。;；、]+)")
+_SHORTHAND_ARCHIVE_PASSWORD_RE = re.compile(
+    r"(?:解压|解壓)(?:\s*(?:[:：=]|是|为|為)?\s*)(?![密碼])([A-Za-z0-9@!#$%&*+_.:/-]{3,64})",
+    re.IGNORECASE,
+)
+_GENERIC_PASSWORD_RE = re.compile(r"密[码碼](?:\s*(?:[:：=]|是|为|為)?\s*)([^\s,，。;；、]+)")
 
 
 def normalize_link_text(text: str) -> str:
@@ -377,28 +381,28 @@ def _strip_password_value(value: str) -> str:
 
 
 def extract_archive_passwords(text: str) -> List[str]:
-    """从文本中提取解压密码，返回去重后的密码列表。"""
+    """从文本中提取解压密码，兼容“解压/解压码/密码/压缩密码”等常见写法。"""
     normalized = normalize_link_text(text)
     passwords: List[str] = []
     seen: set[str] = set()
+    share_codes = {
+        str(share.get("pass_code") or "").strip()
+        for share in extract_share_inputs(normalized)
+        if share.get("pass_code")
+    }
+
+    def add(password: str) -> None:
+        value = _strip_password_value(password)
+        if value and value not in seen:
+            passwords.append(value)
+            seen.add(value)
 
     for match in _ARCHIVE_PASSWORD_LABEL_RE.finditer(normalized):
-        password = _strip_password_value(match.group(1))
-        if password and password not in seen:
-            passwords.append(password)
-            seen.add(password)
-
-    for line in re.split(r"[\r\n]+", normalized):
-        if not _segment_has_archive_context(line):
-            continue
-        for match in _GENERIC_PASSWORD_RE.finditer(line):
-            password = _strip_password_value(match.group(1))
-            if not password:
-                continue
-            explicit_before = line[: match.start()]
-            if _ARCHIVE_PASSWORD_LABEL_RE.search(explicit_before + "密码:"):
-                continue
-            if password and password not in seen:
-                passwords.append(password)
-                seen.add(password)
+        add(match.group(1))
+    for match in _SHORTHAND_ARCHIVE_PASSWORD_RE.finditer(normalized):
+        add(match.group(1))
+    for match in _GENERIC_PASSWORD_RE.finditer(normalized):
+        value = _strip_password_value(match.group(1))
+        if value and value not in share_codes:
+            add(value)
     return passwords

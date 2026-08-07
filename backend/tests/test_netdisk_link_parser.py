@@ -82,3 +82,58 @@ def test_extract_baidu_urls_returns_normalized_share_list():
     )
 
     assert urls == ["https://pan.baidu.com/s/13EU1GlLvUULM43mkqhoZxA?pwd=38a2"]
+
+def test_exact_user_text_extracts_komo():
+    text = """链接: [https://pan.baidu.com/s/104v4TdB-3VDrSQ7zsquwfg?pwd=thsv](https://pan.baidu.com/s/104v4TdB-3VDrSQ7zsquwfg?pwd=thsv) 提取码: thsv
+解压komo"""
+    shares = extract_share_inputs(text, platform="baidu")
+    passwords = extract_archive_passwords(text)
+
+    assert shares[0]["pass_code"] == "thsv"
+    assert shares[0]["share_url"] == "https://pan.baidu.com/s/104v4TdB-3VDrSQ7zsquwfg?pwd=thsv"
+    assert passwords == ["komo"]
+
+
+def test_archive_password_variants():
+    cases = [
+        ("解压密码：komo", ["komo"]),
+        ("解压密码komo", ["komo"]),
+        ("解压码：komo", ["komo"]),
+        ("解压码komo", ["komo"]),
+        ("解压：komo", ["komo"]),
+        ("解压 komo", ["komo"]),
+        ("解压是komo", ["komo"]),
+        ("解压 是 komo", ["komo"]),
+        ("密码：komo", ["komo"]),
+        ("密码是komo", ["komo"]),
+        ("压缩包密码：komo", ["komo"]),
+        ("压缩密码komo", ["komo"]),
+        ("rar密码: komo", ["komo"]),
+        ("zip密码：komo", ["komo"]),
+        ("7z密码 komo", ["komo"]),
+        ("解压密码是komo", ["komo"]),
+        ("解压码为komo", ["komo"]),
+        ("密码为komo", ["komo"]),
+        ("压缩密码是komo", ["komo"]),
+    ]
+    for text, expected in cases:
+        assert extract_archive_passwords(text) == expected, text
+
+
+def test_generic_password_same_as_share_code_not_imported():
+    text = "链接：https://pan.baidu.com/s/13EU1GlLvUULM43mkqhoZxA 提取码：thsv\n密码：thsv"
+    shares = extract_share_inputs(text, platform="baidu")
+
+    assert shares[0]["pass_code"] == "thsv"
+    assert extract_archive_passwords(text) == []
+
+
+def test_archive_password_differs_from_share_code_imported():
+    text = "链接：https://pan.baidu.com/s/13EU1GlLvUULM43mkqhoZxA 提取码：thsv\n密码：komo"
+
+    assert extract_archive_passwords(text) == ["komo"]
+
+
+def test_shorthand_does_not_capture_common_words():
+    assert extract_archive_passwords("解压失败") == []
+    assert extract_archive_passwords("解压完成后") == []
