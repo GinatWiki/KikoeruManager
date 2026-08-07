@@ -4026,13 +4026,14 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                             rn_map = {}
                             for orig_key, trans_val in rn_parsed.items():
                                 if isinstance(orig_key, str) and isinstance(trans_val, str) and trans_val.strip():
-                                    rn_map[orig_key.strip()] = trans_val.strip()
+                                    rn_map[orig_key.strip().replace("*", "_")] = trans_val.strip().replace("*", "_")
                             if rn_map:
                                 logger.info("[AI标题] 开始重命名 rjcode=%s 映射数=%s", r.get("rjcode"), len(rn_map))
                                 for base, entries_list in base_to_entries.items():
-                                    if base not in rn_map:
+                                    base_key = str(base or "").replace("*", "_")
+                                    if base_key not in rn_map:
                                         continue
-                                    new_base = re.sub(r'[<>:"/\|?*]', '', rn_map[base]).strip()
+                                    new_base = re.sub(r'[<>:"/\|?*]', '', rn_map[base_key]).strip()
                                     if not new_base:
                                         continue
                                     for entry in entries_list:
