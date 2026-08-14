@@ -2,6 +2,13 @@
 
 本文件记录 KikoeruManager 的版本变化、功能更新与问题修复。更早的历史版本可通过 GitHub Tags 与提交历史查看。
 
+## v2.4.49
+
+- 修复：退出应用后内置 PostgreSQL 与 Redis 进程未随应用停止的问题。
+  - 托盘退出改为优雅关停：先停止后端并触发 FastAPI shutdown（flush 操作审计与 DLsite 特典 Redis dirty buffer），再用 pg_ctl fast stop 与 redis-cli SHUTDOWN 停止本次启动的内置服务；外部已有实例不受影响。
+  - 桌面端 uvicorn 增加优雅关停超时，浏览器开着 SSE 长连接时退出不再卡住。
+- 修复：发布包补齐 msys2 Redis 运行依赖 DLL 与 redis-cli.exe，内置 Redis 可独立启动，并支持退出时优雅落盘。
+
 ## v2.4.48
 
 - 合并：同步 Elena3939/KikoeruManager 上游修复更新（v1.6.109 ~ v1.6.114）。
