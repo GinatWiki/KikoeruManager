@@ -107,6 +107,8 @@ class DesktopApp:
                 log_config=None,
                 limit_concurrency=128,
                 timeout_keep_alive=15,
+                # 托盘退出时若浏览器仍开着 SSE 长连接，限时强制收尾，避免退出卡住。
+                timeout_graceful_shutdown=10,
                 backlog=512,
             )
             self.server = uvicorn.Server(config)
@@ -139,14 +141,40 @@ class DesktopApp:
     def on_quit(self, icon, item):
         """优雅退出应用"""
         logger.info("正在退出应用...")
-        if self.icon:
-            self.icon.stop()
-        
-        # 释放锁定端口
+
+        # 1. 停止后端：触发 FastAPI shutdown 事件（停 worker、flush 操作审计
+        #    与 DLsite 特典 Redis dirty buffer），再等待后端线程结束。
+        try:
+            if self.server is not None:
+                self.server.should_exit = True
+            if self.backend_thread is not None and self.backend_thread.is_alive():
+                self.backend_thread.join(timeout=20)
+        except Exception:
+            logger.exception("停止后端服务失败")
+
+        # 2. 停止本次启动的内置 PostgreSQL / Redis（外部已有实例不受影响）。
+        #    顺序在后端停止之后，保证数据库停止时没有活跃写入。
+        try:
+            from backend.app.core.embedded_runtime import shutdown_embedded_runtime
+            shutdown_embedded_runtime()
+        except Exception:
+            logger.exception("停止内置运行环境失败")
+
+        # 3. 释放单实例锁定端口
         if self.lock_socket:
-            self.lock_socket.close()
-            
-        # 强制退出，确保所有线程结束
+            try:
+                self.lock_socket.close()
+            except Exception:
+                pass
+
+        # 4. 关闭托盘图标
+        if self.icon:
+            try:
+                self.icon.stop()
+            except Exception:
+                logger.exception("停止托盘图标失败")
+
+        # 5. 强制结束进程，确保残留后台线程全部退出
         os._exit(0)
 
     def setup_tray(self):

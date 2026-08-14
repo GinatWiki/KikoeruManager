@@ -8,6 +8,7 @@ exe 首次启动时如果本机没有可用的 PostgreSQL / Redis，会优先使
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import secrets
@@ -29,6 +30,24 @@ except Exception:  # pragma: no cover - PyYAML 是后端固定依赖
 
 
 logger = logging.getLogger(__name__)
+
+# 记录本次会话由内置运行环境实际启动的服务，退出时只停止这些自己启动的实例，
+# 外部已有 / 用户自建的 PostgreSQL、Redis 不会被触碰。
+_runtime_state: Dict[str, Dict[str, Any]] = {
+    "postgres": {
+        "owned": False,
+        "bin_dir": None,
+        "pg_data": None,
+    },
+    "redis": {
+        "owned": False,
+        "proc": None,
+        "server": None,
+        "host": "127.0.0.1",
+        "port": 6379,
+        "password": "",
+    },
+}
 
 PG_VERSION = "18.4"
 PG_PACKAGE = f"postgresql-{PG_VERSION}-1-windows-x64-binaries.zip"
@@ -162,6 +181,14 @@ def _find_pg_bin(roots: Iterable[Path]) -> Optional[Path]:
 def _find_redis_server(roots: Iterable[Path]) -> Optional[Path]:
     for root in roots:
         candidate = Path(root) / "redis-server.exe"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _find_redis_cli(roots: Iterable[Path]) -> Optional[Path]:
+    for root in roots:
+        candidate = Path(root) / "redis-cli.exe"
         if candidate.exists():
             return candidate
     return None
@@ -341,6 +368,12 @@ def _ensure_postgres(
             raise RuntimeError(
                 "PostgreSQL 启动失败: " + (detail or "pg_ctl 返回非零")
             )
+        # 本次会话启动成功，退出时需要由应用负责停止。
+        _runtime_state["postgres"].update(
+            owned=True,
+            bin_dir=str(bin_dir),
+            pg_data=str(pg_data),
+        )
 
     pg_env = {"PGPASSWORD": password or ""}
     psql = str(bin_dir / "psql.exe")
@@ -461,13 +494,22 @@ def _ensure_redis(
         subprocess, "DETACHED_PROCESS", 0
     )
     with open(redis_data / "redis.stdout.log", "ab") as log_handle:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             args,
             creationflags=creationflags,
             close_fds=True,
             stdout=log_handle,
             stderr=subprocess.STDOUT,
         )
+    # 保留进程句柄与连接参数，退出时由应用负责停止（优先 redis-cli SHUTDOWN 落盘）。
+    _runtime_state["redis"].update(
+        owned=True,
+        proc=proc,
+        server=str(server),
+        host=host,
+        port=int(port),
+        password=(urllib.parse.unquote(parsed.password) if parsed.password else ""),
+    )
 
     deadline = time.time() + 30
     while time.time() < deadline:
@@ -477,6 +519,99 @@ def _ensure_redis(
             return canonical
         time.sleep(0.5)
     raise RuntimeError(f"Redis 启动后仍无法连接: {host}:{port}")
+
+
+def shutdown_embedded_runtime(timeout: float = 60.0) -> Dict[str, Any]:
+    """停止本次会话由内置运行环境启动的 PostgreSQL / Redis。
+
+    只停止当前进程自己启动（owned 标记）的实例，外部已有实例不会被触碰；
+    可重复调用（幂等）。返回停止结果摘要。
+    """
+    summary: Dict[str, Any] = {"postgresql": "not-owned", "redis": "not-owned"}
+
+    # 先停 Redis：依赖最少，且 SHUTDOWN 会把 AOF 落盘。
+    redis_state = _runtime_state["redis"]
+    if redis_state.get("owned"):
+        redis_state["owned"] = False
+        proc = redis_state.get("proc")
+        host = str(redis_state.get("host") or "127.0.0.1")
+        port = int(redis_state.get("port") or 6379)
+        password = str(redis_state.get("password") or "")
+        cli = None
+        server = redis_state.get("server")
+        if server:
+            sibling = Path(server).parent / "redis-cli.exe"
+            if sibling.exists():
+                cli = sibling
+        if cli is None:
+            data_path = Path(os.environ.get("DATA_PATH", "data")).resolve()
+            exe_dir = Path(os.path.dirname(sys.executable)).resolve()
+            bundle_dir = Path(getattr(sys, "_MEIPASS", exe_dir)).resolve()
+            cli = _find_redis_cli(_redis_search_roots(data_path, exe_dir, bundle_dir))
+        stopped = False
+        if cli is not None:
+            cli_args = [str(cli), "-h", host, "-p", str(port)]
+            if password:
+                cli_args += ["-a", password, "--no-auth-warning"]
+            cli_args += ["SHUTDOWN"]
+            try:
+                result = _run(cli_args, timeout=min(timeout, 20))
+                stopped = result.returncode == 0
+                if not stopped:
+                    logger.warning(
+                        "[内置运行环境] redis-cli SHUTDOWN 返回非零: %s",
+                        (result.stderr or "").strip()[:300],
+                    )
+            except Exception as exc:
+                logger.warning("[内置运行环境] redis-cli SHUTDOWN 失败: %s", exc)
+        if not stopped and proc is not None:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            except Exception as exc:
+                logger.warning("[内置运行环境] 终止 Redis 进程失败: %s", exc)
+        if proc is not None:
+            # SHUTDOWN 返回后服务端还需短暂收尾，等待进程真正退出再下结论。
+            deadline = time.time() + 10
+            while proc.poll() is None and time.time() < deadline:
+                time.sleep(0.2)
+        alive = proc is not None and proc.poll() is None
+        summary["redis"] = "stopped" if not alive else "failed"
+
+    # 再停 PostgreSQL：后端已停止后使用 fast 模式干净退出，无需崩溃恢复。
+    pg_state = _runtime_state["postgres"]
+    if pg_state.get("owned"):
+        pg_state["owned"] = False
+        bin_dir = pg_state.get("bin_dir")
+        pg_data = pg_state.get("pg_data")
+        if bin_dir and pg_data:
+            pg_ctl = Path(bin_dir) / "pg_ctl.exe"
+            if pg_ctl.exists():
+                try:
+                    result = _run(
+                        [str(pg_ctl), "-D", str(pg_data), "-m", "fast", "-w", "stop"],
+                        timeout=min(timeout, 60),
+                    )
+                    if result.returncode != 0:
+                        logger.warning(
+                            "[内置运行环境] pg_ctl stop 返回非零: %s",
+                            (result.stderr or "").strip()[:300],
+                        )
+                        summary["postgresql"] = "failed"
+                    else:
+                        summary["postgresql"] = "stopped"
+                except Exception as exc:
+                    logger.warning("[内置运行环境] 停止 PostgreSQL 失败: %s", exc)
+                    summary["postgresql"] = "failed"
+            else:
+                summary["postgresql"] = "pg_ctl-missing"
+        else:
+            summary["postgresql"] = "missing-state"
+    return summary
 
 
 def bootstrap_embedded_runtime(
@@ -516,4 +651,9 @@ def bootstrap_embedded_runtime(
     return summary
 
 
-__all__ = ["bootstrap_embedded_runtime"]
+__all__ = ["bootstrap_embedded_runtime", "shutdown_embedded_runtime"]
+
+
+# 解释器正常退出路径（非 os._exit）兜底停止本次启动的内置服务；
+# 桌面端托盘退出会先显式调用 shutdown_embedded_runtime 再退出。
+atexit.register(shutdown_embedded_runtime)
