@@ -107,8 +107,9 @@ class DesktopApp:
                 log_config=None,
                 limit_concurrency=128,
                 timeout_keep_alive=15,
-                # 托盘退出时若浏览器仍开着 SSE 长连接，限时强制收尾，避免退出卡住。
-                timeout_graceful_shutdown=10,
+                # 托盘退出时若浏览器仍开着 SSE 长连接，只给 2 秒宽限就强制收尾，
+                # 避免退出后 postgres / redis 进程在任务管理器中长时间残留。
+                timeout_graceful_shutdown=2,
                 backlog=512,
             )
             self.server = uvicorn.Server(config)
