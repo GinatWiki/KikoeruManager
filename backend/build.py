@@ -62,9 +62,16 @@ def build(console_mode=True):
             if os.path.exists(path):
                 binaries.append((path, "tools/unar"))
 
-    redis_server = os.path.join(ROOT_DIR, "tools", "redis", "redis-server.exe")
-    if os.path.exists(redis_server):
-        binaries.append((redis_server, "tools/redis"))
+    redis_dir = os.path.join(ROOT_DIR, "tools", "redis")
+    if os.path.isdir(redis_dir):
+        # 完整打包 redis 运行目录（redis-server / redis-cli 及 msys 依赖 DLL），
+        # redis-cli 用于退出时 SHUTDOWN 优雅落盘。
+        for filename in sorted(os.listdir(redis_dir)):
+            if not filename.lower().endswith((".exe", ".dll")):
+                continue
+            path = os.path.join(redis_dir, filename)
+            if os.path.isfile(path):
+                binaries.append((path, "tools/redis"))
     
     spec_content = f'''# -*- mode: python ; coding: utf-8 -*-
 

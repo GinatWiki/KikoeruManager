@@ -70,9 +70,18 @@ jobs:
         $redisRoot = Join-Path $env:RUNNER_TEMP "redis"
         Expand-Archive -LiteralPath $redisZip -DestinationPath $redisRoot -Force
         New-Item -ItemType Directory -Force -Path "tools\redis" | Out-Null
-        $redisExe = Get-ChildItem -LiteralPath $redisRoot -Filter redis-server.exe -Recurse | Select-Object -First 1
-        if (-not $redisExe) { throw "redis-server.exe not found in $redisRoot" }
-        Copy-Item -LiteralPath $redisExe.FullName -Destination "tools\redis\redis-server.exe" -Force
+        # 完整携带 msys2 版 Redis：redis-server / redis-cli 及运行时 DLL 必须同目录，
+        # 缺失 DLL 时 redis-server.exe 无法启动（STATUS_DLL_NOT_FOUND）。
+        # redis-cli 供桌面端退出时 SHUTDOWN 优雅落盘 AOF。
+        $required = @('redis-server.exe', 'redis-cli.exe', 'msys-2.0.dll', 'msys-crypto-3.dll', 'msys-gcc_s-seh-1.dll', 'msys-ssl-3.dll', 'msys-stdc++-6.dll')
+        foreach ($name in $required) {
+          $item = Get-ChildItem -LiteralPath $redisRoot -Filter $name -Recurse | Select-Object -First 1
+          if ($item) {
+            Copy-Item -LiteralPath $item.FullName -Destination "tools\redis\$name" -Force
+          } else {
+            Write-Warning "$name 未在 Redis 包中找到，内置 Redis 可能无法启动"
+          }
+        }
         Get-ChildItem tools -Recurse -Filter *.exe | Select-Object -First 5 FullName, Length
 
     - name: Build EXE (console + noconsole)

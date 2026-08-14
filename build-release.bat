@@ -1,5 +1,6 @@
 @echo off
 setlocal
+setlocal enabledelayedexpansion
 chcp 65001 >nul
 
 cd /d "%~dp0"
@@ -78,9 +79,13 @@ if errorlevel 1 (
 
 set "UNAR_BIN_ARGS="
 set "REDIS_BIN_ARGS="
-if exist "%ROOT%\tools\redis\redis-server.exe" (
-  set "REDIS_BIN_ARGS=--add-binary ""%ROOT%\tools\redis\redis-server.exe;tools/redis"""
-  echo 已将 tools\redis\redis-server.exe 打包进 exe
+if exist "%ROOT%\tools\redis" (
+  for %%F in ("%ROOT%\tools\redis\*.exe" "%ROOT%\tools\redis\*.dll") do (
+    if exist "%%F" (
+      set "REDIS_BIN_ARGS=!REDIS_BIN_ARGS! --add-binary ""%%F;tools/redis"""
+    )
+  )
+  echo 已将 tools\redis 下的 redis-server/redis-cli 与依赖 DLL 打包进 exe
 )
 if exist "%ROOT%\tools\unar\unar.exe" if exist "%ROOT%\tools\unar\lsar.exe" if exist "%ROOT%\tools\unar\Foundation.1.0.dll" (
   set "UNAR_BIN_ARGS=--add-binary ""%ROOT%\tools\unar\unar.exe;tools/unar"" --add-binary ""%ROOT%\tools\unar\lsar.exe;tools/unar"" --add-binary ""%ROOT%\tools\unar\Foundation.1.0.dll;tools/unar"""
