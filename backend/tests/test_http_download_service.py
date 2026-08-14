@@ -57,6 +57,9 @@ class DummyHttpDownloader:
     pikpak_device_id = ""
     pikpak_transfer_dir = "/KikoeruManager"
     pikpak_auto_save_share = True
+    pikpak_api_use_proxy = True
+    pikpak_download_use_proxy = False
+    pikpak_max_concurrent_downloads = 6
     pikpak_accounts = []
 
 
@@ -195,6 +198,28 @@ def test_proxy_url_defaults_to_all_http_download_platforms(monkeypatch, tmp_path
     assert service._proxy_url("onedrive") == "http://127.0.0.1:7890"
     assert service._proxy_url("google_drive") == "http://127.0.0.1:7890"
     assert service._proxy_url("pikpak") == "http://127.0.0.1:7890"
+    assert service._pikpak_api_proxy_url() == "http://127.0.0.1:7890"
+    assert service._pikpak_download_proxy_url() == ""
+
+    service._config().pikpak_api_use_proxy = False
+    service._config().pikpak_download_use_proxy = True
+    assert service._pikpak_api_proxy_url() == ""
+    assert service._pikpak_download_proxy_url() == "http://127.0.0.1:7890"
+
+
+def test_aria2_daemon_uses_pikpak_concurrency_as_global_upper_bound(monkeypatch, tmp_path):
+    bind_config(
+        monkeypatch,
+        tmp_path,
+        max_concurrent_downloads=3,
+        pikpak_max_concurrent_downloads=6,
+    )
+    service = HttpDownloadService()
+
+    assert service._aria2_max_concurrent_downloads() == 6
+
+    service._config().max_concurrent_downloads = 10
+    assert service._aria2_max_concurrent_downloads() == 10
 
 
 def test_proxy_url_only_applies_to_selected_platforms(monkeypatch, tmp_path):
@@ -726,7 +751,7 @@ async def test_copy_pikpak_share_files_multi_splits_by_remaining_space(monkeypat
     monkeypatch.setattr(service, "_pikpak_client", fake_client)
     monkeypatch.setattr(service, "_close_pikpak_client", lambda _client: asyncio.sleep(0))
 
-    id_map, account_by_source = await service._copy_pikpak_share_files_multi(
+    id_map, account_by_source, reusable_clients = await service._copy_pikpak_share_files_multi(
         clients["small"],
         ["big", "mid"],
         [{"id": "big", "size": 90}, {"id": "mid", "size": 50}],
@@ -741,6 +766,7 @@ async def test_copy_pikpak_share_files_multi_splits_by_remaining_space(monkeypat
     assert id_map["mid"] == "small-mid"
     assert account_by_source["big"].id == "large"
     assert account_by_source["mid"].id == "small"
+    assert reusable_clients == clients
 
 
 @pytest.mark.asyncio
@@ -1953,6 +1979,37 @@ async def test_poll_task_reports_actionable_gofile_timeout(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
+async def test_poll_task_reports_gofile_rate_limit_without_configured_token(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path, gofile_token="")
+    service = HttpDownloadService()
+    row = {
+        "gid": "gid-429",
+        "source": "gofile",
+        "original_url": "https://file-na-phx-1.gofile.io/download/file.zip",
+        "status": "pending",
+    }
+
+    async def fake_tell_status(gid):
+        return {
+            "gid": gid,
+            "status": "error",
+            "totalLength": "0",
+            "completedLength": "0",
+            "downloadSpeed": "0",
+            "errorMessage": "The response status is not successful. status=429",
+        }
+
+    monkeypatch.setattr(service, "_tell_status", fake_tell_status)
+
+    rows, _runtime, done, failed_count = await service._poll_task(["gid-429"], [row])
+
+    assert done is True
+    assert failed_count == 1
+    assert "HTTP 429" in rows[0]["failure_reason"]
+    assert "未配置 Gofile token" in rows[0]["failure_reason"]
+
+
+@pytest.mark.asyncio
 async def test_preview_urls_shows_transferit_as_materialized_item(monkeypatch, tmp_path):
     bind_config(monkeypatch, tmp_path)
     service = HttpDownloadService()
@@ -2593,6 +2650,7 @@ async def test_resolve_pikpak_materialize_filters_selected_failed_item(monkeypat
         return (
             {file_id: f"copy-{file_id}" for file_id in file_ids},
             {file_id: service._select_pikpak_account("acc-a") for file_id in file_ids},
+            {},
         )
 
     async def fake_download_link(_client, file_id, allow_missing=False):
@@ -3507,6 +3565,80 @@ def test_build_retry_selection_for_task_keeps_only_failed_or_incomplete_rows(tmp
     assert all(key.startswith("pikpak:") for key in retry_keys)
 
 
+def test_build_retry_selection_for_task_rebuilds_pikpak_share_source_items():
+    service = HttpDownloadService()
+    task = Task(
+        task_type=TaskType.HTTP_DOWNLOAD,
+        source_path="pikpak",
+        metadata={
+            "source_items": [
+                {
+                    "source": "pikpak",
+                    "share_id": "share-a",
+                    "file_id": "part-1",
+                    "name": "pack.7z.001",
+                    "download_file_id": "old-copy-1",
+                    "pikpak_cleanup_file_id": "old-copy-1",
+                    "original_url": "https://expired.test/part-1",
+                },
+                {
+                    "source": "pikpak",
+                    "share_id": "share-a",
+                    "file_id": "part-2",
+                    "name": "pack.7z.002",
+                },
+            ],
+            "download_files": [],
+            "failed_files": [
+                {
+                    "source": "pikpak",
+                    "share_id": "share-a",
+                    "file_id": "part-1",
+                    "name": "pack.7z.001",
+                    "status": "failed",
+                    "failure_reason": "HTTP 403",
+                    "download_file_id": "old-copy-1",
+                    "pikpak_cleanup_file_id": "old-copy-1",
+                },
+            ],
+        },
+    )
+
+    retry_items, retry_keys = service.build_retry_selection_for_task(task)
+
+    assert [item["file_id"] for item in retry_items] == ["part-1", "part-2"]
+    assert len(retry_keys) == 2
+    assert all("download_file_id" not in item for item in retry_items)
+    assert all("pikpak_cleanup_file_id" not in item for item in retry_items)
+    assert all("original_url" not in item for item in retry_items)
+
+
+def test_build_retry_selection_for_file_retries_all_pikpak_share_parts():
+    service = HttpDownloadService()
+    task = Task(
+        task_type=TaskType.HTTP_DOWNLOAD,
+        source_path="pikpak",
+        metadata={
+            "selected_items": [
+                {"source": "pikpak", "share_id": "share-a", "file_id": "part-1", "name": "pack.7z.001"},
+                {"source": "pikpak", "share_id": "share-a", "file_id": "part-2", "name": "pack.7z.002"},
+                {"source": "pikpak", "share_id": "share-a", "file_id": "part-3", "name": "pack.7z.003"},
+            ],
+            "download_files": [
+                {"source": "pikpak", "share_id": "share-a", "file_id": "part-1", "name": "pack.7z.001", "status": "failed"},
+                {"source": "pikpak", "share_id": "share-a", "file_id": "part-2", "name": "pack.7z.002", "status": "completed"},
+            ],
+            "failed_files": [
+                {"source": "pikpak", "share_id": "share-a", "file_id": "part-1", "name": "pack.7z.001", "status": "failed"},
+            ],
+        },
+    )
+
+    items, _keys = service.build_retry_selection_for_file(task, task.task_metadata["download_files"][0])
+
+    assert {item["file_id"] for item in items} == {"part-1", "part-2", "part-3"}
+
+
 def test_build_retry_selection_for_task_falls_back_to_initial_selected_items():
     service = HttpDownloadService()
     task = Task(
@@ -3629,6 +3761,133 @@ def test_gofile_aria2_options_reduce_connections_and_extend_timeout_on_retry(mon
     assert first_retry["user-agent"]
     assert final_retry["split"] == "1"
     assert final_retry["connect-timeout"] == "45"
+
+
+def test_prepare_existing_gofile_target_reuses_complete_file(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    final_path = tmp_path / "downloads" / "RJ01677458.zip"
+    final_path.parent.mkdir(parents=True)
+    final_path.write_bytes(b"complete")
+    item = {
+        "source": "gofile",
+        "filename": final_path.name,
+        "relative_path": final_path.name,
+        "final_path": str(final_path),
+        "size_bytes": len(b"complete"),
+    }
+
+    row = service._prepare_existing_gofile_target(item)
+
+    assert row is not None
+    assert row["status"] == "completed"
+    assert row["existing_file_reused"] is True
+    assert row["downloaded"] == len(b"complete")
+    assert final_path.read_bytes() == b"complete"
+
+
+def test_prepare_existing_gofile_target_removes_orphan_partial(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    final_path = tmp_path / "downloads" / "RJ01677458.zip"
+    final_path.parent.mkdir(parents=True)
+    final_path.write_bytes(b"partial")
+    item = {
+        "source": "gofile",
+        "filename": final_path.name,
+        "relative_path": final_path.name,
+        "final_path": str(final_path),
+        "size_bytes": 64,
+    }
+
+    assert service._prepare_existing_gofile_target(item) is None
+    assert not final_path.exists()
+    assert item["gofile_reset_partial_bytes"] == len(b"partial")
+
+
+def test_prepare_existing_gofile_target_preserves_aria2_resume_pair(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    final_path = tmp_path / "downloads" / "RJ01677458.zip"
+    final_path.parent.mkdir(parents=True)
+    final_path.write_bytes(b"partial")
+    Path(str(final_path) + ".aria2").write_bytes(b"control")
+    item = {
+        "source": "gofile",
+        "filename": final_path.name,
+        "final_path": str(final_path),
+        "size_bytes": 64,
+    }
+
+    assert service._prepare_existing_gofile_target(item) is None
+    assert final_path.read_bytes() == b"partial"
+    assert "gofile_reset_partial_bytes" not in item
+
+
+def test_prepare_existing_pikpak_target_reuses_complete_file(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    final_path = tmp_path / "downloads" / "RJ01677458.7z.001"
+    final_path.parent.mkdir(parents=True)
+    final_path.write_bytes(b"complete")
+    item = {
+        "source": "pikpak",
+        "filename": final_path.name,
+        "relative_path": final_path.name,
+        "final_path": str(final_path),
+        "size_bytes": len(b"complete"),
+        "file_id": "share-file",
+        "download_file_id": "saved-file",
+        "pikpak_cleanup_file_id": "saved-file",
+        "pikpak_materialized": True,
+    }
+
+    row = service._prepare_existing_aria2_target(item)
+
+    assert row is not None
+    assert row["status"] == "completed"
+    assert row["source"] == "pikpak"
+    assert row["download_file_id"] == "saved-file"
+    assert row["pikpak_cleanup_file_id"] == "saved-file"
+    assert final_path.read_bytes() == b"complete"
+
+
+def test_prepare_existing_pikpak_target_removes_orphan_partial(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    final_path = tmp_path / "downloads" / "RJ01677458.7z.001"
+    final_path.parent.mkdir(parents=True)
+    final_path.write_bytes(b"partial")
+    item = {
+        "source": "pikpak",
+        "filename": final_path.name,
+        "relative_path": final_path.name,
+        "final_path": str(final_path),
+        "size_bytes": 64,
+    }
+
+    assert service._prepare_existing_aria2_target(item) is None
+    assert not final_path.exists()
+    assert item["pikpak_reset_partial_bytes"] == len(b"partial")
+
+
+def test_prepare_existing_pikpak_target_preserves_aria2_resume_pair(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    final_path = tmp_path / "downloads" / "RJ01677458.7z.001"
+    final_path.parent.mkdir(parents=True)
+    final_path.write_bytes(b"partial")
+    Path(str(final_path) + ".aria2").write_bytes(b"control")
+    item = {
+        "source": "pikpak",
+        "filename": final_path.name,
+        "final_path": str(final_path),
+        "size_bytes": 64,
+    }
+
+    assert service._prepare_existing_aria2_target(item) is None
+    assert final_path.read_bytes() == b"partial"
+    assert "pikpak_reset_partial_bytes" not in item
 
 
 @pytest.mark.asyncio
@@ -3836,11 +4095,18 @@ async def test_download_transferit_item_retries_busy_response(monkeypatch, tmp_p
 
 @pytest.mark.asyncio
 async def test_download_transferit_item_resumes_part_file_after_disconnect(monkeypatch, tmp_path):
-    bind_config(monkeypatch, tmp_path, retry_count=2, retry_wait_seconds=0)
+    bind_config(
+        monkeypatch,
+        tmp_path,
+        retry_count=2,
+        retry_wait_seconds=0,
+        proxy_url="http://proxy.test:7890",
+    )
     service = HttpDownloadService()
     target_dir = tmp_path / "downloads"
     target_dir.mkdir()
     captured_headers = []
+    captured_proxies = []
 
     class FakeApi:
         def fetch_transfer(self, _xh, password=None):
@@ -3930,6 +4196,7 @@ async def test_download_transferit_item_resumes_part_file_after_disconnect(monke
         assert url == "https://mega.example/download"
         headers = kwargs.get("headers") or {}
         captured_headers.append(headers)
+        captured_proxies.append(kwargs.get("proxy"))
         if len(captured_headers) == 1:
             return FakeResponse(200, {"content-length": "24"}, [b"abcdefghijklmnop"], fail_after=True)
         return FakeResponse(206, {"content-range": "bytes 16-23/24", "content-length": "8"}, [b"qrstuvwx"])
@@ -3982,6 +4249,7 @@ async def test_download_transferit_item_resumes_part_file_after_disconnect(monke
 
     assert captured_headers[0] == {}
     assert captured_headers[1]["Range"] == "bytes=16-"
+    assert captured_proxies == ["http://proxy.test:7890", None]
     assert (target_dir / "pack.zip").read_bytes() == b"abcdefghijklmnopqrstuvwx"
     assert not (target_dir / "pack.zip.part").exists()
     assert row["status"] == "completed"
@@ -3989,7 +4257,36 @@ async def test_download_transferit_item_resumes_part_file_after_disconnect(monke
 
 
 @pytest.mark.asyncio
-async def test_cleanup_completed_pikpak_transfer_items_only_deletes_success_rows(monkeypatch, tmp_path):
+async def test_download_transferit_item_preserves_last_retry_error(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path, retry_count=2, retry_wait_seconds=0)
+    service = HttpDownloadService()
+
+    class FakeTransferit:
+        def download(self, _link, _output_dir):
+            raise RuntimeError("server is busy: upstream disconnected")
+
+    async def fake_sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transferit",
+        type("Module", (), {"Transferit": FakeTransferit}),
+    )
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(HttpDownloadError, match="重试 2 次仍失败: server is busy: upstream disconnected"):
+        await service._download_transferit_item({
+            "original_url": "https://transfer.it/t/iVqeTDhlyRbA",
+            "filename": "pack.zip",
+            "target_dir": str(tmp_path),
+            "final_path": str(tmp_path / "pack.zip"),
+            "relative_path": "pack.zip",
+        })
+
+
+@pytest.mark.asyncio
+async def test_cleanup_completed_pikpak_transfer_items_deletes_failed_materialized_rows(monkeypatch, tmp_path):
     bind_config(
         monkeypatch,
         tmp_path,
@@ -4043,9 +4340,68 @@ async def test_cleanup_completed_pikpak_transfer_items_only_deletes_success_rows
     ])
 
     assert result["success"] is True
-    assert result["requested_count"] == 2
-    assert result["deleted_count"] == 2
+    assert result["requested_count"] == 3
+    assert result["deleted_count"] == 3
     assert calls == [
-        ("acc-a", ["copied-a"], True),
+        ("acc-a", ["copied-a", "failed-copy"], True),
         ("acc-b", ["copied-b"], True),
     ]
+
+
+@pytest.mark.asyncio
+async def test_remove_existing_gids_for_target_removes_active_and_stopped(monkeypatch, tmp_path):
+    service = HttpDownloadService()
+    target = str(tmp_path / "pack.7z.001")
+    calls = []
+
+    async def fake_rpc(method, params):
+        calls.append((method, params))
+        if method == "aria2.tellActive":
+            return [{"gid": "active-gid", "status": "active", "files": [{"path": target}]}]
+        if method == "aria2.tellWaiting":
+            return []
+        if method == "aria2.tellStopped":
+            return [{"gid": "stopped-gid", "status": "error", "files": [{"path": target}]}]
+        return "OK"
+
+    monkeypatch.setattr(service, "_rpc_call", fake_rpc)
+
+    await service._remove_existing_gids_for_target(target)
+
+    assert ("aria2.remove", ["active-gid"]) in calls
+    assert ("aria2.removeDownloadResult", ["stopped-gid"]) in calls
+
+
+@pytest.mark.asyncio
+async def test_poll_task_fails_stalled_pikpak_download(monkeypatch):
+    service = HttpDownloadService()
+    service._PIKPAK_STALL_TIMEOUT_SECONDS = 10
+    service._aria2_progress_state["gid-1"] = (0, 1.0)
+    calls = []
+
+    async def fake_rpc(method, params):
+        calls.append((method, params))
+        if method == "aria2.tellStatus":
+            return {
+                "gid": "gid-1",
+                "status": "active",
+                "totalLength": "1024",
+                "completedLength": "0",
+                "downloadSpeed": "0",
+                "files": [],
+            }
+        return "OK"
+
+    monkeypatch.setattr(service, "_rpc_call", fake_rpc)
+    monkeypatch.setattr("app.core.http_download_service.time.monotonic", lambda: 20.0)
+
+    rows, _runtime, done, failed_count = await service._poll_task(
+        ["gid-1"],
+        [{"gid": "gid-1", "source": "pikpak", "name": "pack.7z.001", "status": "pending"}],
+    )
+
+    assert done is True
+    assert failed_count == 1
+    assert rows[0]["status"] == "failed"
+    assert "重新转存" in rows[0]["failure_reason"]
+    assert ("aria2.remove", ["gid-1"]) in calls
