@@ -1339,10 +1339,15 @@ const getResourceTypeLabel = (type) => {
 }
 
 const parseEnhancedRJCodes = () => {
+  // 从输入中提取合法 RJ/RVJ 编号，忽略表情、状态标记等杂质，
+  // 避免把 "RJ01144225🔴" 这类粘贴内容原样发给后端。
   return [...new Set(
     (enhancedInput.value || '')
       .split(/[\s,，;；]+/)
-      .map(item => item.trim().toUpperCase())
+      .map(token => {
+        const match = token.toUpperCase().match(/[RVB]J\d{6,8}/)
+        return match ? match[0] : null
+      })
       .filter(Boolean)
   )]
 }
@@ -2519,18 +2524,23 @@ const loadWaitingRetryTasks = async () => {
 
 const selectFolder = () => ElMessage.info('请手动输入文件夹路径')
 
-const scanFolder = async () => {
-  if (!subtitleFolder.value) return ElMessage.warning('请先选择字幕文件夹')
+const scanFolder = async (silent = false) => {
+  if (!subtitleFolder.value) {
+    if (!silent) ElMessage.warning('请先选择字幕文件夹')
+    return
+  }
   scanning.value = true
   scanResults.value = []
   try {
     const result = await asmrSyncApi.scan(subtitleFolder.value)
     if (result.success) {
       scanResults.value = result.items.map(item => ({ ...item, status: 'pending', previewing: false }))
-      ElMessage.success(`发现 ${result.total_found} 个作品`)
+      if (!silent) ElMessage.success(`发现 ${result.total_found} 个作品`)
     }
   } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '扫描失败')
+    // 页面加载时的自动扫描失败（如字幕文件夹未配置/不存在）不弹红色错误，
+    // 只在用户手动点“扫描”时提示具体原因。
+    if (!silent) ElMessage.error(error.response?.data?.detail || '扫描失败')
   } finally {
     scanning.value = false
   }
@@ -2785,7 +2795,7 @@ async function initializeASMRSyncPage () {
   if (baiduNetdiskWorkbenchTaskIds.value.length) await refreshBaiduNetdiskWorkbench()
   activeWorkspaceTab.value = normalizeWorkspaceTab(route.query?.tab)
   if (subtitleFolder.value) {
-    await scanFolder()
+    await scanFolder(true)
   }
   asmrSyncInitialized = true
 }
