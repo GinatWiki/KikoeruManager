@@ -264,6 +264,13 @@ class DesktopApp:
                 shutil.copy2(bundled_config, config_path)
                 logger.info(f"已从包内复制默认配置到: {config_path}")
 
+        # 迁移旧版内置模板遗留的开发者本机路径（已存在的旧配置同样生效）
+        try:
+            from backend.app.core.embedded_runtime import migrate_legacy_bundled_config_paths
+            migrate_legacy_bundled_config_paths(config_path)
+        except Exception:
+            logger.exception("迁移旧版模板路径失败")
+
         # 3. 启动后端线程
         try:
             from backend.app.core.embedded_runtime import bootstrap_embedded_runtime

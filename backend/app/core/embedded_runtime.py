@@ -614,6 +614,51 @@ def shutdown_embedded_runtime(timeout: float = 60.0) -> Dict[str, Any]:
     return summary
 
 
+# 旧版内置模板曾把开发者本机路径写进默认配置，随 exe 复制给了所有新装用户；
+# 这些值在其它机器上必然不存在。仅在“值仍是遗留模板写法且本机不存在该路径”时
+# 重置为默认值，避免误改用户真实配置。
+_LEGACY_BUNDLED_PATH_OVERRIDES: List[tuple] = [
+    ("storage", "input_path", "input"),
+    ("storage", "temp_path", "temp"),
+    ("storage", "library_path", "library"),
+    ("storage", "processed_archives_path", "processed"),
+    ("storage", "existing_folders_path", "existing"),
+    ("storage", "asmr_subtitle_path", ""),
+    ("extract", "seven_zip_path", "7z"),
+]
+
+
+def migrate_legacy_bundled_config_paths(config_path: Optional[str] = None) -> bool:
+    """把旧版内置模板遗留的开发者本机路径重置为默认值，返回是否发生过迁移。"""
+    try:
+        if config_path:
+            config_file = Path(config_path).resolve()
+        else:
+            data_path = Path(os.environ.get("DATA_PATH", "data")).resolve()
+            config_file = data_path / "config" / "config.yaml"
+        if not config_file.exists():
+            return False
+        cfg = _load_yaml(config_file)
+        if not cfg:
+            return False
+        changed = False
+        for section, key, default in _LEGACY_BUNDLED_PATH_OVERRIDES:
+            value = str((cfg.get(section) or {}).get(key) or "").strip()
+            if not value:
+                continue
+            is_legacy_template_value = ("D:\\VJC" in value) or value.startswith("E:\\0\\")
+            if is_legacy_template_value and not os.path.exists(value):
+                cfg.setdefault(section, {})[key] = default
+                changed = True
+        if changed:
+            _write_yaml_atomically(config_file, cfg)
+            logger.info("[内置运行环境] 已迁移旧版模板遗留路径为默认值: %s", config_file)
+        return changed
+    except Exception:
+        logger.warning("[内置运行环境] 迁移旧版模板路径失败", exc_info=True)
+        return False
+
+
 def bootstrap_embedded_runtime(
     data_dir: Optional[str] = None,
     config_path: Optional[str] = None,
@@ -651,7 +696,7 @@ def bootstrap_embedded_runtime(
     return summary
 
 
-__all__ = ["bootstrap_embedded_runtime", "shutdown_embedded_runtime"]
+__all__ = ["bootstrap_embedded_runtime", "shutdown_embedded_runtime", "migrate_legacy_bundled_config_paths"]
 
 
 # 解释器正常退出路径（非 os._exit）兜底停止本次启动的内置服务；
