@@ -1339,15 +1339,22 @@ const getResourceTypeLabel = (type) => {
 }
 
 const parseEnhancedRJCodes = () => {
-  // 从输入中提取合法 RJ/RVJ 编号，忽略表情、状态标记等杂质，
-  // 避免把 "RJ01144225🔴" 这类粘贴内容原样发给后端。
+  // 宽容解析 RJ 输入：兼容 RJ01144225 / 01144225 / 1144225 三种写法，
+  // 忽略表情、状态标记等杂质（如 "RJ01144225🔴"），并统一归一化成
+  // 规范编号（7 位补零到 8 位），避免脏数据原样发给后端。
+  const canonicalizeRjToken = (token) => {
+    const cleaned = String(token || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+    if (!cleaned) return null
+    const match = cleaned.match(/^([RVB]J)?(\d{6,8})$/)
+    if (!match) return null
+    const prefix = match[1] || 'RJ'
+    const digits = match[2].length === 7 ? match[2].padStart(8, '0') : match[2]
+    return `${prefix}${digits}`
+  }
   return [...new Set(
     (enhancedInput.value || '')
       .split(/[\s,，;；]+/)
-      .map(token => {
-        const match = token.toUpperCase().match(/[RVB]J\d{6,8}/)
-        return match ? match[0] : null
-      })
+      .map(canonicalizeRjToken)
       .filter(Boolean)
   )]
 }
@@ -1426,7 +1433,7 @@ const loadEnhancedSessions = async () => {
 
 const buildEnhancedPlans = async () => {
   const rjcodes = parseEnhancedRJCodes()
-  if (rjcodes.length === 0) return ElMessage.warning('请先输入至少一个 RJ 号')
+  if (rjcodes.length === 0) return ElMessage.warning('请先输入至少一个 RJ 号（支持 RJ01144225 / 01144225 / 1144225 三种写法）')
   enhancedPlanning.value = true
   try {
     const result = await asmrSyncApi.planEnhanced({

@@ -34,7 +34,7 @@
         :model-value="input"
         type="textarea"
         :rows="3"
-        placeholder="支持粘贴 RJ123456、RJ234567，空格 / 换行 / 逗号分隔"
+        placeholder="支持 RJ01144225 / 01144225 / 1144225，空格 / 换行 / 逗号分隔"
         class="enhanced-rj-input"
         @update:model-value="$emit('update:input', $event)"
       />
