@@ -1441,7 +1441,10 @@ const buildEnhancedPlans = async () => {
       }))
     }))
     if (result.errors?.length) {
-      ElMessage.warning(`已生成 ${result.planned_count} 个计划，${result.errors.length} 个 RJ 失败`)
+      const firstError = result.errors[0] || {}
+      const detail = [firstError.rjcode, firstError.error].filter(Boolean).join(' ')
+      const detailText = detail.length > 140 ? detail.slice(0, 140) + '…' : detail
+      ElMessage.warning(`已生成 ${result.planned_count} 个计划，${result.errors.length} 个 RJ 失败：${detailText}`)
     } else {
       ElMessage.success(`已生成 ${result.planned_count} 个增强下载计划`)
     }
