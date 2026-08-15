@@ -474,7 +474,7 @@ from ..core.library_index import (
     stop_library_index_mutation_service,
     stop_library_index_watcher_driver,
 )
-from ..core.rjcode_utils import extract_rjcode, extract_rjcode_from_path, scan_existing_folder_candidates
+from ..core.rjcode_utils import canonicalize_rj_input, extract_rjcode, extract_rjcode_from_path, scan_existing_folder_candidates
 from ..core.password_utils import (
     normalize_filename_value,
     normalize_optional_text,
@@ -19717,6 +19717,10 @@ async def asmr_sync_preview(request: Request):
         if not rjcode:
             raise HTTPException(status_code=400, detail="RJ号不能为空")
 
+        # 宽容归一化：兼容 RJ01144225 / 01144225 / 1144225 三种写法，
+        # 防止前端或旧版本客户端把未带前缀的编号原样传进来导致查询失败。
+        rjcode = canonicalize_rj_input(rjcode) or str(rjcode).strip().upper()
+
         asmr_service = get_asmr_download_service()
 
         # 获取所有关联版本
@@ -20052,7 +20056,8 @@ async def asmr_sync_enhanced_locate_rj(request: ASMRSyncLocateRJRequest):
     rjcodes_norm: list[str] = []
     seen: set[str] = set()
     for raw in request.rjcodes or []:
-        normalized = str(raw or "").strip().upper()
+        # 宽容归一化后再去重，避免 "01144225" 与 "RJ01144225" 被当成两个编号
+        normalized = canonicalize_rj_input(raw) or str(raw or "").strip().upper()
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
