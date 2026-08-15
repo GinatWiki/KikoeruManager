@@ -110,10 +110,14 @@ class ASMRDownloadService:
         return f"/tracks/{rjcode_num}"
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        """获取或创建 HTTP 会话"""
+        """获取或创建 HTTP 会话。
+
+        trust_env=True：未显式配置 asmr_sync.http_proxy 时自动跟随环境变量 /
+        系统代理（含 Windows 系统代理），用户开启梯子（系统代理模式）即可生效。
+        """
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(total=30, connect=10)
-            self._session = aiohttp.ClientSession(timeout=timeout)
+            self._session = aiohttp.ClientSession(timeout=timeout, trust_env=True)
         return self._session
 
     async def close(self):

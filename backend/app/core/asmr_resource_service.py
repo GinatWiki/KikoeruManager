@@ -615,10 +615,32 @@ class ASMRResourceService:
         }
 
     async def _fetch_remote_source_payload(self, normalized_rjcode: str) -> Tuple[Dict[str, Any], List[Any]]:
-        work_info = await self.asmr_service.fetch_work_info(normalized_rjcode)
+        fetch_with_status = getattr(self.asmr_service, "fetch_work_info_with_status", None)
+        if fetch_with_status is not None:
+            work_info, status = await fetch_with_status(normalized_rjcode)
+        else:  # pragma: no cover - 兼容注入的简易 mock
+            work_info = await self.asmr_service.fetch_work_info(normalized_rjcode)
+            status = "available" if work_info else "missing"
         if not work_info:
+            if str(status) == "unavailable":
+                raise RuntimeError(
+                    "无法连接 asmr.one API（网络不可达）。请检查网络；"
+                    "如使用代理请开启系统代理，或在设置-ASMR同步中配置 http_proxy"
+                )
             raise ValueError(f"未找到作品 {normalized_rjcode}")
-        tracks = await self.asmr_service.fetch_track_list(normalized_rjcode)
+        track_fetcher = getattr(self.asmr_service, "fetch_track_list_with_status", None)
+        if track_fetcher is not None:
+            tracks, track_status = await track_fetcher(normalized_rjcode)
+        else:  # pragma: no cover - 兼容注入的简易 mock
+            tracks = await self.asmr_service.fetch_track_list(normalized_rjcode)
+            track_status = "available" if tracks is not None else "missing"
+        if tracks is None:
+            if str(track_status) == "unavailable":
+                raise RuntimeError(
+                    "无法连接 asmr.one API（获取文件列表失败）。请检查网络；"
+                    "如使用代理请开启系统代理，或在设置-ASMR同步中配置 http_proxy"
+                )
+            tracks = []
         return dict(work_info or {}), list(tracks or [])
 
     async def _get_remote_source_payload(self, normalized_rjcode: str, *, refresh: bool = False) -> Tuple[Dict[str, Any], List[Any]]:
