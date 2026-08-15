@@ -8,6 +8,31 @@ NUMERIC_RJ_PATTERN = re.compile(r"^(\d{8}|\d{6})$")
 IGNORED_SCAN_DIRS = {"__macosx", "_conflicts", "subtitles", ".git", ".svn"}
 
 
+def canonicalize_rj_input(value: Any) -> Optional[str]:
+    """把用户输入的 RJ 编号归一化成标准形式，供搜索 / 下载链路使用。
+
+    兼容三种写法：``RJ01144225``、``01144225``、``1144225``（7 位自动补零
+    到 8 位）；同时忽略表情、状态标记等杂质字符（如 ``RJ01144225🔴``）。
+    6 位编号保持原样（旧作编号），不做补零。无法识别出合法编号时返回
+    ``None``。
+    """
+    text = str(value or "").strip().upper()
+    if not text:
+        return None
+
+    # 编号必须从串首或非字母数字字符后开始，避免从 9 位以上的长数字串
+    # 中间截出“伪 8 位编号”；同时兼容 "39.RJ01570159" 这类带杂质前缀的写法。
+    match = re.search(r"(?:^|[^A-Z0-9])([RVB]J)?(\d{6,8})(?!\d)", text)
+    if not match:
+        return None
+
+    prefix = match.group(1) or "RJ"
+    digits = match.group(2)
+    if len(digits) == 7:
+        digits = digits.zfill(8)
+    return f"{prefix}{digits}"
+
+
 def extract_rjcode(value: str) -> Optional[str]:
     """从文本或路径片段里提取 RJ/VJ/BJ 号，兼容纯数字目录名。"""
     text = str(value or "").strip()

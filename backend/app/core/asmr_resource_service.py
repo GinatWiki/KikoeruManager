@@ -17,6 +17,7 @@ from ..config.settings import get_config
 from ..models.database import ASMRDownloadSession, ASMRResourceRecord, ASMRWork, SessionLocal
 from .fs_utils import move_path_efficient
 from .resource_budget_service import get_resource_budget_service
+from .rjcode_utils import canonicalize_rj_input
 from .ttl_cache import TTLCache
 
 logger = logging.getLogger(__name__)
@@ -144,9 +145,13 @@ class ASMRResourceService:
         return client
 
     def normalize_rjcode(self, value: Any) -> str:
-        text = str(value or "").strip().upper()
-        match = re.search(r"[RVB]J(\d{6}|\d{8})(?!\d)", text, re.IGNORECASE)
-        return match.group(0).upper() if match else text
+        # 宽容归一化：兼容 RJ01144225 / 01144225 / 1144225 三种写法，
+        # 忽略表情、状态标记等杂质；识别失败时返回清洗后的原文本，
+        # 让下游按“无效编号”走失败提示而不是静默吞掉。
+        canonical = canonicalize_rj_input(value)
+        if canonical:
+            return canonical
+        return re.sub(r"[^A-Z0-9]", "", str(value or "").strip().upper())
 
     def normalize_name(self, value: Any) -> str:
         text = str(value or "").lower()

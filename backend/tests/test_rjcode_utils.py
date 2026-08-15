@@ -1,8 +1,38 @@
 from app.core.rjcode_utils import (
+    canonicalize_rj_input,
     extract_rjcode,
     extract_rjcode_from_path,
     scan_existing_folder_candidates,
 )
+
+
+def test_canonicalize_rj_input_supports_three_input_formats():
+    # 三种历史写法都要能搜索
+    assert canonicalize_rj_input("RJ01144225") == "RJ01144225"
+    assert canonicalize_rj_input("01144225") == "RJ01144225"
+    assert canonicalize_rj_input("1144225") == "RJ01144225"
+
+
+def test_canonicalize_rj_input_strips_impurities():
+    # 粘贴内容带表情 / 状态标记 / 大小写混乱时也能正确归一化
+    assert canonicalize_rj_input("RJ01144225🔴") == "RJ01144225"
+    assert canonicalize_rj_input("rj01144225") == "RJ01144225"
+    assert canonicalize_rj_input("RJ01144225 已下载") == "RJ01144225"
+    assert canonicalize_rj_input("🔴1144225") == "RJ01144225"
+
+
+def test_canonicalize_rj_input_keeps_six_digit_legacy_codes():
+    # 6 位旧作编号保持原样，不补零，避免查询到错误作品
+    assert canonicalize_rj_input("123456") == "RJ123456"
+    assert canonicalize_rj_input("RJ123456") == "RJ123456"
+    assert canonicalize_rj_input("VJ01570159") == "VJ01570159"
+
+
+def test_canonicalize_rj_input_rejects_invalid_input():
+    assert canonicalize_rj_input("") is None
+    assert canonicalize_rj_input("abc") is None
+    assert canonicalize_rj_input("12345") is None
+    assert canonicalize_rj_input("011442250") is None
 
 
 def _mkdir(path):
