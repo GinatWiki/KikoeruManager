@@ -616,6 +616,18 @@ async def health_check():
     }
 
 
+@app.get("/api/version/update-check")
+async def version_update_check():
+    """检查 GitHub 主发布仓库是否有比当前版本更新的 Release。
+
+    - 结果带内存缓存（成功 30 分钟 / 失败 5 分钟），避免打爆 GitHub 未认证限流。
+    - 网络不可达时返回 ``success=false``，前端静默忽略，不影响正常使用。
+    """
+    from ..core.update_check_service import check_for_updates
+
+    return await check_for_updates(get_app_version())
+
+
 # 注意：以下高频读接口刻意保持同步 def，让 FastAPI 调度到 starlette threadpool，
 # 而不是 async def 直接占用事件循环。配合 run.py 的 anyio threadpool=80，群晖
 # 慢 IO 场景下接口之间不再连环阻塞。
