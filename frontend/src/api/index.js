@@ -1676,6 +1676,10 @@ export const healthApi = {
   check: async () => {
     const response = await apiClient.get('/health')
     return response.data
+  },
+  checkUpdate: async () => {
+    const response = await apiClient.get('/version/update-check')
+    return response.data
   }
 }
 

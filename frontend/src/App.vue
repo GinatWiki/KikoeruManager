@@ -17,7 +17,12 @@
         </div>
         <div class="app-mobile-brand-copy">
           <span class="app-mobile-brand-text">KikoeruManager</span>
-          <span class="app-mobile-brand-version">{{ appVersionLabel }}</span>
+          <span
+            class="app-mobile-brand-version"
+            :class="{ 'is-update': updateInfo }"
+            :title="updateInfo ? `发现新版本 ${updateInfo.latestTag}，点击前往 GitHub Release` : ''"
+            @click="updateInfo && openUpdateRelease()"
+          >{{ appVersionLabel }}</span>
         </div>
       </div>
       <NotificationBell class="app-mobile-bell" />
@@ -46,7 +51,20 @@
           <div class="logo-copy">
             <span class="logo-text">KikoeruManager</span>
             <div class="logo-meta-row">
-              <span class="logo-subtitle">{{ appVersionLabel }}</span>
+              <button
+                v-if="updateInfo"
+                type="button"
+                class="logo-version is-update"
+                :title="`发现新版本 ${updateInfo.latestTag}，点击前往 GitHub Release`"
+                @click="openUpdateRelease"
+              >
+                <span class="logo-subtitle">{{ appVersionLabel }}</span>
+                <span class="logo-update-badge">
+                  <ArrowUpRight :size="11" :stroke-width="2.6" />
+                  <span>新版本 {{ updateInfo.latestTag }}</span>
+                </span>
+              </button>
+              <span v-else class="logo-subtitle">{{ appVersionLabel }}</span>
               <NotificationBell class="logo-bell" />
             </div>
           </div>
@@ -207,6 +225,7 @@ import {
   Boxes,
   Captions,
   ChevronsLeft,
+  ArrowUpRight,
   ChevronsRight,
   Download,
   FolderTree,
@@ -229,6 +248,7 @@ import AnimatedThemeToggler from './components/magicui/AnimatedThemeToggler.vue'
 import { useTheme } from './composables/useTheme'
 import { useRealtimeEvents } from './composables/useRealtimeEvents'
 import { useNotifications } from './composables/useNotifications'
+import { useUpdateCheck } from './composables/useUpdateCheck'
 import { healthApi, watcherApi } from './api'
 import router, { preloadRouteComponent } from './router'
 
@@ -244,6 +264,12 @@ const { applyTheme } = useTheme()
 
 const realtimeEvents = useRealtimeEvents()
 const { panelOpen: notificationPanelOpen } = useNotifications()
+const {
+  updateInfo,
+  openUpdateRelease,
+  startUpdateCheck,
+  stopUpdateCheck
+} = useUpdateCheck()
 let realtimeEventsStarted = false
 let unsubscribeWatcherStatus = null
 let unsubscribeRealtimeConnected = null
@@ -310,6 +336,7 @@ onMounted(async () => {
   applyTheme()
   await refreshAppVersion()
   if (isGateRoute.value) return
+  startUpdateCheck()
   if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', handleVisibilityChange)
   }
@@ -323,6 +350,7 @@ watch(isGateRoute, async (gateRoute) => {
   if (gateRoute) {
     stopRealtimeEvents()
     stopStatusPolling()
+    stopUpdateCheck()
     if (typeof document !== 'undefined') {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
@@ -332,6 +360,7 @@ watch(isGateRoute, async (gateRoute) => {
     document.addEventListener('visibilitychange', handleVisibilityChange)
   }
   startRealtimeEvents()
+  startUpdateCheck()
   await refreshStatus()
   startStatusPolling()
   scheduleRoutePreloading()
@@ -340,6 +369,7 @@ watch(isGateRoute, async (gateRoute) => {
 onUnmounted(() => {
   stopRealtimeEvents()
   stopStatusPolling()
+  stopUpdateCheck()
   cancelRoutePreloading()
   if (typeof document !== 'undefined') {
     document.removeEventListener('visibilitychange', handleVisibilityChange)
@@ -598,6 +628,11 @@ html.kikoerumanager-dark .sidebar-section-label,
 html.kikoerumanager-dark .sidebar-status-text,
 html.kikoerumanager-dark .app-mobile-brand-version {
   color: rgba(226, 232, 240, 0.62);
+}
+
+html.kikoerumanager-dark .logo-version.is-update .logo-subtitle,
+html.kikoerumanager-dark .app-mobile-brand-version.is-update {
+  color: #fbbf24;
 }
 
 html.kikoerumanager-dark .logo-mark,
@@ -5396,6 +5431,52 @@ html.kikoerumanager-dark .detail-body .path {
   white-space: nowrap;
 }
 
+/* 版本更新检测：发现新版本时版本标签高亮，点击跳转 GitHub Release */
+.logo-version {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1),
+    filter 0.3s ease;
+}
+.logo-version.is-update:hover {
+  transform: translateY(-2px) scale(1.02);
+}
+.logo-version.is-update:active {
+  transform: scale(0.96);
+}
+.logo-version.is-update .logo-subtitle {
+  color: #b45309;
+}
+.logo-update-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #fff;
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  animation: logo-update-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  white-space: nowrap;
+}
+@keyframes logo-update-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(217, 119, 6, 0.45); }
+  50% { box-shadow: 0 0 0 5px rgba(217, 119, 6, 0); }
+}
+
 .sidebar-section-label {
   display: block;
   height: 0;
@@ -6106,6 +6187,10 @@ html.kikoerumanager-dark .detail-body .path {
   .app-mobile-brand-version {
     font-size: 10px;
     color: rgba(15, 23, 42, 0.48);
+  }
+  .app-mobile-brand-version.is-update {
+    color: #d97706;
+    cursor: pointer;
   }
   .app-mobile-bell {
     flex-shrink: 0;
