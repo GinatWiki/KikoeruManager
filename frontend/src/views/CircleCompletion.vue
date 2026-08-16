@@ -1814,7 +1814,8 @@ function externalSearchWorkKey(circleId, canonical) {
 }
 
 function externalSearchResultTtl(payload = {}) {
-  const statuses = Object.values(payload || {}).map(source => String(source?.status || ''))
+  // 只看两个外部搜索来源的状态；variants 是版本分组数据，不参与缓存 TTL 判定
+  const statuses = ['anime_share', 'south_plus'].map(key => String(payload[key]?.status || ''))
   if (statuses.includes('pending')) return EXTERNAL_SEARCH_PENDING_CACHE_TTL
   if (statuses.includes('error')) return EXTERNAL_SEARCH_ERROR_CACHE_TTL
   if (statuses.includes('unavailable')) return EXTERNAL_SEARCH_UNAVAILABLE_CACHE_TTL
