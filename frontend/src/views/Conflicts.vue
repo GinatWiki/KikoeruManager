@@ -248,7 +248,7 @@
                   </span>
                 </div>
                 <p class="conflicts-detail-subtitle">
-                  <span class="conflicts-detail-dot" :class="isProblemConflict(activeConflict) ? 'is-danger' : 'is-info'"></span>
+                  <span class="conflicts-detail-dot" :class="getConflictDetailDotClass(activeConflict)"></span>
                   {{ getConflictTypeDetail(activeConflict) }}
                 </p>
               </div>
@@ -394,7 +394,7 @@
             <div
               v-if="isProblemConflict(activeConflict)"
               class="conflicts-detail-alert"
-              :class="isExtractFailed(activeConflict) ? 'is-warning' : 'is-danger'"
+              :class="(isExtractFailed(activeConflict) || isSubtitleDetectionConflict(activeConflict)) ? 'is-warning' : 'is-danger'"
             >
               <AlertTriangle class="w-5 h-5 flex-shrink-0 mt-0.5" :class="isExtractFailed(activeConflict) ? 'text-amber-500' : 'text-red-500'" />
               <div>
@@ -580,6 +580,40 @@
                   </div>
                 </section>
               </div>
+
+              <section v-if="isSubtitleDetectionConflict(activeConflict)" class="conflicts-detail-section conflicts-subtitle-conflicts">
+                <h4 class="conflicts-detail-section-title">
+                  <Captions class="w-4 h-4 text-slate-400" />
+                  字幕版本冲突清单
+                  <span class="conflicts-subtitle-conflicts-count">{{ getSubtitleDetectionConflicts(activeConflict).length }} 项</span>
+                </h4>
+                <p class="conflicts-subtitle-conflicts-hint">
+                  每个文件给出两种检测结论：目录/文件名标注与字幕内容检测不一致时，无法自动决定语言版本。请人工核对后选择「跳过」结束本条，或修正字幕文件后重新处理。
+                </p>
+                <div class="conflicts-subtitle-conflict-list">
+                  <div
+                    v-for="(item, index) in getSubtitleDetectionConflicts(activeConflict)"
+                    :key="`${activeConflict.id}-subtitle-${index}`"
+                    class="conflicts-subtitle-conflict-row"
+                  >
+                    <div class="conflicts-subtitle-conflict-main">
+                      <FileText class="w-4 h-4 flex-shrink-0 text-slate-400" />
+                      <span class="conflicts-subtitle-conflict-name" :title="item.path || ''">{{ item.file_text || item.name || '未知字幕文件' }}</span>
+                    </div>
+                    <div class="conflicts-subtitle-conflict-verdict">
+                      <span class="conflicts-subtitle-verdict-chip is-primary">
+                        <b>{{ item.primary_version || '未识别' }}</b>
+                        <em>{{ subtitleSourceLabel(item.primary_source) }}</em>
+                      </span>
+                      <ArrowRight class="conflicts-subtitle-verdict-arrow" :size="14" :stroke-width="2.4" />
+                      <span class="conflicts-subtitle-verdict-chip is-verify">
+                        <b>{{ item.verification_version || '未识别' }}</b>
+                        <em>{{ subtitleSourceLabel(item.verification_source) }}</em>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </section>
             </section>
           </div>
         </section>
@@ -762,7 +796,7 @@ import {
   GitMerge, AlertTriangle, FolderOpen, Archive, Info,
   CheckSquare, XSquare, ChevronRight, FileSearch,
   ShieldAlert, Hourglass, Loader2, FileText,
-  Folder, Music, File, X, FileEdit,
+  Folder, Music, File, X, FileEdit, Captions, ArrowRight,
 } from 'lucide-vue-next'
 import ConflictMergeWorkbench from '../components/conflicts/ConflictMergeWorkbench.vue'
 import BatchRetryPasswordDialog from '../components/conflicts/BatchRetryPasswordDialog.vue'
@@ -1283,18 +1317,51 @@ function isFailureConflict(conflict) {
   return ['EXTRACT_FAILED', 'PROCESS_FAILED'].includes(conflict?.conflict_type)
 }
 
+// 字幕版本检测冲突：字幕同步时目录/文件名标注与内容检测结论不一致，
+// 后端会写入 subtitle_detection_conflicts 清单，且只开放 SKIP 操作。
+function isSubtitleDetectionConflict(conflict) {
+  const meta = conflict?.new_metadata || {}
+  return meta.failure_stage === 'subtitle_sync'
+    && Array.isArray(meta.subtitle_detection_conflicts)
+    && meta.subtitle_detection_conflicts.length > 0
+}
+
+function getSubtitleDetectionConflicts(conflict) {
+  const list = conflict?.new_metadata?.subtitle_detection_conflicts
+  return Array.isArray(list) ? list.filter(item => item && typeof item === 'object') : []
+}
+
+function subtitleSourceLabel(source) {
+  const labels = {
+    content: '内容检测',
+    folder_or_filename: '目录/文件名',
+    filename_chars: '文件名字符',
+    none: '未识别',
+  }
+  return labels[source] || String(source || '未知')
+}
+
 function isProblemConflict(conflict) {
-  return isFailureConflict(conflict) || isDisguisedVolumeConflict(conflict)
+  return isFailureConflict(conflict) || isDisguisedVolumeConflict(conflict) || isSubtitleDetectionConflict(conflict)
+}
+
+function getConflictDetailDotClass(conflict) {
+  if (isSubtitleDetectionConflict(conflict)) return 'is-warning'
+  return isProblemConflict(conflict) ? 'is-danger' : 'is-info'
 }
 
 function getProblemConflictAlertTitle(conflict) {
   if (isDisguisedVolumeConflict(conflict)) return '分卷压缩包命名异常，非重复冲突'
+  if (isSubtitleDetectionConflict(conflict)) return '字幕版本检测冲突，非重复冲突'
   return isExtractFailed(conflict) ? '解压阶段失败，非重复冲突' : '处理中途失败，非重复冲突'
 }
 
 function getProblemConflictAlertMessage(conflict) {
   if (isDisguisedVolumeConflict(conflict)) {
     return '检测到疑似分卷压缩包，但部分分卷后缀被伪装或无法识别。请使用“手动重命名分卷”确认文件名后再重试。'
+  }
+  if (isSubtitleDetectionConflict(conflict)) {
+    return '同批字幕中，部分文件的目录/文件名标注与文件内容检测结论不一致，无法自动决定语言版本。请查看下方冲突清单，人工核对后处理。'
   }
   return isExtractFailed(conflict) ? '请检查密码、分卷完整性或压缩包本身是否损坏。' : '请按失败原因修复后重试。'
 }
@@ -2747,6 +2814,9 @@ function getConflictTypeLabel(type) {
 //      翻译版没有补配价值的场景）
 // 这里把这两类都给出比"关联作品"更明确的描述。
 function getConflictTypeDetail(conflict) {
+  if (isSubtitleDetectionConflict(conflict)) {
+    return '字幕版本检测冲突'
+  }
   const type = String(conflict?.conflict_type || '').toUpperCase()
   const analysis = conflict?.analysis_info || {}
   const linked = Array.isArray(conflict?.linked_works_info) ? conflict.linked_works_info : []
@@ -3744,6 +3814,7 @@ button:disabled {
 }
 .conflicts-detail-dot.is-info { background: #0284c7; box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.15); }
 .conflicts-detail-dot.is-danger { background: #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15); }
+.conflicts-detail-dot.is-warning { background: #f59e0b; box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.15); }
 
 /* 顶部操作按钮：详情区主变量 */
 .conflicts-detail-actions {
@@ -4805,6 +4876,120 @@ button:disabled {
 
 @media (min-width: 1280px) {
   .conflicts-detail-panel-grid { grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr); }
+}
+
+/* 字幕版本检测冲突清单：整宽排在详情网格下方 */
+.conflicts-subtitle-conflicts {
+  border-top: 1px solid rgba(15, 23, 42, 0.09);
+  padding-top: 16px;
+}
+.conflicts-subtitle-conflicts-count {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.14);
+  white-space: nowrap;
+}
+.conflicts-subtitle-conflicts-hint {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: #64748b;
+}
+.conflicts-subtitle-conflict-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 380px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.conflicts-subtitle-conflict-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 14px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.72);
+  transition:
+    border-color 0.25s ease,
+    background 0.25s ease,
+    transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.conflicts-subtitle-conflict-row:hover {
+  border-color: rgba(2, 132, 199, 0.28);
+  background: rgba(240, 249, 255, 0.9);
+  transform: translateY(-1px);
+}
+.conflicts-subtitle-conflict-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+.conflicts-subtitle-conflict-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 620;
+  color: #334155;
+}
+.conflicts-subtitle-conflict-verdict {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.conflicts-subtitle-verdict-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.conflicts-subtitle-verdict-chip b {
+  font-weight: 760;
+}
+.conflicts-subtitle-verdict-chip em {
+  font-style: normal;
+  font-size: 10px;
+  opacity: 0.78;
+}
+.conflicts-subtitle-verdict-chip.is-primary {
+  color: #075985;
+  background: rgba(14, 165, 233, 0.12);
+}
+.conflicts-subtitle-verdict-chip.is-verify {
+  color: #92400e;
+  background: rgba(245, 158, 11, 0.16);
+}
+.conflicts-subtitle-verdict-arrow {
+  color: #94a3b8;
+  flex-shrink: 0;
+}
+
+@media (max-width: 720px) {
+  .conflicts-subtitle-conflict-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .conflicts-subtitle-conflict-verdict {
+    flex-wrap: wrap;
+  }
 }
 
 .conflicts-detail-section {
