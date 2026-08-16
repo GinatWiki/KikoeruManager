@@ -3246,6 +3246,30 @@ class TaskEngine:
                 else:
                     logger.info(f"[{rjcode}] 步骤[过滤]已禁用，跳过")
 
+                # 步骤4.5: 音频查重（过滤之后、扁平化之前执行）。
+                # 扁平化会破坏语言目录层级，分类会移入库存，所以必须在这里做；
+                # 被清理的文件走过滤恢复区，任务详情可还原。
+                if getattr(config.filter, "audio_dedup", True):
+                    from .audio_dedup_service import deduplicate_audio_versions
+
+                    dedup_result = await deduplicate_audio_versions(renamed_path, task)
+                    removed_count = int((dedup_result or {}).get("removed_count") or 0)
+                    if removed_count > 0:
+                        dedup_items = list((dedup_result or {}).get("removed_items") or [])
+                        dedup_size = sum(int(item.get("size") or 0) for item in dedup_items)
+                        task.task_metadata = {
+                            **(task.task_metadata or {}),
+                            "filtered_items": [
+                                *((task.task_metadata or {}).get("filtered_items") or []),
+                                *dedup_items,
+                            ],
+                            "filtered_count": int((task.task_metadata or {}).get("filtered_count") or 0) + removed_count,
+                            "filtered_size": int((task.task_metadata or {}).get("filtered_size") or 0) + dedup_size,
+                            "audio_dedup_removed": removed_count,
+                        }
+                        task.update_progress(76, f"音频查重完成，清理 {removed_count} 个重复音频")
+                        logger.info("[%s] 音频查重清理 %s 个重复音频", rjcode, removed_count)
+
                 await task.wait_if_paused()
                 if task.is_cancelled():
                     return
@@ -3553,6 +3577,28 @@ class TaskEngine:
                     }
                 else:
                     logger.info(f"[{rjcode}] 步骤[过滤]已禁用，跳过")
+
+                # 步骤3.5: 音频查重（过滤之后、扁平化之前执行，优先保留简体中文版本）
+                if getattr(config.filter, "audio_dedup", True):
+                    from .audio_dedup_service import deduplicate_audio_versions
+
+                    dedup_result = await deduplicate_audio_versions(renamed_path, task)
+                    removed_count = int((dedup_result or {}).get("removed_count") or 0)
+                    if removed_count > 0:
+                        dedup_items = list((dedup_result or {}).get("removed_items") or [])
+                        dedup_size = sum(int(item.get("size") or 0) for item in dedup_items)
+                        task.task_metadata = {
+                            **(task.task_metadata or {}),
+                            "filtered_items": [
+                                *((task.task_metadata or {}).get("filtered_items") or []),
+                                *dedup_items,
+                            ],
+                            "filtered_count": int((task.task_metadata or {}).get("filtered_count") or 0) + removed_count,
+                            "filtered_size": int((task.task_metadata or {}).get("filtered_size") or 0) + dedup_size,
+                            "audio_dedup_removed": removed_count,
+                        }
+                        task.update_progress(74, f"音频查重完成，清理 {removed_count} 个重复音频")
+                        logger.info("[%s] 音频查重清理 %s 个重复音频", rjcode, removed_count)
 
                 await task.wait_if_paused()
                 if task.is_cancelled():

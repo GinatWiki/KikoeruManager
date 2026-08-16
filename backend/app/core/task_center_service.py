@@ -115,6 +115,7 @@ class TaskCenterService:
         "final_output_path",
         "renamed_output_path",
         "output_finalize_status",
+        "target_library_id",
         "svip_speed",
         # Redis runtime overlay: summary 模式也要保留工作台需要的活跃运行态
         "download_runtime",

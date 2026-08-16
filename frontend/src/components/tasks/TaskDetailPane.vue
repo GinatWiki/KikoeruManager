@@ -328,7 +328,7 @@
                 'tree-row-restored': entry.status === 'restored',
               }"
               :style="{ paddingLeft: `${entry.depth * 16 + 8}px` }"
-              @contextmenu.prevent.stop="openRestoreMenu($event, entry)"
+              @contextmenu.prevent.stop="openEntryMenu($event, entry, section)"
             >
               <div class="tree-main">
                 <button
@@ -407,29 +407,42 @@
 
   <Teleport to="body">
     <div
-      v-if="restoreMenu"
+      v-if="entryMenu"
       class="task-filter-restore-menu"
-      :style="{ left: `${restoreMenu.x}px`, top: `${restoreMenu.y}px` }"
+      :style="{ left: `${entryMenu.x}px`, top: `${entryMenu.y}px` }"
       @click.stop
       @contextmenu.prevent.stop
     >
-      <button
-        type="button"
-        class="task-filter-restore-menu__action"
-        :disabled="!restoreMenu.availability.enabled || restoringRecoveryId === restoreEntryKey(restoreMenu.entry)"
-        @click="restoreSelectedEntry"
-      >
-        <RefreshCw
-          v-if="restoringRecoveryId === restoreEntryKey(restoreMenu.entry)"
-          :size="15"
-          class="animate-spin"
-        />
-        <RotateCcw v-else :size="15" :stroke-width="2.3" />
-        <span>{{ restoreMenu.entry.type === 'dir' ? '还原目录' : '还原文件' }}</span>
-      </button>
-      <div v-if="!restoreMenu.availability.enabled" class="task-filter-restore-menu__hint">
-        {{ restoreMenu.availability.reason }}
-      </div>
+      <template v-if="entryMenu.kind === 'restore'">
+        <button
+          type="button"
+          class="task-filter-restore-menu__action"
+          :disabled="!entryMenu.availability.enabled || restoringRecoveryId === restoreEntryKey(entryMenu.entry)"
+          @click="restoreSelectedEntry"
+        >
+          <RefreshCw
+            v-if="restoringRecoveryId === restoreEntryKey(entryMenu.entry)"
+            :size="15"
+            class="animate-spin"
+          />
+          <RotateCcw v-else :size="15" :stroke-width="2.3" />
+          <span>{{ entryMenu.entry.type === 'dir' ? '还原目录' : '还原文件' }}</span>
+        </button>
+        <div v-if="!entryMenu.availability.enabled" class="task-filter-restore-menu__hint">
+          {{ entryMenu.availability.reason }}
+        </div>
+      </template>
+      <template v-else>
+        <button
+          type="button"
+          class="task-filter-restore-menu__action is-danger"
+          @click="deleteSelectedEntry"
+        >
+          <Trash2 :size="15" :stroke-width="2.3" />
+          <span>{{ isTreeDirectory(entryMenu.entry) ? '删除目录' : '删除文件' }}</span>
+        </button>
+        <div class="task-filter-restore-menu__hint">从库存中删除，不可恢复</div>
+      </template>
     </div>
   </Teleport>
 </template>
@@ -482,34 +495,64 @@ const emit = defineEmits([
   'expand-section',
   'toggle-node',
   'restore-filtered',
+  'delete-library-file',
 ])
 
-const restoreMenu = ref(null)
+const entryMenu = ref(null)
 
-function openRestoreMenu(event, entry) {
-  if (!['removed', 'restored'].includes(entry?.status)) {
-    restoreMenu.value = null
-    return
-  }
-  const width = 210
-  const height = 86
-  restoreMenu.value = {
-    entry,
-    availability: getFilterRestoreAvailability(entry, props.item),
+function menuPosition(event, width = 210, height = 96) {
+  return {
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
     y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
   }
 }
 
-function closeRestoreMenu() {
-  restoreMenu.value = null
+function canDeleteLibraryEntry(entry, section) {
+  if (String(props.item?.status || '').toLowerCase() !== 'completed') return false
+  if (String(section?.snapshotKind || '') !== 'final') return false
+  if (entry?.status !== 'default') return false
+  return true
+}
+
+function openEntryMenu(event, entry, section) {
+  if (['removed', 'restored'].includes(entry?.status)) {
+    entryMenu.value = {
+      kind: 'restore',
+      entry,
+      availability: getFilterRestoreAvailability(entry, props.item),
+      ...menuPosition(event, 210, 96),
+    }
+    return
+  }
+  if (canDeleteLibraryEntry(entry, section)) {
+    entryMenu.value = {
+      kind: 'delete',
+      entry,
+      section,
+      ...menuPosition(event, 210, 66),
+    }
+    return
+  }
+  entryMenu.value = null
+}
+
+function closeEntryMenu() {
+  entryMenu.value = null
 }
 
 function restoreSelectedEntry() {
-  const current = restoreMenu.value
+  const current = entryMenu.value
+  if (!current || current.kind !== 'restore') return
   if (!current?.availability?.enabled || props.restoringRecoveryId === restoreEntryKey(current.entry)) return
   emit('restore-filtered', { entry: current.entry })
-  closeRestoreMenu()
+  closeEntryMenu()
+}
+
+function deleteSelectedEntry() {
+  const current = entryMenu.value
+  if (!current || current.kind !== 'delete') return
+  emit('delete-library-file', { entry: current.entry, section: current.section })
+  closeEntryMenu()
 }
 
 function restoreEntryKey(entry) {
@@ -517,17 +560,17 @@ function restoreEntryKey(entry) {
 }
 
 onMounted(() => {
-  document.addEventListener('click', closeRestoreMenu)
-  document.addEventListener('contextmenu', closeRestoreMenu)
-  window.addEventListener('resize', closeRestoreMenu)
-  window.addEventListener('scroll', closeRestoreMenu, true)
+  document.addEventListener('click', closeEntryMenu)
+  document.addEventListener('contextmenu', closeEntryMenu)
+  window.addEventListener('resize', closeEntryMenu)
+  window.addEventListener('scroll', closeEntryMenu, true)
 })
 
 onUnmounted(() => {
-  document.removeEventListener('click', closeRestoreMenu)
-  document.removeEventListener('contextmenu', closeRestoreMenu)
-  window.removeEventListener('resize', closeRestoreMenu)
-  window.removeEventListener('scroll', closeRestoreMenu, true)
+  document.removeEventListener('click', closeEntryMenu)
+  document.removeEventListener('contextmenu', closeEntryMenu)
+  window.removeEventListener('resize', closeEntryMenu)
+  window.removeEventListener('scroll', closeEntryMenu, true)
 })
 
 function domainMeta(domain) {
@@ -1149,6 +1192,15 @@ function actionToneClass(action) {
   transform: translateY(-2px) scale(1.02);
 }
 
+:global(.task-filter-restore-menu__action.is-danger) {
+  color: #dc2626;
+}
+
+:global(.task-filter-restore-menu__action.is-danger:hover:not(:disabled)) {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
 :global(.task-filter-restore-menu__action:active:not(:disabled)) {
   transform: scale(0.96);
 }
@@ -1349,6 +1401,15 @@ function actionToneClass(action) {
 
 :global(html.kikoerumanager-dark body .task-filter-restore-menu__action:hover:not(:disabled)) {
   background: rgba(6, 78, 59, 0.42);
+}
+
+:global(html.kikoerumanager-dark body .task-filter-restore-menu__action.is-danger) {
+  color: #fda4af;
+}
+
+:global(html.kikoerumanager-dark body .task-filter-restore-menu__action.is-danger:hover:not(:disabled)) {
+  background: rgba(136, 19, 55, 0.5);
+  color: #fecdd3;
 }
 
 :global(html.kikoerumanager-dark body .task-filter-restore-menu__action:disabled),

@@ -64,6 +64,7 @@
         @expand-section="setTreeSectionExpanded"
         @toggle-node="toggleTreeNode"
         @restore-filtered="handleRestoreFilteredItem"
+        @delete-library-file="handleDeleteLibraryEntry"
       />
     </section>
   </div>
@@ -86,7 +87,7 @@ import {
   Upload,
   UploadCloud,
 } from 'lucide-vue-next'
-import { taskCenterApi } from '../api'
+import { libraryApi, taskCenterApi } from '../api'
 import TasksHeader from '../components/tasks/TasksHeader.vue'
 import TasksFilters from '../components/tasks/TasksFilters.vue'
 import TaskListPane from '../components/tasks/TaskListPane.vue'
@@ -1365,6 +1366,7 @@ function buildTaskFileTreeSections(item) {
     key: 'file-list',
     label: snapshot.label,
     snapshotKind: snapshot.kind,
+    rootLabel,
     rows: buildTreeRows(filtered),
     totalCount: mergedItems.length,
     removedCount,
@@ -1508,6 +1510,61 @@ async function handleRestoreFilteredItem({ entry }) {
     ElMessage.error('还原失败: ' + (error.response?.data?.detail || error.message))
   } finally {
     restoringRecoveryId.value = ''
+  }
+}
+
+function taskTreeRowRelativePath(entry, section) {
+  const rootLabel = normalizeTaskFileTreePath(section?.rootLabel || '')
+  const rowPath = normalizeTaskFileTreePath(entry?.relative_path || '')
+  if (!rootLabel) return rowPath
+  if (rowPath.toLowerCase() === rootLabel.toLowerCase()) return ''
+  if (rowPath.toLowerCase().startsWith(`${rootLabel.toLowerCase()}/`)) {
+    return rowPath.slice(rootLabel.length + 1)
+  }
+  return rowPath
+}
+
+function buildTaskLibraryDeleteMessage(preview) {
+  const targetLabel = preview?.type === 'folder' ? '文件夹' : '文件'
+  const sizeText = Number(preview?.size) > 0 ? `\n大小: ${formatBytes(Number(preview.size))}` : ''
+  return `确定删除此${targetLabel}吗？\n名称: ${preview?.name || '-'}${sizeText}\n\n此操作不可恢复！`
+}
+
+async function handleDeleteLibraryEntry({ entry, section }) {
+  const item = selectedItem.value
+  if (!item) return
+  if (String(item?.status || '') !== 'completed') {
+    ElMessage.warning('仅已完成任务支持删除库存文件')
+    return
+  }
+  const outputRoot = getOutputPath(item)
+  if (!outputRoot) {
+    ElMessage.warning('未找到任务输出路径')
+    return
+  }
+  const relative = taskTreeRowRelativePath(entry, section)
+  const absolutePath = relative
+    ? `${String(outputRoot).replace(/[\\/]+$/, '')}/${relative}`
+    : String(outputRoot)
+  const metadata = item?.details?.metadata || {}
+  const libraryId = String(metadata.target_library_id || '').trim() || null
+  try {
+    const preview = await libraryApi.browserDelete(libraryId, absolutePath, false)
+    await showSystemConfirm({
+      title: '删除库存文件',
+      message: buildTaskLibraryDeleteMessage(preview),
+      tone: 'danger',
+      confirmText: '确定删除',
+      cancelText: '取消',
+    })
+    await libraryApi.browserDelete(libraryId, absolutePath, true)
+    ElMessage.success('删除成功')
+    await fetchSelectedItemDetail(item.id, { force: true, silent: true })
+    await refreshTaskCenter(false, { silent: true })
+  } catch (error) {
+    if (error === 'cancel' || error?.message === 'cancel') return
+    console.error('删除库存文件失败:', error)
+    ElMessage.error('删除失败: ' + (error.response?.data?.detail || error.message || error))
   }
 }
 

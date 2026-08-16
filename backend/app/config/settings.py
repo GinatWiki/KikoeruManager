@@ -1,4 +1,4 @@
-﻿import os
+import os
 import yaml
 import logging
 import threading
@@ -166,6 +166,8 @@ class FilterConfig(BaseModel):
     enabled: bool = True
     filter_dir: bool = True
     rules: list[FilterRule] = []
+    # 音频查重：清理重复音频，优先保留简体中文目录版本（被清理文件可还原）
+    audio_dedup: bool = True
 
 class MetadataConfig(BaseModel):
     """元数据配置"""

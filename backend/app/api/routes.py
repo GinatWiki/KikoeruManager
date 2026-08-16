@@ -9044,6 +9044,28 @@ def _local_relative_path(library, absolute_path: str) -> str:
     return "" if relative == "." else relative.strip("/")
 
 
+def _resolve_local_library_id_for_path(manager, absolute_path: str) -> Optional[str]:
+    """按绝对路径解析所属本地库存 ID；无匹配返回 None。"""
+    if not absolute_path:
+        return None
+    try:
+        target = os.path.abspath(absolute_path)
+        for library in manager.list_libraries():
+            if str(library.get("type") or "").lower() != "local":
+                continue
+            root = str(library.get("root_path") or "").strip()
+            if not root:
+                continue
+            try:
+                if os.path.normcase(os.path.commonpath([os.path.abspath(root), target])) == os.path.normcase(os.path.abspath(root)):
+                    return library.get("id")
+            except ValueError:
+                continue
+    except Exception as exc:
+        logger.warning("按路径解析库存失败: path=%s error=%s", absolute_path, exc)
+    return None
+
+
 def _local_rename_effects(library, source_path: str, target_path: str) -> List[Dict[str, Any]]:
     scope = "subtree" if os.path.isdir(source_path) else "exact"
     relative_target = _local_relative_path(library, target_path)
@@ -11633,6 +11655,11 @@ async def delete_library_browser_item(request: Request):
         if not path:
             raise HTTPException(status_code=400, detail="缺少路径")
         manager = get_library_manager()
+        # 任务中心等场景只拿到绝对路径时，自动解析所属本地库存。
+        # 解析不到则保持 None，交由下方 get_library_definition 默认库兜底 +
+        # manager.delete 的越界校验拦截非法路径。
+        if not library_id:
+            library_id = _resolve_local_library_id_for_path(manager, path)
         library = manager.get_library_definition(library_id)
         prepared = None
         mutation_effect = None
