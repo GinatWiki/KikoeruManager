@@ -5501,64 +5501,6 @@ class TaskEngine:
         except Exception as e:
             logger.error(f"归档压缩包失败: {e}")
 
-    def _sort_volumes_for_archive(self, files: List[str]) -> List[str]:
-        """归档时把分卷文件按"首卷优先"排序。
-
-        排序约定（数字越小越靠前，即越靠近"首卷"）：
-        - 0/1: .partN.ext / .partN  -> 按 N 升序，.part1 必然最小
-        - 2:   .7z.NNN              -> 按 NNN 升序，.001 在最前
-        - 3:   .exe 主卷             -> 在 .eNN 之前
-        - 4:   .eNN                 -> 按 N 升序
-        - 5:   .zip 主卷             -> 在 .zXX 之前
-        - 6:   .zXX                 -> 按 N 升序
-        - 7:   .rar 主卷             -> 在 .rXX 之前
-        - 8:   .rXX                 -> 按 N 升序
-        - 9:   其他单文件 / 未知格式
-
-        排序结果保证 list[0] 是分卷组首卷，后续写 ProcessedArchive 记录时
-        以 list[0] 的文件名为主键，可避免同组多卷各产生一条独立记录。
-        """
-
-        def key(path: str) -> Tuple[int, int, str]:
-            name = os.path.basename(path).lower()
-
-            m = re.search(r'\.part(\d+)\.(rar|zip|7z|exe)$', name, re.IGNORECASE)
-            if m:
-                return (0, int(m.group(1)), name)
-
-            m = re.search(r'\.part(\d+)$', name, re.IGNORECASE)
-            if m:
-                return (1, int(m.group(1)), name)
-
-            m = re.search(r'\.7z\.(\d{3})$', name, re.IGNORECASE)
-            if m:
-                return (2, int(m.group(1)), name)
-
-            if name.endswith('.exe'):
-                return (3, 0, name)
-
-            m = re.search(r'\.e(\d{2})$', name, re.IGNORECASE)
-            if m:
-                return (4, int(m.group(1)), name)
-
-            if name.endswith('.zip'):
-                return (5, 0, name)
-
-            m = re.search(r'\.z(\d{2})$', name, re.IGNORECASE)
-            if m:
-                return (6, int(m.group(1)), name)
-
-            if name.endswith('.rar'):
-                return (7, 0, name)
-
-            m = re.search(r'\.r(\d{2})$', name, re.IGNORECASE)
-            if m:
-                return (8, int(m.group(1)), name)
-
-            return (9, 0, name)
-
-        return sorted(files, key=key)
-
     def _record_subtitle_sync_detection_conflicts(self, task: Task, rjcode: str, conflicts: list) -> None:
         """字幕版本检测结论完全冲突时写入问题作品，等待人工确认。"""
         if not conflicts:
