@@ -6068,6 +6068,117 @@ class CircleCompletionService:
     # 入口只负责派发后台刷新，当前社团拥有态在写入前用 ready 库存索引局部核对。
     _LOCAL_OWNED_SYNC_TTL_SECONDS: float = 30 * 60
 
+    # 每次全量重建时，远程 kikoeru 兑底最多探测的作品数（按 updated_at 取最新）。
+    # kikoeru 服务内部自带 8 并发信号量、5 分钟结果缓存与 in-flight 去重。
+    _REMOTE_KIKOERU_FALLBACK_MAX_PER_SYNC = 300
+
+    async def _merge_remote_kikoeru_owned(
+        self,
+        merged: Dict[str, Dict[str, Any]],
+        circle_rows,
+        related_canonicals_by_rj: Dict[str, Set[str]],
+    ) -> None:
+        """本地库存索引未命中的作品，用远程 kikoeru 服务器检查兑底。
+
+        kikoeru 库里的作品可能以不含 RJ 号的命名存在（纯标题/译名等），
+        本地库存索引按 RJ 号匹配不到；kikoeru 服务器检查按作品 ID/关键词
+        搜索且天然包含多版本，命中即视为已收录，避免误判缺失。
+        """
+        from .kikoeru_duplicate_service import get_kikoeru_service
+
+        service = get_kikoeru_service()
+        service_config = getattr(service, "config", None)
+        if (
+            service_config is None
+            or not bool(getattr(service_config, "enabled", False))
+            or not str(getattr(service_config, "server_url", "") or "").strip()
+        ):
+            logger.info("[社团补全] 远程 kikoeru 未配置，跳过远程收录兑底")
+            return
+
+        locally_owned_codes = {
+            code
+            for bucket in merged.values()
+            for code in (bucket.get("owned_rjcodes") or set())
+        }
+        pending_rows = [
+            row
+            for row in circle_rows
+            if self.normalize_rjcode(row.canonical_rjcode)
+            and self.normalize_rjcode(row.canonical_rjcode) not in locally_owned_codes
+        ]
+        pending_rows = sorted(
+            pending_rows,
+            key=lambda row: getattr(row, "updated_at", None) or datetime.min,
+            reverse=True,
+        )
+        pending_rows = pending_rows[: self._REMOTE_KIKOERU_FALLBACK_MAX_PER_SYNC]
+        if not pending_rows:
+            return
+
+        semaphore = asyncio.Semaphore(8)
+
+        async def _probe(row) -> Optional[Dict[str, str]]:
+            canonical = self.normalize_rjcode(row.canonical_rjcode)
+            linked = {
+                self.normalize_rjcode(code)
+                for code in list(row.linked_rjcodes or [])
+                if self.normalize_rjcode(code)
+            }
+            try:
+                async with semaphore:
+                    # 按 RJ + 关联链远程检查：kikoeru 服务器内的作品都带 RJ 元数据，
+                    # 即使本地文件夹命名不含 RJ 也能命中（含多版本广义匹配）。
+                    result = await service.check_duplicate(
+                        canonical,
+                        use_cache=True,
+                        extra_match_rjcodes=linked,
+                    )
+            except Exception as exc:
+                logger.debug("[社团补全] 远程 kikoeru 检查失败 rj=%s: %s", canonical, exc)
+                return None
+            if not result.is_found:
+                return None
+            return {
+                "canonical": canonical,
+                "matched_rjcode": self.normalize_rjcode(result.matched_rjcode) or canonical,
+                "match_type": str(getattr(result, "match_type", "") or "exact"),
+            }
+
+        probes = await asyncio.gather(
+            *[_probe(row) for row in pending_rows],
+            return_exceptions=True,
+        )
+        hit_count = 0
+        for probe in probes:
+            if isinstance(probe, Exception) or not probe:
+                continue
+            canonical = probe["canonical"]
+            target_canonicals = {canonical}
+            target_canonicals.update(related_canonicals_by_rj.get(canonical, set()))
+            target_canonicals.update(related_canonicals_by_rj.get(probe["matched_rjcode"], set()))
+            for target in sorted(code for code in target_canonicals if code):
+                bucket = merged.setdefault(target, {
+                    "owned_rjcodes": set(),
+                    "owned_paths": [],
+                    "primary_folder_path": "",
+                    "primary_library_id": "",
+                    "folder_count": 0,
+                    "folder_size": 0,
+                    "file_count": 0,
+                    "has_local_subtitles": False,
+                    "subtitle_file_count": 0,
+                    "subtitle_dir": "",
+                })
+                if canonical not in bucket["owned_rjcodes"]:
+                    bucket["owned_rjcodes"].add(canonical)
+                    hit_count += 1
+        if hit_count:
+            logger.info(
+                "[社团补全] 远程 kikoeru 收录兑底命中 %s 个作品（match_type 分布见日志）",
+                hit_count,
+            )
+
     def _is_local_owned_index_fresh(self) -> bool:
         last = float(self._local_owned_sync_state.get("last_completed_at") or 0.0)
         if last <= 0.0:
@@ -6201,6 +6312,23 @@ class CircleCompletionService:
         ]
         if merge_tasks:
             await asyncio.gather(*merge_tasks)
+
+        # 远程 kikoeru 兑底：本地库存索引未命中的作品，交给 kikoeru 服务器检查。
+        # kikoeru 库里的作品可能以不含 RJ 号的命名存在（纯标题/译名等），
+        # 本地索引按 RJ 号匹配不到；kikoeru 服务器检查按作品 ID/关键词搜索且
+        # 天然包含多版本，命中即视为已收录，避免误判缺失。
+        try:
+            await self._merge_remote_kikoeru_owned(
+                merged,
+                circle_rows,
+                related_canonicals_by_rj,
+            )
+        except Exception:
+            logger.warning(
+                "[社团补全] 远程 kikoeru 收录兑底失败，保持本地索引结果",
+                exc_info=True,
+            )
+
         if not merged:
             logger.info("[社团补全] ready 库存索引无命中，清空本地拥有态快照")
 
@@ -8725,6 +8853,82 @@ class CircleCompletionService:
                 pass
         return self._download_preview_job_snapshot(payload)
 
+    async def _remote_kikoeru_owned_for_items(
+        self,
+        items_by_canonical: Dict[str, Dict[str, Any]],
+        rows,
+    ) -> Dict[str, str]:
+        """对本地库存索引未命中的作品，按 RJ 做远程 kikoeru 检查并补录命中。
+
+        返回 {canonical: matched_rjcode} 命中映射；kikoeru 未配置或检查
+        失败时静默降级，保持本地索引结果。
+        """
+        from .kikoeru_duplicate_service import get_kikoeru_service
+
+        service = get_kikoeru_service()
+        service_config = getattr(service, "config", None)
+        if (
+            service_config is None
+            or not bool(getattr(service_config, "enabled", False))
+            or not str(getattr(service_config, "server_url", "") or "").strip()
+        ):
+            return {}
+
+        pending = [
+            (item, canonical)
+            for canonical, item in items_by_canonical.items()
+            if not list(item.get("kikoeru_found_rjcodes") or [])
+        ]
+        if not pending:
+            return {}
+
+        semaphore = asyncio.Semaphore(8)
+
+        async def _probe_item(item, canonical):
+            linked = {
+                self.normalize_rjcode(code)
+                for code in list(item.get("linked_rjcodes") or [])
+                if self.normalize_rjcode(code)
+            }
+            try:
+                async with semaphore:
+                    result = await service.check_duplicate(
+                        canonical,
+                        use_cache=True,
+                        extra_match_rjcodes=linked,
+                    )
+            except Exception as exc:
+                logger.debug("[社团补全] 远程 kikoeru 检查失败 rj=%s: %s", canonical, exc)
+                return None
+            if not result.is_found:
+                return None
+            return canonical, self.normalize_rjcode(result.matched_rjcode) or canonical
+
+        probes = await asyncio.gather(
+            *[_probe_item(item, canonical) for item, canonical in pending],
+            return_exceptions=True,
+        )
+        hits: Dict[str, str] = {}
+        for probe in probes:
+            if isinstance(probe, Exception) or not probe:
+                continue
+            canonical, matched = probe
+            item = items_by_canonical.get(canonical)
+            if item is None:
+                continue
+            found = [
+                self.normalize_rjcode(code)
+                for code in list(item.get("kikoeru_found_rjcodes") or [])
+                if self.normalize_rjcode(code)
+            ]
+            if matched not in found:
+                found.append(matched)
+            item["kikoeru_found_rjcodes"] = found
+            hits[canonical] = matched
+        if hits:
+            logger.info("[社团补全] 单社团远程 kikoeru 兑底命中 %s 个作品", len(hits))
+        return hits
+
     async def refresh_circle_owned_state(
         self,
         circle_id: str,
@@ -8799,6 +9003,16 @@ class CircleCompletionService:
         owned_stats = self._apply_library_index_owned_state_to_items(items_by_canonical)
         if not owned_stats.get("ready_index_available"):
             raise ValueError("库存索引尚未就绪，无法刷新本地拥有状态")
+        if cancel_callback and cancel_callback():
+            raise RuntimeError("用户取消")
+
+        # 远程 kikoeru 兑底：本地索引未命中的选中作品，用远程 kikoeru 服务器检查
+        # （kikoeru 命名不含 RJ 的版本也能命中），结果一并写回作品字段。
+        report(45, "远程 kikoeru 检查", total_count=len(rows), processed_count=0)
+        try:
+            await self._remote_kikoeru_owned_for_items(items_by_canonical, rows)
+        except Exception:
+            logger.warning("[社团补全] 单社团远程 kikoeru 兑底失败，保持本地索引结果", exc_info=True)
         if cancel_callback and cancel_callback():
             raise RuntimeError("用户取消")
 
