@@ -599,6 +599,20 @@ class DeferredArchiveService:
         try:
             await self._update_parent_task(claim, "processing")
             self._broadcast(claim, "processing", "系统空闲，开始低优先级归档")
+            # 执行前刷新分卷清单：入队时尚未下载完成的后续分卷（如百度网盘
+            # 顺序落盘的 .7z.002）会被补进本次归档，避免只归档首卷、残留尾卷。
+            try:
+                refreshed = await asyncio.to_thread(self._refresh_job_manifest_sync, job_id, epoch)
+                if refreshed.get("sources") and refreshed.get("targets"):
+                    claim["source_manifest"] = refreshed["sources"]
+                    claim["target_manifest"] = refreshed["targets"]
+                    logger.info(
+                        "[延后归档] 执行前刷新分卷清单 job=%s members=%s",
+                        job_id,
+                        len(refreshed["sources"]),
+                    )
+            except Exception as exc:
+                logger.warning("[延后归档] 执行前刷新分卷清单失败，按入队快照继续: %s", exc)
             for index, source in enumerate(claim["source_manifest"]):
                 self._raise_if_abort(self._copy_abort_reason(job_id, epoch, check_database=True))
                 await self._move_member(claim, index, source)
@@ -748,6 +762,108 @@ class DeferredArchiveService:
             return sources[index], targets[index]
         finally:
             db.close()
+
+    def _refresh_job_manifest_sync(self, job_id: str, epoch: int) -> dict[str, Any]:
+        """执行前刷新分卷清单，把入队后才出现的同组尾卷补进作业。
+
+        入队发生在业务任务完成时；百度网盘等下载器可能还在按顺序落盘
+        后续分卷。这里按首卷重新探测整组，新增成员以追加方式纳入，
+        已发布/已完成的成员不受影响。无法刷新时返回 None，调用方按
+        入队快照继续执行。
+        """
+        db = SessionLocal()
+        try:
+            job = db.query(DeferredArchiveJob).filter(DeferredArchiveJob.id == job_id).with_for_update().one()
+            self._assert_owned(job, epoch)
+            sources = [dict(item or {}) for item in list(job.source_manifest or [])]
+            targets = [dict(item or {}) for item in list(job.target_manifest or [])]
+            if not sources or not targets:
+                return {}
+            first_source = str(sources[0].get("source_path") or "")
+            if not first_source or not os.path.isfile(first_source):
+                return {}
+            try:
+                fresh_manifest, group_base = self._build_source_manifest(first_source)
+            except Exception as exc:
+                logger.debug("[延后归档] 执行前重新探测分卷组失败，保持入队快照: %s", exc)
+                return {}
+            existing_paths = self._manifest_paths(sources, "source_path")
+            fresh_paths = self._manifest_paths(fresh_manifest, "source_path")
+            if fresh_paths <= existing_paths:
+                return {}
+            new_members = [
+                member for member in fresh_manifest
+                if _normalized_path(str(member.get("source_path") or "")) not in existing_paths
+            ]
+            if not new_members:
+                return {}
+            processed_dir = os.path.dirname(str(targets[0].get("target_path") or "")) or ""
+            new_targets = self._reserve_extra_targets_sync(
+                db,
+                new_members=new_members,
+                existing_targets=targets,
+                processed_dir=processed_dir,
+                group_base=group_base,
+            )
+            job.source_manifest = sources + new_members
+            job.target_manifest = targets + new_targets
+            job.updated_at = self._database_now(db)
+            db.commit()
+            logger.info(
+                "[延后归档] 已补入 %d 个后续分卷 job=%s",
+                len(new_members),
+                job_id,
+            )
+            return {
+                "sources": [dict(item) for item in job.source_manifest],
+                "targets": [dict(item) for item in job.target_manifest],
+            }
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def _reserve_extra_targets_sync(
+        self,
+        db: Any,
+        *,
+        new_members: list[dict[str, Any]],
+        existing_targets: list[dict[str, Any]],
+        processed_dir: str,
+        group_base: str,
+    ) -> list[dict[str, Any]]:
+        """为新增分卷预留不与已有目标冲突的目标文件名。"""
+        reserved = self._manifest_paths(existing_targets, "target_path")
+        for (manifest,) in db.query(DeferredArchiveJob.target_manifest).filter(
+            ~DeferredArchiveJob.status.in_(["completed", "cancelled"])
+        ).all():
+            reserved.update(self._manifest_paths(manifest, "target_path"))
+        reserved = {_normalized_path(path) for path in reserved}
+
+        result: list[dict[str, Any]] = []
+        for member in new_members:
+            filename = str(member.get("filename") or "")
+            placed = ""
+            for suffix in range(0, 10000):
+                candidate_name = self._target_name(filename, group_base, suffix)
+                candidate_path = os.path.join(processed_dir, candidate_name)
+                if _normalized_path(candidate_path) in reserved or os.path.exists(candidate_path):
+                    continue
+                placed = candidate_path
+                reserved.add(_normalized_path(candidate_path))
+                break
+            if not placed:
+                raise RuntimeError(f"无法为新增分卷预留归档目标文件名: {filename}")
+            result.append({
+                "source_path": member["source_path"],
+                "filename": os.path.basename(placed),
+                "target_path": placed,
+                "size": int(member.get("size") or 0),
+                "state": "pending",
+                "sha256": "",
+            })
+        return result
 
     async def _move_member(self, claim: dict[str, Any], index: int, source: dict[str, Any]) -> None:
         job_id = str(claim["job_id"])
@@ -1363,7 +1479,21 @@ class DeferredArchiveService:
                         break
                     os.rmdir(current)
                 except OSError:
-                    break
+                    # 杀软/资源管理器可能短暂占用目录句柄，重试 3 次后再放弃
+                    removed = False
+                    for attempt in range(1, 4):
+                        time.sleep(1)
+                        try:
+                            if os.listdir(current):
+                                removed = False
+                                break
+                            os.rmdir(current)
+                            removed = True
+                            break
+                        except OSError:
+                            continue
+                    if not removed:
+                        break
                 current = parent
 
     def _cleanup_staging_dir(self, manifest: list[dict[str, Any]]) -> None:

@@ -34,12 +34,14 @@ class ArchiveHandler(FileSystemEventHandler):
         on_archive_detected: Callable[[str], None],
         get_excluded_paths: Callable[[], Set[str]],
         is_paused: Callable[[], bool],
-        mark_processed: Callable[[str], None]
+        mark_processed: Callable[[str], None],
+        on_orphan_volume: Optional[Callable[[str], None]] = None,
     ):
         self.on_archive_detected = on_archive_detected
         self.get_excluded_paths = get_excluded_paths
         self.is_paused = is_paused
         self.mark_processed = mark_processed
+        self.on_orphan_volume = on_orphan_volume
         self._file_processor = get_file_processor()
 
     def on_created(self, event):
@@ -77,8 +79,15 @@ class ArchiveHandler(FileSystemEventHandler):
             self._mark_volume_file_processed(file_path)
 
     def _mark_volume_file_processed(self, file_path: str):
-        """将分卷文件标记为已处理（防止重复检测）"""
+        """将分卷文件标记为已处理（防止重复检测）。
+
+        首卷已被归档移走的迟到尾卷（.7z.002 等）不能只标记为已处理，
+        否则会永久残留在输入目录；转交给延后归档队列单独归档。
+        """
         filename = os.path.basename(file_path).lower()
+        if self.on_orphan_volume and self._orphan_volume_paths(file_path):
+            self.on_orphan_volume(file_path)
+            return
 
         if re.search(r'\.z\d{2}$', filename):
             logger.debug(f"ZIP 分卷文件标记为已处理: {file_path}")
@@ -94,6 +103,42 @@ class ArchiveHandler(FileSystemEventHandler):
             if part_match and int(part_match.group(1)) > 1:
                 logger.debug(f"分卷文件标记为已处理: {file_path}")
                 self.mark_processed(file_path)
+
+    def _orphan_volume_paths(self, file_path: str) -> list:
+        """判断是否「首卷缺失的迟到尾卷」；是则返回待归档文件，否则空列表。"""
+        directory = os.path.dirname(file_path)
+        filename = os.path.basename(file_path)
+        sibling_casefold = {}
+        try:
+            sibling_casefold = {name.casefold(): name for name in os.listdir(directory)}
+        except OSError:
+            return []
+
+        def exists(first_name: str) -> bool:
+            return bool(sibling_casefold.get(str(first_name).casefold()))
+
+        match = re.match(r'^(.+)\.7z\.(\d{3})$', filename, re.IGNORECASE)
+        if match and int(match.group(2)) > 1:
+            if not exists(f"{match.group(1)}.7z.001"):
+                return [file_path]
+            return []
+        match = re.match(r'^(.+)\.zip\.(\d{3})$', filename, re.IGNORECASE)
+        if match and int(match.group(2)) > 1:
+            if not exists(f"{match.group(1)}.zip.001"):
+                return [file_path]
+            return []
+        match = re.match(r'^(.+)\.part(\d+)\.(rar|zip|7z|exe)$', filename, re.IGNORECASE)
+        if match and int(match.group(2)) > 1:
+            if not exists(f"{match.group(1)}.part1.{match.group(3)}"):
+                return [file_path]
+            return []
+        match = re.match(r'^(.+)\.(z|r)(\d{2})$', filename, re.IGNORECASE)
+        if match and int(match.group(3)) > 1:
+            main_ext = "zip" if match.group(2).lower() == "z" else "rar"
+            if not exists(f"{match.group(1)}.{main_ext}"):
+                return [file_path]
+            return []
+        return []
 
     def _is_archive(self, path: str) -> bool:
         """检查是否是压缩包文件（委托给 FileProcessor）"""
@@ -202,7 +247,8 @@ class FolderWatcher:
             self._on_archive_detected,
             self._get_excluded_paths,
             lambda: self._paused,
-            self._mark_file_processed
+            self._mark_file_processed,
+            self._on_orphan_volume_detected
         )
         observer = Observer()
         # inotify 后端 schedule 会递归 os.walk 监视目录，放到线程执行避免阻塞主事件循环
@@ -258,6 +304,23 @@ class FolderWatcher:
                 logger.error(f"事件循环未就绪，无法调度任务: {file_path}")
         else:
             logger.info(f"auto_start为false，跳过自动处理: {file_path}")
+
+    def _on_orphan_volume_detected(self, file_path: str):
+        """首卷缺失的迟到尾卷：调度到事件循环，交给延后归档队列单独归档。"""
+        if self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._enqueue_orphan_volume(file_path), self._loop)
+
+    async def _enqueue_orphan_volume(self, file_path: str):
+        """把首卷已归档的迟到尾卷入队延后归档，避免永久残留在输入目录。"""
+        try:
+            archive_service = get_deferred_archive_service()
+            if await archive_service.is_source_claimed(file_path):
+                return
+            result = await archive_service.enqueue_source(file_path)
+            if result.get("queued"):
+                logger.info("迟到的非首卷分卷已单独入队归档: %s", file_path)
+        except Exception:
+            logger.warning("迟到的非首卷分卷入队归档失败: %s", file_path, exc_info=True)
 
     async def _process_file(self, file_path: str):
         """处理文件（使用 FileProcessor 统一流程）"""
@@ -404,6 +467,9 @@ class FolderWatcher:
 
                     if not existing and file_path not in self.pending_files and file_path not in self._processed_files:
                         self._on_archive_detected(file_path)
+                elif self.handler._orphan_volume_paths(file_path):
+                    # 首卷已归档的迟到尾卷：周期扫描兜底入队归档
+                    await self._enqueue_orphan_volume(file_path)
 
 
 # 全局监视器实例
