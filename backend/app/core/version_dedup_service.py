@@ -24,8 +24,13 @@ TEXT_EXTENSIONS = {".lrc", ".srt", ".vtt", ".ass", ".ssa", ".txt"}
 # 跳过压缩包/自解压文件，避免误删嵌套包
 SKIP_EXTENSIONS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".exe"}
 
-# 优先保留的语言目录标记（简体中文排最前）
-PREFERRED_LANG_MARKERS = ("简体中文", "簡體中文")
+# 优先保留的简体中文目录标记（覆盖全称与常见缩写，与字幕同步服务的简体 keys 对齐）
+PREFERRED_LANG_MARKERS = (
+    "简体中文", "簡體中文", "简中", "簡中",
+    "中文(简体)", "中文（简体）", "中文(簡体)", "中文（簡体）",
+    "zh-hans", "zh_cn", "chs",
+    "简体", "簡体", "汉化", "漢化",
+)
 
 # 首尾指纹各读 1MB
 _FINGERPRINT_CHUNK = 1024 * 1024

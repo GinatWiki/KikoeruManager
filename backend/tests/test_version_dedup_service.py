@@ -28,7 +28,12 @@ def _padding_bytes(seed, size):
 def test_language_priority_prefers_simplified_chinese():
     assert language_priority_of("简体中文/WAV/01.wav") == 0
     assert language_priority_of("簡體中文/WAV/01.wav") == 0
+    assert language_priority_of("簡体/WAV/01.wav") == 0
+    assert language_priority_of("简体/WAV/01.wav") == 0
+    assert language_priority_of("中文(简体)/LRC/01.lrc") == 0
+    assert language_priority_of("漢化/WAV/01.wav") == 0
     assert language_priority_of("繁體中文/WAV/01.wav") is None
+    assert language_priority_of("繁体/WAV/01.wav") is None
     assert language_priority_of("日本語/WAV/01.wav") is None
     assert language_priority_of("") is None
 
@@ -111,6 +116,25 @@ async def test_deduplicate_keeps_genuinely_different_text(tmp_path, monkeypatch)
     assert result["removed_count"] == 0
     assert os.path.exists(str(root / "简体中文/LRC/01.lrc"))
     assert os.path.exists(str(root / "繁體中文/LRC/01.lrc"))
+
+
+@pytest.mark.asyncio
+async def test_deduplicate_prefers_abbreviated_simplified_dir(tmp_path, monkeypatch):
+    """目录名使用缩写（簡体 / 繁体）时，也应保留簡体目录版本。"""
+    root = tmp_path / "work"
+    simplified_lines = "[00:01.00]用身体支付也是可以的"
+    traditional_lines = "[00:01.00]用身體支付也是可以的"
+    _write(str(root / "簡体/LRC/01.lrc"), simplified_lines)
+    _write(str(root / "繁体/LRC/01.lrc"), traditional_lines)
+
+    service = FilterRecoveryService(recovery_root=str(tmp_path / "recovery"))
+    monkeypatch.setattr("app.core.filter_recovery_service.get_filter_recovery_service", lambda: service)
+
+    result = await deduplicate_version_files(str(root), SimpleNamespace(id="t-abbr"))
+
+    assert result["removed_count"] == 1
+    assert os.path.exists(str(root / "簡体/LRC/01.lrc")), "保留簡体目录版本"
+    assert not os.path.exists(str(root / "繁体/LRC/01.lrc"))
 
 
 @pytest.mark.asyncio
