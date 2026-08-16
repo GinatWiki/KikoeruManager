@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from app.config import settings as settings_module
 from app.core.task_engine import TaskEngine, Task, TaskType, TaskStatus
 from app.models import database as database_module
-from app.models.database import ConflictWork, ProcessedArchive, Task as TaskRecord, TaskCenterItem
+from app.models.database import ConflictWork, DeferredArchiveJob, ProcessedArchive, Task as TaskRecord, TaskCenterItem
 
 class TestTaskEngine:
     """测试任务引擎"""
@@ -426,14 +426,14 @@ class TestTaskEngine:
         assert callback in engine._progress_callbacks
 
     @pytest.mark.asyncio
-    async def test_archive_source_file_records_total_size_for_exe_e_volumes(
+    async def test_archive_source_file_enqueues_exe_e_volumes_group(
         self,
         engine,
         tmp_path,
         db_session,
         monkeypatch,
     ):
-        """归档 .exe + .eNN 分卷时，ProcessedArchive.file_size 记录整组总大小。"""
+        """归档 .exe + .eNN 分卷时，延后归档作业冻结整组清单，且不立即移动源文件。"""
         source_dir = tmp_path / "input"
         processed_dir = tmp_path / "processed"
         source_dir.mkdir()
@@ -470,18 +470,20 @@ class TestTaskEngine:
 
         task = Task(task_type=TaskType.AUTO_PROCESS, source_path=str(exe), task_id="archive-size-task")
 
-        await engine._archive_source_file(task)
+        result = await engine._archive_source_file(task)
 
-        archive = db_session.query(ProcessedArchive).filter_by(filename="RJ01629292.exe").one()
-        assert archive.file_size == 1524
-        assert archive.volume_count == 3
-        assert archive.current_path == str(processed_dir / "RJ01629292.exe")
-        assert sorted(path.name for path in processed_dir.iterdir()) == [
-            "RJ01629292.e01",
-            "RJ01629292.e02",
-            "RJ01629292.exe",
-        ]
-        assert not exe.exists()
+        assert result is not None
+        assert result.get("volume_count") == 3, "入队时应冻结整组分卷清单"
+        job = (
+            db_session.query(DeferredArchiveJob)
+            .filter_by(task_id="archive-size-task")
+            .order_by(DeferredArchiveJob.created_at.desc())
+            .first()
+        )
+        assert job is not None, "延后归档应写入持久化作业"
+        assert len(job.source_manifest or []) == 3
+        assert exe.exists(), "延后归档只入队，不立即移动源文件"
+        assert list(processed_dir.iterdir()) == []
 
     def test_extract_subtask_conflict_source_moves_to_stable_conflicts_dir(self, engine, tmp_path, monkeypatch):
         temp_root = tmp_path / "temp"
