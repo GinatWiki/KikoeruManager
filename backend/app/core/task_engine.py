@@ -7424,6 +7424,10 @@ class TaskEngine:
                                 folder_title = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]", "", folder_title).strip()
                                 folder_title_clean = re.sub(r'[<>:"/\\|?*]', '', folder_title).strip()
                                 if folder_title_clean:
+                                    # 保留 RJ 号前缀，避免汉化后项目文件夹丢失 RJ 标识
+                                    rj_match = re.search(r"RJ(\d{4,})", str(rj or ""), re.IGNORECASE)
+                                    if rj_match and not re.search(r"RJ\d{4,}", folder_title_clean, re.IGNORECASE):
+                                        folder_title_clean = f"RJ{rj_match.group(1)} {folder_title_clean}"
                                     folder_src = str(folder_path_val).rstrip("/\\")
                                     if folder_src:
                                         rn_mgr2 = get_library_manager()

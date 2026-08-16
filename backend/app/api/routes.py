@@ -3885,6 +3885,18 @@ def reveal_ai_title_translation_secret(payload: AITitleTranslationSecretRevealRe
     return {"value": _read_ai_title_translation_api_key_from_disk()}
 
 
+def _ai_title_folder_name(rjcode_value: str, folder_title: str) -> str:
+    """AI 标题汉化后的项目文件夹名：保留 RJ 号前缀，避免汉化后丢失 RJ 标识。
+
+    标题里已经带 RJ 号时不再重复拼接。
+    """
+    title = str(folder_title or "").strip()
+    match = re.search(r"RJ(\d{4,})", str(rjcode_value or ""), re.IGNORECASE)
+    if match and title and not re.search(r"RJ\d{4,}", title, re.IGNORECASE):
+        return f"RJ{match.group(1)} {title}"
+    return title
+
+
 
 @app.post("/api/ai-title-translation/batch")
 async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
@@ -4102,6 +4114,7 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                                     if folder_title:
                                         folder_title_clean = re.sub(r'[<>:"/\|?*]', '', folder_title).strip()
                                         if folder_title_clean:
+                                            folder_title_clean = _ai_title_folder_name(rj, folder_title_clean)
                                             folder_src = str(folder_path_val).rstrip("/\\")
                                             if folder_src:
                                                 from ..core.library_manager import get_library_manager as _get_rn_mgr
@@ -4497,6 +4510,7 @@ async def ai_title_translation_file_rename(request: AITitleTranslationFileRename
         if folder_title:
             folder_title_clean = re.sub(r'[<>:"/\\|?*]', '', folder_title).strip()
             if folder_title_clean:
+                folder_title_clean = _ai_title_folder_name(rjcode, folder_title_clean)
                 try:
                     folder_path = os.path.dirname(path.rstrip("/\\"))
                     folder_name = os.path.basename(path.rstrip("/\\"))
