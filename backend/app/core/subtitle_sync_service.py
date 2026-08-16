@@ -899,11 +899,17 @@ class SubtitleSyncService:
                     content_sample,
                     content_first=content_first,
                 )
+                # 字幕文件名可能自带音频格式后缀（如 01.mp3.lrc）：
+                # 规范化 base_name，避免音频被重命名成 01.mp3.wav 之类双后缀。
+                base_name = os.path.splitext(name)[0]
+                base_name_ext = os.path.splitext(base_name)[1].lower()
+                if base_name_ext in self.AUDIO_EXTENSIONS:
+                    base_name = os.path.splitext(base_name)[0]
                 item = {
                     'name': name,
                     'path': full_path,
                     'ext': ext,
-                    'base_name': os.path.splitext(name)[0],
+                    'base_name': base_name,
                     'version': detection['version'],
                     'version_source': detection['version_source'],
                     'last_timestamp': self._read_subtitle_last_timestamp(full_path),
@@ -1187,10 +1193,13 @@ class SubtitleSyncService:
                             "new": pair["new_audio_name"],
                             "subtitle": subtitle["name"],
                         })
-                        subtitle_dest = os.path.join(os.path.dirname(pair["audio_path"]), subtitle["name"])
+                        # 复制字幕时同步用规范化后的 base_name，
+                        # 避免复制出 01.mp3.lrc 这类带音频格式后缀的字幕名。
+                        subtitle_dest_name = f"{subtitle['base_name']}{subtitle['ext']}"
+                        subtitle_dest = os.path.join(os.path.dirname(pair["audio_path"]), subtitle_dest_name)
                         try:
                             shutil.copy2(subtitle["path"], subtitle_dest)
-                            result["copied_subtitles"].append(subtitle["name"])
+                            result["copied_subtitles"].append(subtitle_dest_name)
                         except Exception as exc:
                             result["errors"].append(f"复制字幕失败: {exc}")
                     else:

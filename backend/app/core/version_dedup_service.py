@@ -1,12 +1,13 @@
-"""解压入库音频查重服务。
+"""解压入库重复文件查重服务。
 
-清理同一作品解压产物里的重复音频：多个语言目录（如 日本語/WAV、
-简体中文/WAV、繁體中文/WAV）携带同一音轨时，自动去重并优先保留
-简体中文目录下的版本。
+清理同一作品解压产物里的重复文件：多语言版本目录（如 日本語、简体中文、
+繁體中文）携带同一内容时自动去重，并优先保留简体中文目录下的版本。
 
-判重口径保守：扩展名 + 文件大小 + 首尾各 1MB 的 SHA1 指纹完全一致
-才算重复，避免误删不同编码 / 不同音质的同名文件。被清理的文件移入
-过滤恢复区（任务详情可还原），不直接物理删除。
+判重口径：
+- 非文本文件：扩展名 + 文件大小 + 首尾各 1MB 的 SHA1 指纹完全一致才算重复。
+- 文本文件（.lrc/.srt/.vtt/.ass/.ssa/.txt）：内容经繁体转简体归一化后指纹
+  一致即判重，覆盖「简繁版本几乎无差异」的常见多版本结构；不依赖文件名。
+被清理的文件移入过滤恢复区（任务详情可还原），不直接物理删除。
 """
 from __future__ import annotations
 
@@ -18,14 +19,18 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".wma", ".aac"}
+# 文本类文件：读全文做简繁归一化指纹（readme / LRC / 字幕都覆盖）
+TEXT_EXTENSIONS = {".lrc", ".srt", ".vtt", ".ass", ".ssa", ".txt"}
+# 跳过压缩包/自解压文件，避免误删嵌套包
+SKIP_EXTENSIONS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".exe"}
 
 # 优先保留的语言目录标记（简体中文排最前）
 PREFERRED_LANG_MARKERS = ("简体中文", "簡體中文")
 
-# 首尾指纹各读 1MB；小于 64KB 的文件不参与判重，避免 0 字节 / 占位文件误伤
+# 首尾指纹各读 1MB
 _FINGERPRINT_CHUNK = 1024 * 1024
-_MIN_DEDUP_SIZE = 64 * 1024
+
+_opencc_converter = None
 
 
 def language_priority_of(relative_path: str) -> Optional[int]:
@@ -35,6 +40,20 @@ def language_priority_of(relative_path: str) -> Optional[int]:
         if marker.casefold() in normalized:
             return 0
     return None
+
+
+def _t2s(text: str) -> str:
+    """繁体转简体（opencc t2s）；转换器不可用时原样返回。"""
+    global _opencc_converter
+    try:
+        if _opencc_converter is None:
+            import opencc
+
+            _opencc_converter = opencc.OpenCC("t2s")
+        return _opencc_converter.convert(text)
+    except Exception as exc:
+        logger.debug("opencc 繁转简不可用，按原文比较: %s", exc)
+        return text
 
 
 def file_fingerprint(path: str) -> Optional[str]:
@@ -56,30 +75,50 @@ def file_fingerprint(path: str) -> Optional[str]:
             digest.update(tail)
         return digest.hexdigest()
     except Exception as exc:
-        logger.debug("计算音频指纹失败，跳过判重: path=%s error=%s", path, exc)
+        logger.debug("计算文件指纹失败，跳过判重: path=%s error=%s", path, exc)
         return None
 
 
-def _collect_audio_groups(root: str) -> Dict[Tuple[str, int, str], List[Dict[str, Any]]]:
-    """扫描目录树，按 (扩展名, 大小, 指纹) 聚合音频文件。"""
-    groups: Dict[Tuple[str, int, str], List[Dict[str, Any]]] = {}
+def _normalized_text_fingerprint(path: str) -> Optional[str]:
+    """文本文件指纹：繁转简归一化后全文 SHA1；失败返回 None。"""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            content = handle.read()
+        if not content.strip():
+            return None
+        normalized = _t2s(content)
+        return hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+    except Exception as exc:
+        logger.debug("计算文本归一化指纹失败，跳过判重: path=%s error=%s", path, exc)
+        return None
+
+
+def _collect_groups(root: str) -> Dict[Tuple, List[Dict[str, Any]]]:
+    """扫描目录树，按判重键聚合文件。"""
+    groups: Dict[Tuple, List[Dict[str, Any]]] = {}
     for dirpath, _dirnames, filenames in os.walk(root):
         for name in filenames:
+            if name.startswith("."):
+                continue
             ext = os.path.splitext(name)[1].lower()
-            if ext not in AUDIO_EXTENSIONS:
+            if ext in SKIP_EXTENSIONS:
                 continue
             path = os.path.join(dirpath, name)
             try:
                 size = int(os.path.getsize(path))
             except OSError:
                 continue
-            if size < _MIN_DEDUP_SIZE:
-                continue
-            fingerprint = file_fingerprint(path)
-            if fingerprint is None:
-                continue
             relative_path = os.path.relpath(path, root).replace("\\", "/")
-            key = (ext, size, fingerprint)
+            if ext in TEXT_EXTENSIONS:
+                text_fingerprint = _normalized_text_fingerprint(path)
+                if text_fingerprint is None:
+                    continue
+                key: Tuple = (ext, "text", text_fingerprint)
+            else:
+                fingerprint = file_fingerprint(path)
+                if fingerprint is None:
+                    continue
+                key = (ext, size, fingerprint)
             groups.setdefault(key, []).append({
                 "path": path,
                 "relative_path": relative_path,
@@ -91,6 +130,7 @@ def _collect_audio_groups(root: str) -> Dict[Tuple[str, int, str], List[Dict[str
 
 def _pick_winner(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     """选保留项：简体中文路径最优先，其次路径更浅，再次相对路径字典序。"""
+
     def sort_key(item: Dict[str, Any]) -> tuple:
         relative_path = str(item.get("relative_path") or "")
         preferred = language_priority_of(relative_path)
@@ -103,8 +143,8 @@ def _pick_winner(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     return min(items, key=sort_key)
 
 
-async def deduplicate_audio_versions(root: str, task: Any) -> Dict[str, Any]:
-    """执行音频查重，返回本次清理结果（removed_items 含恢复区信息）。"""
+async def deduplicate_version_files(root: str, task: Any) -> Dict[str, Any]:
+    """执行重复文件查重，返回本次清理结果（removed_items 含恢复区信息）。"""
     result: Dict[str, Any] = {
         "removed_count": 0,
         "removed_items": [],
@@ -114,7 +154,7 @@ async def deduplicate_audio_versions(root: str, task: Any) -> Dict[str, Any]:
         result["skipped"] = "work_dir_missing"
         return result
 
-    groups = await asyncio.to_thread(_collect_audio_groups, root)
+    groups = await asyncio.to_thread(_collect_groups, root)
     from .filter_recovery_service import get_filter_recovery_service
 
     recovery_service = get_filter_recovery_service()
@@ -137,7 +177,7 @@ async def deduplicate_audio_versions(root: str, task: Any) -> Dict[str, Any]:
                 )
             except Exception as exc:
                 logger.warning(
-                    "音频查重移除失败，保留原文件: path=%s error=%s",
+                    "重复文件清理失败，保留原文件: path=%s error=%s",
                     item["path"],
                     exc,
                     exc_info=True,
@@ -150,7 +190,7 @@ async def deduplicate_audio_versions(root: str, task: Any) -> Dict[str, Any]:
             }
             removed_items.append(public_item)
             logger.info(
-                "音频查重移除重复音频: %s（保留 %s）",
+                "重复文件清理: %s（保留 %s）",
                 item["relative_path"],
                 winner["relative_path"],
             )

@@ -166,8 +166,9 @@ class FilterConfig(BaseModel):
     enabled: bool = True
     filter_dir: bool = True
     rules: list[FilterRule] = []
-    # 音频查重：清理重复音频，优先保留简体中文目录版本（被清理文件可还原）
-    audio_dedup: bool = True
+    # 重复文件查重：清理多版本目录里的重复文件，优先保留简体中文目录版本
+    # （文本类文件按繁转简归一化判重；被清理文件可还原）
+    file_dedup: bool = True
 
 class MetadataConfig(BaseModel):
     """元数据配置"""

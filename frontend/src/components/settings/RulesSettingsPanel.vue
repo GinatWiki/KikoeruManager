@@ -5,7 +5,7 @@
         <div class="card-title">过滤规则</div>
         <div class="toggle-stack compact">
           <SettingsToggleRow v-model="config.filter.filter_dir" title="过滤文件夹" subtitle="把规则同时应用到目录名。" />
-          <SettingsToggleRow v-model="config.filter.audio_dedup" title="音频查重" subtitle="清理重复音频，优先保留简体中文目录版本（清理项可在任务详情还原）。" />
+          <SettingsToggleRow v-model="config.filter.file_dedup" title="重复文件查重" subtitle="清理多版本目录里的重复文件，优先保留简体中文版本（文本类按简繁归一化判重，清理项可在任务详情还原）。" />
         </div>
         <div class="rule-stack">
           <div v-for="(rule, index) in config.filter.rules" :key="`filter-${index}`" class="rule-row">
