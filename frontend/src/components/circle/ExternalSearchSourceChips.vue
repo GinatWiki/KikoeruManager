@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { AlertCircle, Check, X } from 'lucide-vue-next'
 import animeShareIcon from '../../assets/platforms/anime-sharing.png'
 import southPlusIcon from '../../assets/platforms/south-plus.ico'
+import asmrOneIcon from '../../assets/platforms/asmr-one.svg'
 
 const props = defineProps({
   item: { type: Object, required: true },
@@ -13,20 +14,49 @@ const emit = defineEmits(['open'])
 const sourceMeta = [
   { key: 'anime_share', label: 'AnimeShare', icon: animeShareIcon },
   { key: 'south_plus', label: '南+', icon: southPlusIcon },
+  { key: 'asmr_one', label: 'asmr.one', icon: asmrOneIcon },
 ]
 
-function fallbackSearchResult(source) {
-  const rjcode = String(
+function canonicalRjcode() {
+  return String(
     props.item?.canonical_rjcode
       || props.item?.display_rjcode
       || props.item?.rjcode
       || '',
   ).trim().toUpperCase()
+}
+
+// asmr.one 不依赖外部搜索接口：直接复用社团补全已有的探测结果
+// （has_asmr_one / asmr_available_rjcode，与 ASMR 同步下载同一套探测）。
+function asmrOnePayload() {
+  const availableRj = String(
+    props.item?.asmr_available_rjcode
+      || props.item?.sourceCompare?.asmr_one?.primary_rjcode
+      || props.item?.source_compare?.asmr_one?.primary_rjcode
+      || '',
+  ).trim().toUpperCase()
+  const targetRj = availableRj || canonicalRjcode()
+  const hit = Boolean(props.item?.has_asmr_one && targetRj)
+  return {
+    status: hit ? 'hit' : 'miss',
+    results: targetRj ? [{
+      source: 'asmr_one',
+      rjcode: targetRj,
+      variant_key: 'original',
+      variant_label: '原作',
+      title: hit ? `在 asmr.one 打开 ${targetRj}` : `查看 asmr.one 作品页 ${targetRj}`,
+      url: `https://asmr.one/works/${targetRj}`,
+    }] : [],
+  }
+}
+
+function fallbackSearchResult(source) {
+  const rjcode = canonicalRjcode()
   if (!/^RJ(?:\d{6}|\d{8})$/.test(rjcode)) return null
   let url = ''
   if (source === 'anime_share') {
     url = `https://www.anime-sharing.com/search/3528560/?q=${encodeURIComponent(rjcode)}&o=relevance`
-  } else {
+  } else if (source === 'south_plus') {
     const params = new URLSearchParams({
       step: '2',
       keyword: rjcode,
@@ -38,7 +68,9 @@ function fallbackSearchResult(source) {
       orderway: 'postdate',
       asc: 'DESC',
     })
-    url = `https://bbs.white-plus.net/search.php?${params.toString()}`
+    url = `https://bbs.south-plus.net/search.php?${params.toString()}`
+  } else {
+    url = `https://asmr.one/works/${rjcode}`
   }
   return {
     source,
@@ -51,6 +83,10 @@ function fallbackSearchResult(source) {
 }
 
 const sources = computed(() => sourceMeta.map(meta => {
+  if (meta.key === 'asmr_one') {
+    const payload = asmrOnePayload()
+    return { ...meta, status: payload.status, results: payload.results, actions: payload.results }
+  }
   const payload = props.item?.external_search?.[meta.key] || {}
   const status = String(payload.status || 'loading')
   const results = Array.isArray(payload.results) ? payload.results : []
