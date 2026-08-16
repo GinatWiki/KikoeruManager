@@ -389,12 +389,13 @@ class CircleExternalSearchService:
             return {"status": "unavailable", "results": [], "search_url": search_url}
         return await (self._search_anime_share(rjcode) if source == "anime_share" else self._search_south_plus(rjcode))
 
-    @classmethod
-    def _record_payload(cls, record: CircleExternalSearchRecord) -> Dict[str, Any]:
+    def _record_payload(self, record: CircleExternalSearchRecord) -> Dict[str, Any]:
+        # search_url 始终按当前配置动态生成：历史记录里持久化的旧域名
+        # （如 white-plus）不能继续下发，否则改域名后跳转仍是旧站。
         return {
             "status": str(record.status or "pending"),
             "results": list(record.results_json or []),
-            "search_url": str(record.search_url or cls._source_search_url(record.source, record.rjcode)),
+            "search_url": self._source_search_url(record.source, record.rjcode),
             "checked_at": record.checked_at.isoformat() if record.checked_at else None,
         }
 

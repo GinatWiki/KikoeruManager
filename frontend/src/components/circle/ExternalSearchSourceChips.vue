@@ -91,7 +91,12 @@ const sources = computed(() => sourceMeta.map(meta => {
   const status = String(payload.status || 'loading')
   const results = Array.isArray(payload.results) ? payload.results : []
   const searchResults = Array.isArray(payload.search_results) ? payload.search_results : []
-  const fallback = status !== 'loading' ? fallbackSearchResult(meta.key) : null
+  // 后端按自定义域名动态生成 search_url，优先使用；只有完全缺失时才本地兜底
+  const serverFallbackUrl = String(payload.search_url || '').trim()
+  const localFallback = status !== 'loading' ? fallbackSearchResult(meta.key) : null
+  const fallback = localFallback && serverFallbackUrl
+    ? { ...localFallback, url: serverFallbackUrl }
+    : localFallback
   const actions = status === 'hit' && results.length
     ? results
     : (searchResults.length ? searchResults : (fallback ? [fallback] : []))

@@ -1864,7 +1864,8 @@ function buildExternalSearchEntry(source, canonical) {
       orderway: 'postdate',
       asc: 'DESC',
     })
-    url = `https://bbs.white-plus.net/search.php?${params.toString()}`
+    // 默认域名兜底：正常路径由后端按自定义域名下发 search_url
+    url = `https://bbs.south-plus.net/search.php?${params.toString()}`
   }
   return {
     source,
