@@ -518,6 +518,27 @@ const virtualRowHeight = computed(() => {
   const bodyHeight = viewportWidth.value <= 640 ? 150 : 164
   return coverHeight + bodyHeight + gridGap.value
 })
+const editionRowExtra = 23
+function editionCountOf(item) {
+  const list = Array.isArray(item?.edition_variants) ? item.edition_variants : []
+  return list.length || 1
+}
+function rowHeightForIndex(index) {
+  if (!isCardMode.value) return virtualRowHeight.value
+  let maxEditions = 1
+  for (const cell of getRowItems(index)) {
+    maxEditions = Math.max(maxEditions, editionCountOf(cell.item))
+  }
+  return virtualRowHeight.value + Math.max(0, maxEditions - 1) * editionRowExtra
+}
+// 行内最多版本数变化时（切页 / 数据更新）重新测量虚拟行高，
+// 多语言版本卡片比普通卡片高，避免溢出遮挡下一行。
+const editionHeightSignature = computed(() => {
+  if (!isCardMode.value) return ''
+  return rowViewModels.value
+    .map(row => row.reduce((acc, cell) => Math.max(acc, editionCountOf(cell.item)), 1))
+    .join(',')
+})
 const virtualOverscan = computed(() => {
   if (!isCardMode.value) return 10
   return pagedGroups.value.length >= 50 || columnCount.value >= 6 ? 1 : 2
@@ -527,7 +548,7 @@ const gridTemplateColumns = computed(() => `repeat(${columnCount.value}, minmax(
 const rowVirtualizer = useVirtualizer(computed(() => ({
   count: rowCount.value,
   getScrollElement: () => scrollRef.value,
-  estimateSize: () => virtualRowHeight.value,
+  estimateSize: (index) => rowHeightForIndex(index),
   overscan: virtualOverscan.value,
 })))
 
@@ -804,6 +825,10 @@ watch(
 )
 
 watch(virtualRowHeight, () => {
+  nextTick(() => rowVirtualizer.value.measure())
+})
+
+watch(editionHeightSignature, () => {
   nextTick(() => rowVirtualizer.value.measure())
 })
 

@@ -1025,3 +1025,109 @@ async def test_missing_work_keeps_translation_variant_priority(
     assert item["preferred_variant"]["rjcode"] == "RJ01625472"
     assert item["preferred_variant"]["group_key"] == "simplified"
     assert item["download_plan"]["rjcode"] == "RJ01625472"
+
+
+@pytest.mark.asyncio
+async def test_work_item_exposes_actual_edition_variants(
+    service: CircleCompletionService,
+    db_session,
+) -> None:
+    """版本清单按作品实际拥有的语言版本输出，不写死原版/简中/繁中三种。"""
+    circle_id = "circle_edition_variants"
+    db_session.add(
+        CircleCatalog(
+            circle_id=circle_id,
+            circle_name="多语言社团",
+            circle_name_normalized="多语言社团",
+            source_mask="dlsite",
+            last_indexed_at=datetime(2026, 6, 19),
+        )
+    )
+    # 作品一：日文原版 + 简中 + 英文（没有繁中）
+    db_session.add(
+        CircleWork(
+            id="edition-variants-RJ01609723",
+            circle_id=circle_id,
+            canonical_rjcode="RJ01609723",
+            display_rjcode="RJ01609723",
+            title="日文原版标题",
+            maker_id="RG70169",
+            maker_name="多语言社团",
+            source_mask="dlsite",
+            linked_rjcodes=["RJ01609723", "RJ01625472", "RJ01625474"],
+            has_dlsite=True,
+            has_asmr_one=False,
+            image_url="https://img.dlsite.jp/modpub/images2/work/doujin/RJ01610000/RJ01609723_img_main.jpg",
+            created_at=datetime(2026, 6, 19),
+            updated_at=datetime(2026, 6, 19),
+        )
+    )
+    for linked_rjcode, link_type, lang in [
+        ("RJ01609723", "original", "JPN"),
+        ("RJ01625472", "translation", "CHI_HANS"),
+        ("RJ01625474", "translation", "ENG"),
+    ]:
+        db_session.add(
+            WorkCanonicalLink(
+                id=f"link-edition-{linked_rjcode}",
+                canonical_rjcode="RJ01609723",
+                linked_rjcode=linked_rjcode,
+                link_type=link_type,
+                lang=lang,
+                evidence_source="language_editions",
+                evidence_status="verified",
+            )
+        )
+        db_session.add(
+            WorkMetadata(
+                rjcode=linked_rjcode,
+                work_name=f"{linked_rjcode} title",
+                maker_name="多语言社团",
+                release_date="2026-05-03",
+                cvs=["山田じぇみ子"],
+                cached_at=datetime(2026, 6, 19),
+                expires_at=datetime(2099, 1, 1),
+            )
+        )
+    # 作品二：只有一个日文原版
+    db_session.add(
+        CircleWork(
+            id="edition-variants-RJ01609730",
+            circle_id=circle_id,
+            canonical_rjcode="RJ01609730",
+            display_rjcode="RJ01609730",
+            title="单版本作品",
+            maker_id="RG70169",
+            maker_name="多语言社团",
+            source_mask="dlsite",
+            linked_rjcodes=["RJ01609730"],
+            has_dlsite=True,
+            has_asmr_one=False,
+            image_url="https://img.dlsite.jp/modpub/images2/work/doujin/RJ01610000/RJ01609730_img_main.jpg",
+            created_at=datetime(2026, 6, 19),
+            updated_at=datetime(2026, 6, 19),
+        )
+    )
+    db_session.commit()
+
+    page = await service.list_circle_completion_works(
+        circle_id,
+        tab="missing",
+        page=1,
+        page_size=10,
+    )
+    assert page["total"] == 2
+
+    multi = next(item for item in page["items"] if item["canonical_rjcode"] == "RJ01609723")
+    editions = multi["edition_variants"]
+    assert [edition["group_key"] for edition in editions] == ["original", "simplified", "other"]
+    assert [edition["rjcode"] for edition in editions] == ["RJ01609723", "RJ01625472", "RJ01625474"]
+    assert [edition["group_short_label"] for edition in editions] == ["原作", "简中", "英文"]
+    assert editions[0]["title"] == "RJ01609723 title"
+
+    single = next(item for item in page["items"] if item["canonical_rjcode"] == "RJ01609730")
+    assert [edition["group_key"] for edition in single["edition_variants"]] == ["original"]
+
+    # 外部搜索变体接口与卡片共用同一份版本清单
+    variants = service.get_external_search_variants(circle_id, ["RJ01609723"])
+    assert variants["RJ01609723"] == multi["edition_variants"]

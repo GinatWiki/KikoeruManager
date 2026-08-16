@@ -216,3 +216,60 @@ def test_external_search_keeps_miss_and_unavailable_search_actions(monkeypatch):
     assert {entry["variant_key"] for entry in anime_share["search_results"]} == {"original", "simplified"}
     assert {entry["variant_key"] for entry in south_plus["search_results"]} == {"original", "simplified"}
     assert all(entry["url"].startswith("https://") for entry in anime_share["search_results"] + south_plus["search_results"])
+
+
+def test_external_search_exposes_per_variant_source_payloads(monkeypatch):
+    service = CircleExternalSearchService()
+
+    def fake_load(lookup_keys):
+        payloads = {}
+        for source, rjcode in lookup_keys:
+            if source == "anime_share":
+                payloads[(source, rjcode)] = {
+                    "status": "hit" if rjcode == "RJ01576821" else "miss",
+                    "results": (
+                        [{"url": f"https://www.anime-sharing.com/threads/{rjcode.lower()}/", "title": rjcode}]
+                        if rjcode == "RJ01576821"
+                        else []
+                    ),
+                    "search_url": f"https://www.anime-sharing.com/search/?q={rjcode}",
+                }
+            else:
+                payloads[(source, rjcode)] = {
+                    "status": "miss",
+                    "results": [],
+                    "search_url": f"https://bbs.south-plus.net/search.php?keyword={rjcode}",
+                }
+        return payloads
+
+    monkeypatch.setattr(service, "_load_or_enqueue_records", fake_load)
+    result = asyncio.run(service.search_variants({
+        "RJ01576821": [
+            {"rjcode": "RJ01576821", "title": "原作", "group_key": "original", "group_short_label": "原作"},
+            {"rjcode": "RJ01596605", "title": "简中", "group_key": "simplified", "group_short_label": "简中"},
+        ],
+    }))
+
+    payload = result["items"]["RJ01576821"]
+    assert len(payload["variants"]) == 2
+
+    original_row = payload["variants"][0]
+    assert original_row["rjcode"] == "RJ01576821"
+    assert original_row["group_key"] == "original"
+    assert original_row["sources"]["anime_share"]["status"] == "hit"
+    assert len(original_row["sources"]["anime_share"]["results"]) == 1
+    assert original_row["sources"]["south_plus"]["status"] == "miss"
+
+    simplified_row = payload["variants"][1]
+    assert simplified_row["rjcode"] == "RJ01596605"
+    assert simplified_row["sources"]["anime_share"]["status"] == "miss"
+    assert simplified_row["sources"]["anime_share"]["results"] == []
+    assert simplified_row["sources"]["south_plus"]["status"] == "miss"
+    # 每个版本的搜索动作都指向自己的 RJ，而不是作品 canonical RJ
+    assert simplified_row["sources"]["south_plus"]["search_results"][0]["url"].endswith("RJ01596605")
+    assert simplified_row["sources"]["south_plus"]["search_results"][0]["variant_key"] == "simplified"
+
+    # 合并载荷保持兼容：旧版前端整体标签仍然可用（只有原版命中，合并结果只有原版）
+    assert payload["anime_share"]["status"] == "hit"
+    assert {entry["variant_key"] for entry in payload["anime_share"]["results"]} == {"original"}
+    assert payload["south_plus"]["status"] == "miss"

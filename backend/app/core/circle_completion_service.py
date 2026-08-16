@@ -2339,6 +2339,12 @@ class CircleCompletionService:
                 metadata_map,
             )
         preferred_group = self._variant_group(preferred_variant.get("link_type"), preferred_variant.get("lang"))
+        edition_variants = self._edition_variants_payload(
+            view_canonical_info,
+            stored_display_rjcode or row.canonical_rjcode,
+            metadata_map,
+            fallback_title=title,
+        )
         local_owned_rjcodes = self._actual_owned_rjcodes(owned_row)
         normalized_local_owned_rjcodes: List[str] = []
         for candidate in local_owned_rjcodes:
@@ -2489,6 +2495,7 @@ class CircleCompletionService:
             "local_download_root": str(local_download.get("download_root") or "").strip(),
             "local_downloaded_count": int(local_download.get("downloaded_count") or 0),
             "preferred_variant": source_compare_seed["preferred_variant"],
+            "edition_variants": edition_variants,
             "has_kikoeru": bool(local_owned),
             "kikoeru_found_rjcodes": normalized_local_owned_rjcodes if local_owned else [],
             "kikoeru_subtitle_rjcodes": normalized_local_owned_rjcodes if local_subtitle_present else [],
@@ -3629,34 +3636,90 @@ class CircleCompletionService:
                     "linked_rjcodes": list(dict.fromkeys(linked_codes)),
                     "link_map": link_map_by_canonical.get(canonical) or {},
                 }
-                variants = []
-                seen_language_groups = set()
-                for variant in self._sort_linked_variants(info, canonical):
-                    rjcode = self.normalize_rjcode(variant.get("rjcode"))
-                    if not rjcode:
-                        continue
-                    group = self._variant_group(variant.get("link_type"), variant.get("lang"))
-                    group_key = str(group.get("key") or "other")
-                    if group_key not in {"original", "simplified", "traditional"}:
-                        continue
-                    lang = self._normalize_lang_code(variant.get("lang"))
-                    language_key = group_key
-                    if language_key in seen_language_groups:
-                        continue
-                    seen_language_groups.add(language_key)
-                    metadata = metadata_map.get(rjcode)
-                    variants.append({
-                        "rjcode": rjcode,
-                        "title": str(getattr(metadata, "work_name", "") or row.title or "").strip(),
-                        "lang": lang,
-                        "group_key": group_key,
-                        "group_label": str(group.get("label") or "其他语言"),
-                        "group_short_label": str(group.get("short_label") or "其他"),
-                    })
-                output[canonical] = variants
+                output[canonical] = self._edition_variants_payload(
+                    info,
+                    canonical,
+                    metadata_map,
+                    fallback_title=str(row.title or "").strip(),
+                )
             return output
         finally:
             db.close()
+
+    def _metadata_work_name(self, metadata: Any) -> str:
+        """兼容 dict 与 WorkMetadata ORM 两种 metadata 映射。"""
+        if isinstance(metadata, dict):
+            return str(metadata.get("work_name") or "").strip()
+        return str(getattr(metadata, "work_name", "") or "").strip()
+
+    def _edition_short_label(self, group_key: str, lang: Any) -> str:
+        """版本行短标签：原版 / 简中 / 繁中之外，按作品实际语言给出名称。"""
+        if group_key == "original":
+            return "原作"
+        if group_key == "simplified":
+            return "简中"
+        if group_key == "traditional":
+            return "繁中"
+        lang_label_map = {
+            "ENG": "英文",
+            "EN": "英文",
+            "KOR": "韩文",
+            "KO": "韩文",
+            "KO_KR": "韩文",
+            "FRE": "法文",
+            "FR": "法文",
+            "GER": "德文",
+            "DE": "德文",
+            "SPA": "西文",
+            "ES": "西文",
+        }
+        return lang_label_map.get(self._normalize_lang_code(lang), "其他")
+
+    def _edition_variants_payload(
+        self,
+        canonical_info: Dict[str, Any],
+        fallback_rjcode: str,
+        metadata_map: Optional[Dict[str, Any]] = None,
+        fallback_title: str = "",
+    ) -> List[Dict[str, str]]:
+        """按作品实际拥有的语言版本输出版本清单，每版一行。
+
+        版本来自作品的关联链（原版 + 各语言翻译版），有什么显示什么，
+        不写死「原版 / 简中 / 繁中」三种；不存在的版本不会出现在列表里。
+        每个版本一行：该版本的 RJ 号 + 该 RJ 在外部来源的检索情况，
+        作品卡片与外部搜索接口共用此结构。
+        """
+        group_order = {"original": 0, "simplified": 1, "traditional": 2}
+        variants: List[Dict[str, str]] = []
+        seen_keys = set()
+        for variant in self._sort_linked_variants(canonical_info, fallback_rjcode):
+            rjcode = self.normalize_rjcode(variant.get("rjcode"))
+            if not rjcode:
+                continue
+            group = self._variant_group(variant.get("link_type"), variant.get("lang"))
+            group_key = str(group.get("key") or "other")
+            normalized_lang = self._normalize_lang_code(variant.get("lang"))
+            # 同一语言组只保留一行；不同语言（如英文 + 韩文）各自成行
+            dedupe_key = (group_key, normalized_lang)
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            metadata = (metadata_map or {}).get(rjcode)
+            short_label = self._edition_short_label(group_key, variant.get("lang"))
+            variants.append({
+                "rjcode": rjcode,
+                "title": self._metadata_work_name(metadata) or str(fallback_title or "").strip(),
+                "lang": normalized_lang,
+                "group_key": group_key,
+                "group_label": str(group.get("label") or "其他语言"),
+                "group_short_label": short_label,
+            })
+        variants.sort(key=lambda item: (
+            group_order.get(item["group_key"], 3),
+            self._lang_priority(item.get("lang")),
+            item["rjcode"],
+        ))
+        return variants
 
     def _build_variant_payload_for_rjcode(
         self,
@@ -8522,6 +8585,12 @@ class CircleCompletionService:
                     "group_label": preferred_group["label"],
                     "group_short_label": preferred_group["short_label"],
                 }
+                item["edition_variants"] = self._edition_variants_payload(
+                    view_canonical_info,
+                    stored_display_rjcode or row.canonical_rjcode,
+                    metadata_map,
+                    fallback_title=str(item.get("title") or "").strip(),
+                )
                 local_owned_rjcodes = self._actual_owned_rjcodes(owned_row)
                 normalized_local_owned_rjcodes: List[str] = []
                 for candidate in local_owned_rjcodes:

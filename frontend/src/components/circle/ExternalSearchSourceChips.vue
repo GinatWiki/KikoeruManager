@@ -7,6 +7,9 @@ import asmrOneIcon from '../../assets/platforms/asmr-one.svg'
 
 const props = defineProps({
   item: { type: Object, required: true },
+  /** 语言版本行（{rjcode, group_key, group_short_label, title}），
+   *  传入后按该版本的 RJ 展示独立的三来源检索状态。 */
+  variant: { type: Object, default: null },
 })
 
 const emit = defineEmits(['open'])
@@ -17,33 +20,51 @@ const sourceMeta = [
   { key: 'asmr_one', label: 'asmr.one', icon: asmrOneIcon },
 ]
 
+function normalizeRj(value) {
+  return String(value || '').trim().toUpperCase()
+}
+
 function canonicalRjcode() {
-  return String(
+  return normalizeRj(
     props.item?.canonical_rjcode
       || props.item?.display_rjcode
       || props.item?.rjcode
       || '',
-  ).trim().toUpperCase()
+  )
+}
+
+function variantRjcode() {
+  return normalizeRj(props.variant?.rjcode || '') || canonicalRjcode()
+}
+
+function entryRjcode(entry) {
+  return normalizeRj(entry?.rjcode || '')
 }
 
 // asmr.one 不依赖外部搜索接口：直接复用社团补全已有的探测结果
 // （has_asmr_one / asmr_available_rjcode，与 ASMR 同步下载同一套探测）。
 function asmrOnePayload() {
-  const availableRj = String(
+  const availableRj = normalizeRj(
     props.item?.asmr_available_rjcode
       || props.item?.sourceCompare?.asmr_one?.primary_rjcode
       || props.item?.source_compare?.asmr_one?.primary_rjcode
       || '',
-  ).trim().toUpperCase()
-  const targetRj = availableRj || canonicalRjcode()
-  const hit = Boolean(props.item?.has_asmr_one && targetRj)
+  )
+  const targetRj = props.variant ? variantRjcode() : (availableRj || canonicalRjcode())
+  let hit = false
+  if (props.variant) {
+    // 版本行模式：只有探测到的可用 RJ 与本行 RJ 一致才算命中
+    hit = Boolean(props.item?.has_asmr_one && availableRj && availableRj === targetRj)
+  } else {
+    hit = Boolean(props.item?.has_asmr_one && targetRj)
+  }
   return {
     status: hit ? 'hit' : 'miss',
     results: targetRj ? [{
       source: 'asmr_one',
       rjcode: targetRj,
-      variant_key: 'original',
-      variant_label: '原作',
+      variant_key: props.variant?.group_key || 'original',
+      variant_label: props.variant?.group_short_label || '原作',
       title: hit ? `在 asmr.one 打开 ${targetRj}` : `查看 asmr.one 作品页 ${targetRj}`,
       url: `https://asmr.one/works/${targetRj}`,
     }] : [],
@@ -51,7 +72,7 @@ function asmrOnePayload() {
 }
 
 function fallbackSearchResult(source) {
-  const rjcode = canonicalRjcode()
+  const rjcode = variantRjcode()
   if (!/^RJ(?:\d{6}|\d{8})$/.test(rjcode)) return null
   let url = ''
   if (source === 'anime_share') {
@@ -75,11 +96,38 @@ function fallbackSearchResult(source) {
   return {
     source,
     rjcode,
-    variant_key: 'original',
-    variant_label: '原作',
+    variant_key: props.variant?.group_key || 'original',
+    variant_label: props.variant?.group_short_label || '原作',
     title: `搜索 ${rjcode}`,
     url,
   }
+}
+
+// 版本行模式：优先读取后端按版本下发的 sources 载荷；
+// 旧缓存 / 请求失败只有合并载荷时，按本行 RJ 过滤合并结果。
+function variantSourcePayload(sourceKey) {
+  const external = props.item?.external_search || {}
+  if (!props.variant) return external[sourceKey] || {}
+  const targetRj = variantRjcode()
+  const list = Array.isArray(external.variants) ? external.variants : []
+  const matched = list.find(item => normalizeRj(item?.rjcode) === targetRj)
+  if (matched?.sources?.[sourceKey]) return matched.sources[sourceKey]
+  const merged = external[sourceKey] || {}
+  const results = (Array.isArray(merged.results) ? merged.results : [])
+    .filter(entry => entryRjcode(entry) === targetRj)
+  const searchResults = (Array.isArray(merged.search_results) ? merged.search_results : [])
+    .filter(entry => entryRjcode(entry) === targetRj)
+  if (results.length || searchResults.length) {
+    return { ...merged, results, search_results: searchResults }
+  }
+  if (merged.status) {
+    // 其它版本命中不代表本版本；没有本版本记录时按未找到处理
+    const status = merged.status === 'loading' || merged.status === 'pending'
+      ? merged.status
+      : 'miss'
+    return { status, results: [], search_results: [], search_url: merged.search_url || '' }
+  }
+  return {}
 }
 
 const sources = computed(() => sourceMeta.map(meta => {
@@ -87,7 +135,7 @@ const sources = computed(() => sourceMeta.map(meta => {
     const payload = asmrOnePayload()
     return { ...meta, status: payload.status, results: payload.results, actions: payload.results }
   }
-  const payload = props.item?.external_search?.[meta.key] || {}
+  const payload = variantSourcePayload(meta.key)
   const status = String(payload.status || 'loading')
   const results = Array.isArray(payload.results) ? payload.results : []
   const searchResults = Array.isArray(payload.search_results) ? payload.search_results : []

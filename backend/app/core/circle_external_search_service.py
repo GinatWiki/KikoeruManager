@@ -608,7 +608,13 @@ class CircleExternalSearchService:
         })
 
     async def search_variants(self, variants_by_canonical: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """读取当前页的持久快照，并为缺失或到期项安排后台探测。"""
+        """读取当前页的持久快照，并为缺失或到期项安排后台探测。
+
+        每个 canonical 返回：
+        - ``anime_share`` / ``south_plus``：跨版本合并载荷（兼容旧版前端整体标签）；
+        - ``variants``：按语言版本（原版 / 简中 / 繁中）分组的载荷，每个版本
+          一个 RJ，每个 RJ 独立的来源检索状态，供卡片分行展示。
+        """
         unique_codes = []
         for variants in variants_by_canonical.values():
             for variant in variants:
@@ -625,11 +631,29 @@ class CircleExternalSearchService:
 
         items: Dict[str, Any] = {}
         for canonical, variants in variants_by_canonical.items():
+            variant_rows: List[Dict[str, Any]] = []
+            for variant in variants:
+                rjcode = self._normalize_rjcode(variant.get("rjcode"))
+                if not rjcode:
+                    continue
+                variant_rows.append({
+                    "rjcode": rjcode,
+                    "title": str(variant.get("title") or "").strip(),
+                    "group_key": str(variant.get("group_key") or "original"),
+                    "group_short_label": str(
+                        variant.get("group_short_label") or variant.get("group_label") or "原作"
+                    ).strip(),
+                    "sources": {},
+                })
+            per_variant_by_rj: Dict[str, Dict[str, Dict[str, Any]]] = {
+                row["rjcode"]: {} for row in variant_rows
+            }
+
             source_payloads: Dict[str, Any] = {}
             for source in ("anime_share", "south_plus"):
                 entries: List[Dict[str, str]] = []
                 search_entries: List[Dict[str, str]] = []
-                statuses = []
+                statuses: List[str] = []
                 for variant in variants:
                     rjcode = self._normalize_rjcode(variant.get("rjcode"))
                     if not rjcode:
@@ -647,6 +671,19 @@ class CircleExternalSearchService:
                         entry = self._result_entry(source, variant, result)
                         if entry["url"] and not any(existing["url"] == entry["url"] for existing in entries):
                             entries.append(entry)
+                    # 该版本自己的检索情况：独立状态 + 独立结果，供卡片分行展示
+                    variant_entries: List[Dict[str, str]] = []
+                    for result in payload.get("results") or []:
+                        entry = self._result_entry(source, variant, result)
+                        if entry["url"] and not any(existing["url"] == entry["url"] for existing in variant_entries):
+                            variant_entries.append(entry)
+                    variant_search_entry = self._search_entry(source, variant, payload)
+                    per_variant_by_rj[rjcode][source] = {
+                        "status": str(payload.get("status") or "error"),
+                        "results": variant_entries,
+                        "search_results": [variant_search_entry] if variant_search_entry["url"] else [],
+                        "search_url": str(payload.get("search_url") or self._source_search_url(source, rjcode)),
+                    }
 
                 if entries:
                     status = "hit"
@@ -656,12 +693,24 @@ class CircleExternalSearchService:
                     status = "pending"
                 else:
                     status = "unavailable" if "unavailable" in statuses else "error"
+                merged_search_url = ""
+                first_code = self._normalize_rjcode(variants[0].get("rjcode")) if variants else ""
+                if first_code:
+                    merged_search_url = str(
+                        (lookups.get((source, first_code)) or {}).get("search_url")
+                        or self._source_search_url(source, first_code)
+                    )
                 source_payloads[source] = {
                     "status": status,
                     "results": entries,
                     "search_results": search_entries,
+                    "search_url": merged_search_url,
                 }
-            items[str(canonical)] = source_payloads
+
+            payload = {**source_payloads, "variants": variant_rows}
+            for row in variant_rows:
+                row["sources"] = per_variant_by_rj.get(row["rjcode"]) or {}
+            items[str(canonical)] = payload
         return {"items": items}
 
 

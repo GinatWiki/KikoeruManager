@@ -138,6 +138,25 @@ const originalSubtitleLabel = computed(() => {
   return props.item?.subtitle_present ? '有字幕' : '无字幕'
 })
 
+// 语言版本清单：按作品官方实际拥有的版本显示（原版 / 简中 / 繁中 / 英文……），
+// 有什么显示什么，不写死三种；每个版本一行 RJ + 三来源检索状态。
+const editionVariants = computed(() => {
+  const list = Array.isArray(props.item?.edition_variants) ? props.item.edition_variants : []
+  const seen = new Set()
+  return list.filter(variant => {
+    const rj = String(variant?.rjcode || '').trim().toUpperCase()
+    if (!rj || seen.has(rj)) return false
+    seen.add(rj)
+    return true
+  })
+})
+const multiEdition = computed(() => editionVariants.value.length > 1)
+const displayTitle = computed(() => {
+  if (!multiEdition.value) return String(props.item?.title || '')
+  const original = editionVariants.value.find(variant => variant.group_key === 'original')
+  return String(original?.title || props.item?.title || '').trim()
+})
+
 const bonusFlagClass = computed(() => {
   if (isUnreleased.value && isNewWork.value) return 'work-bonus-flag--double-below'
   if (isUnreleased.value || isNewWork.value) return 'work-bonus-flag--below'
@@ -314,10 +333,30 @@ function preventNativeShiftSelection(event) {
       <div class="work-cover-shine" />
     </div>
 
-    <div class="work-card-body">
-      <div class="work-rj">{{ displayCode }}</div>
-      <div class="work-title" :title="item.title">{{ item.title || '未命名作品' }}</div>
-      <slot name="meta">
+    <div class="work-card-body" :class="{ 'is-multi-edition': multiEdition }">
+      <div class="work-rj">
+        {{ displayCode }}
+        <span
+          v-if="multiEdition && !isUnreleased && releaseLabel && releaseLabel !== '待定'"
+          class="work-release-inline work-release-inline--rj"
+        >
+          <Calendar :size="11" />{{ releaseLabel }}
+        </span>
+      </div>
+      <div class="work-title" :title="displayTitle">{{ displayTitle || '未命名作品' }}</div>
+      <div v-if="multiEdition" class="work-edition-list">
+        <div
+          v-for="edition in editionVariants"
+          :key="edition.rjcode"
+          class="work-edition-row"
+          :title="edition.group_label"
+        >
+          <span class="work-edition-label" :class="`is-${edition.group_key}`">{{ edition.group_short_label }}</span>
+          <span class="work-edition-rj">{{ edition.rjcode }}</span>
+          <ExternalSearchSourceChips :item="item" :variant="edition" @open="emit('external-search', $event)" />
+        </div>
+      </div>
+      <slot v-else name="meta">
         <div class="work-linked">
           <span>{{ displayVariant ? `${displayVariant} · ${displayVariantRjcode}` : displayVariantRjcode }}</span>
           <span v-if="!isUnreleased && releaseLabel && releaseLabel !== '待定'" class="work-release-inline">
@@ -337,7 +376,7 @@ function preventNativeShiftSelection(event) {
             <span class="tag-chip" :class="item.server_owned ? 'is-primary' : 'is-danger'">{{ item.server_owned ? '已收录' : '未收录' }}</span>
             <span v-if="showOriginalSubtitleState" class="tag-chip" :class="canRepairSubtitle ? 'is-repair' : (item.subtitle_present ? 'is-subtitle' : 'is-subtitle-none')">{{ originalSubtitleLabel }}</span>
             <span class="tag-chip" :class="item.has_asmr_one ? 'is-success' : 'is-disabled'">{{ item.has_asmr_one ? '可下载' : '无源' }}</span>
-            <ExternalSearchSourceChips :item="item" @open="emit('external-search', $event)" />
+            <ExternalSearchSourceChips v-if="!multiEdition" :item="item" @open="emit('external-search', $event)" />
           </template>
         </div>
       </slot>
@@ -878,6 +917,82 @@ function preventNativeShiftSelection(event) {
   white-space: nowrap;
 }
 
+/* ── 多语言版本行：按作品实际版本分行展示 RJ + 三来源检索 ── */
+.work-card-body.is-multi-edition {
+  grid-template-rows: 12px 34px auto 14px 24px 28px;
+}
+.work-edition-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 1px 0;
+}
+.work-edition-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  min-width: 0;
+}
+.work-edition-label {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  height: 15px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 8.5px;
+  font-weight: 750;
+  line-height: 1;
+  letter-spacing: .02em;
+  background: var(--circle-chip-bg, rgba(248, 250, 252, 0.72));
+  border: 1px solid var(--circle-chip-border, rgba(203, 213, 225, 0.72));
+  color: var(--circle-text-muted, #64748b);
+  transition: transform .18s cubic-bezier(.34,1.56,.64,1);
+}
+.work-card:hover .work-edition-label { transform: translateY(-1px); }
+.work-edition-label.is-original {
+  background: color-mix(in srgb, var(--circle-tag-primary, #416fae) 8%, transparent);
+  color: var(--circle-tag-primary, #416fae);
+  border-color: color-mix(in srgb, var(--circle-tag-primary, #416fae) 24%, transparent);
+}
+.work-edition-label.is-simplified {
+  background: color-mix(in srgb, var(--circle-tag-success, #247348) 8%, transparent);
+  color: var(--circle-tag-success, #247348);
+  border-color: color-mix(in srgb, var(--circle-tag-success, #247348) 24%, transparent);
+}
+.work-edition-label.is-traditional {
+  background: color-mix(in srgb, var(--circle-tag-indigo, #4f46e5) 8%, transparent);
+  color: var(--circle-tag-indigo, #4f46e5);
+  border-color: color-mix(in srgb, var(--circle-tag-indigo, #4f46e5) 24%, transparent);
+}
+.work-edition-label.is-other {
+  background: color-mix(in srgb, var(--circle-tag-orange, #ea580c) 8%, transparent);
+  color: var(--circle-tag-orange, #b45309);
+  border-color: color-mix(in srgb, var(--circle-tag-orange, #ea580c) 24%, transparent);
+}
+.work-edition-rj {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--circle-text-muted, #6d8bb5);
+  letter-spacing: .02em;
+  line-height: 1;
+}
+.work-edition-row :deep(.external-source-chips) {
+  margin-left: auto;
+}
+.work-release-inline--rj {
+  margin-left: 5px;
+}
+
 /* ── 已发售日期内联小段 ── */
 .work-release-inline {
   display: inline-flex;
@@ -1236,6 +1351,20 @@ function preventNativeShiftSelection(event) {
   gap: 4px;
   padding: 10px 12px 12px;
 }
+.work-card--lg .work-card-body.is-multi-edition {
+  grid-template-rows: 14px 36px auto 15px 26px 30px;
+}
+.work-card--lg .work-edition-row {
+  height: 22px;
+}
+.work-card--lg .work-edition-label {
+  height: 17px;
+  padding: 0 6px;
+  font-size: 9.5px;
+}
+.work-card--lg .work-edition-rj {
+  font-size: 10px;
+}
 .work-card--lg .work-rj {
   font-size: 11px;
   line-height: 14px;
@@ -1302,6 +1431,9 @@ function preventNativeShiftSelection(event) {
     grid-template-rows: 12px 32px 15px 13px 23px 28px;
     gap: 3px;
     padding: 7px 7px 8px;
+  }
+  .work-card-body.is-multi-edition {
+    grid-template-rows: 12px 32px auto 13px 23px 28px;
   }
   .work-rj,
   .work-title,
