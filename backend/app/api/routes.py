@@ -617,15 +617,16 @@ async def health_check():
 
 
 @app.get("/api/version/update-check")
-async def version_update_check():
+async def version_update_check(force: bool = False):
     """检查 GitHub 主发布仓库是否有比当前版本更新的 Release。
 
     - 结果带内存缓存（成功 30 分钟 / 失败 5 分钟），避免打爆 GitHub 未认证限流。
+    - ``force=true``（用户点击版本号手动检查）时绕过缓存，立即查询最新 Release。
     - 网络不可达时返回 ``success=false``，前端静默忽略，不影响正常使用。
     """
     from ..core.update_check_service import check_for_updates
 
-    return await check_for_updates(get_app_version())
+    return await check_for_updates(get_app_version(), force=force)
 
 
 # 注意：以下高频读接口刻意保持同步 def，让 FastAPI 调度到 starlette threadpool，

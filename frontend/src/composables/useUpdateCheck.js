@@ -14,23 +14,31 @@ export function useUpdateCheck() {
   const updateChecking = ref(false)
   let intervalHandle = null
 
-  async function checkUpdate() {
-    if (updateChecking.value) return
+  /**
+   * 执行一次更新检查。
+   * @param {{ force?: boolean }} options force=true 时绕过服务端缓存（手动点击检查）
+   * @returns {Promise<boolean|null>} true=发现新版本 / false=已是最新 / null=检查失败
+   */
+  async function checkUpdate(options = {}) {
+    const { force = false } = options || {}
+    if (updateChecking.value) return null
     updateChecking.value = true
     try {
-      const data = await healthApi.checkUpdate()
+      const data = await healthApi.checkUpdate({ force })
       if (data?.success && data?.has_update) {
         updateInfo.value = {
           latestVersion: data.latest_version,
           latestTag: data.latest_tag,
           releaseUrl: data.release_url,
         }
-      } else {
-        updateInfo.value = null
+        return true
       }
+      updateInfo.value = null
+      return data?.success ? false : null
     } catch (error) {
       console.warn('[更新检测] 检查失败，已静默忽略', error)
       updateInfo.value = null
+      return null
     } finally {
       updateChecking.value = false
     }

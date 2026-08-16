@@ -105,11 +105,15 @@ async def _fetch_latest_release(current_version: str) -> Dict[str, Any]:
     return payload
 
 
-async def check_for_updates(current_version: str) -> Dict[str, Any]:
-    """检测 GitHub 最新 Release 并给出是否可更新的结论（带内存缓存）。"""
+async def check_for_updates(current_version: str, force: bool = False) -> Dict[str, Any]:
+    """检测 GitHub 最新 Release 并给出是否可更新的结论（带内存缓存）。
+
+    ``force=True``（用户手动点击版本号触发）时绕过缓存直接查询 GitHub，
+    并用最新结果刷新缓存。手动点击频率低，不会打爆未认证限流。
+    """
     now = time.time()
     cached = _cache["payload"]
-    if cached is not None and now < _cache["expires_at"]:
+    if not force and cached is not None and now < _cache["expires_at"]:
         payload = dict(cached)
         payload["has_update"] = bool(payload.get("latest_version")) and is_newer(
             payload.get("latest_version"), current_version

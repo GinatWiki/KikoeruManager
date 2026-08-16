@@ -19,10 +19,10 @@
           <span class="app-mobile-brand-text">KikoeruManager</span>
           <span
             class="app-mobile-brand-version"
-            :class="{ 'is-update': updateInfo }"
-            :title="updateInfo ? `发现新版本 ${updateInfo.latestTag}，点击前往 GitHub Release` : ''"
-            @click="updateInfo && openUpdateRelease()"
-          >{{ appVersionLabel }}</span>
+            :class="{ 'is-update': updateInfo, 'is-checking': updateChecking }"
+            :title="updateInfo ? `发现新版本 ${updateInfo.latestTag}，点击前往 GitHub Release` : '点击检查更新'"
+            @click="handleVersionClick"
+          >{{ appVersionLabel }}<template v-if="updateChecking"> · 检查中</template></span>
         </div>
       </div>
       <NotificationBell class="app-mobile-bell" />
@@ -52,19 +52,22 @@
             <span class="logo-text">KikoeruManager</span>
             <div class="logo-meta-row">
               <button
-                v-if="updateInfo"
                 type="button"
-                class="logo-version is-update"
-                :title="`发现新版本 ${updateInfo.latestTag}，点击前往 GitHub Release`"
-                @click="openUpdateRelease"
+                class="logo-version"
+                :class="{ 'is-update': updateInfo, 'is-checking': updateChecking }"
+                :title="updateInfo ? `发现新版本 ${updateInfo.latestTag}，点击前往 GitHub Release` : '点击检查更新'"
+                @click="handleVersionClick"
               >
                 <span class="logo-subtitle">{{ appVersionLabel }}</span>
-                <span class="logo-update-badge">
+                <span v-if="updateInfo" class="logo-update-badge">
                   <ArrowUpRight :size="11" :stroke-width="2.6" />
                   <span>新版本 {{ updateInfo.latestTag }}</span>
                 </span>
+                <span v-else-if="updateChecking" class="logo-update-badge is-checking">
+                  <LoaderCircle :size="11" :stroke-width="2.6" class="logo-checking-spin" />
+                  <span>检查中</span>
+                </span>
               </button>
-              <span v-else class="logo-subtitle">{{ appVersionLabel }}</span>
               <NotificationBell class="logo-bell" />
             </div>
           </div>
@@ -233,6 +236,7 @@ import {
   House,
   KeyRound,
   ListTodo,
+  LoaderCircle,
   Menu,
   Package2,
   ScrollText,
@@ -250,6 +254,7 @@ import { useRealtimeEvents } from './composables/useRealtimeEvents'
 import { useNotifications } from './composables/useNotifications'
 import { useUpdateCheck } from './composables/useUpdateCheck'
 import { healthApi, watcherApi } from './api'
+import { ElMessage } from 'element-plus'
 import router, { preloadRouteComponent } from './router'
 
 const appVersion = ref('dev')
@@ -266,6 +271,8 @@ const realtimeEvents = useRealtimeEvents()
 const { panelOpen: notificationPanelOpen } = useNotifications()
 const {
   updateInfo,
+  updateChecking,
+  checkUpdate,
   openUpdateRelease,
   startUpdateCheck,
   stopUpdateCheck
@@ -525,6 +532,24 @@ async function refreshAppVersion() {
     if (version) appVersion.value = version
   } catch (error) {
     console.warn('[App] 获取系统版本失败', error)
+  }
+}
+
+// 点击版本号：已有新版本时直接跳转 Release；否则强制检查一次，
+// 发现新版本则高亮提示（再点跳转），已是最新则给轻提示。
+async function handleVersionClick() {
+  if (updateInfo.value) {
+    openUpdateRelease()
+    return
+  }
+  if (updateChecking.value) return
+  const found = await checkUpdate({ force: true })
+  if (found === true) {
+    ElMessage.success(`发现新版本 ${updateInfo.value.latestTag}，点击版本号前往 GitHub Release`)
+  } else if (found === false) {
+    ElMessage.info('已是最新版本')
+  } else {
+    ElMessage.warning('检查更新失败，请稍后重试')
   }
 }
 
@@ -5448,11 +5473,17 @@ html.kikoerumanager-dark .detail-body .path {
     transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1),
     filter 0.3s ease;
 }
-.logo-version.is-update:hover {
+.logo-version:hover {
   transform: translateY(-2px) scale(1.02);
 }
-.logo-version.is-update:active {
+.logo-version:active {
   transform: scale(0.96);
+}
+.logo-version.is-checking {
+  cursor: wait;
+}
+.logo-version.is-checking:hover {
+  transform: none;
 }
 .logo-version.is-update .logo-subtitle {
   color: #b45309;
@@ -5471,6 +5502,24 @@ html.kikoerumanager-dark .detail-body .path {
   background: linear-gradient(135deg, #f59e0b, #d97706);
   animation: logo-update-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
   white-space: nowrap;
+}
+.logo-update-badge.is-checking {
+  background: rgba(29, 29, 31, 0.32);
+  animation: none;
+}
+html.kikoerumanager-dark .logo-update-badge.is-checking {
+  background: rgba(255, 255, 255, 0.24);
+}
+.logo-checking-spin {
+  display: inline-block;
+  animation: logo-checking-rotate 0.9s linear infinite;
+  transform-origin: center;
+  will-change: transform;
+}
+@keyframes logo-checking-rotate {
+  to {
+    transform: rotate(360deg);
+  }
 }
 @keyframes logo-update-pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(217, 119, 6, 0.45); }
@@ -6187,10 +6236,17 @@ html.kikoerumanager-dark .detail-body .path {
   .app-mobile-brand-version {
     font-size: 10px;
     color: rgba(15, 23, 42, 0.48);
+    cursor: pointer;
+  }
+  .app-mobile-brand-version:active {
+    transform: scale(0.96);
+  }
+  .app-mobile-brand-version.is-checking {
+    cursor: wait;
+    color: rgba(15, 23, 42, 0.72);
   }
   .app-mobile-brand-version.is-update {
     color: #d97706;
-    cursor: pointer;
   }
   .app-mobile-bell {
     flex-shrink: 0;
