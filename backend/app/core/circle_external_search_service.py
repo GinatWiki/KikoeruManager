@@ -89,7 +89,8 @@ class CircleExternalSearchService:
     """社团补全的外部搜索跳转探测，不参与来源统计或下载链路。"""
 
     _ANIME_SHARE_BASE_URL = "https://www.anime-sharing.com"
-    _SOUTH_PLUS_BASE_URL = "https://bbs.white-plus.net"
+    _SOUTH_PLUS_BASE_URL = "https://bbs.south-plus.net"
+    _DEFAULT_SOUTH_PLUS_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
     _HIT_REFRESH_SECONDS = 30 * 24 * 60 * 60
     _MISS_REFRESH_SECONDS = 7 * 24 * 60 * 60
     _UNAVAILABLE_REFRESH_SECONDS = 10 * 60
@@ -103,7 +104,6 @@ class CircleExternalSearchService:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
         "Accept-Language": "zh-CN,zh;q=0.8,en-BG;q=0.7,en-US;q=0.6,ja;q=0.5,zh-TW;q=0.4",
         "Cache-Control": "max-age=0",
-        "Referer": "https://bbs.white-plus.net/search.php",
         "Sec-CH-UA": '"Not:A-Brand";v="8", "Chromium";v="150", "Microsoft Edge";v="150"',
         "Sec-CH-UA-Mobile": "?0",
         "Sec-CH-UA-Platform": '"Windows"',
@@ -111,7 +111,6 @@ class CircleExternalSearchService:
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "same-origin",
         "Upgrade-Insecure-Requests": "1",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0",
     }
 
     def __init__(self) -> None:
@@ -156,6 +155,22 @@ class CircleExternalSearchService:
     def _anime_share_search_url(self, rjcode: str) -> str:
         return f"{self._ANIME_SHARE_BASE_URL}/search/3528560/?{urlencode({'q': rjcode, 'o': 'relevance'})}"
 
+    def _south_plus_base_url(self) -> str:
+        """南+ 访问域名：优先配置值，非法时回退默认镜像域名。"""
+        base = str(
+            getattr(get_config().circle_external_search, "south_plus_base_url", "") or ""
+        ).strip().rstrip("/")
+        if not base.startswith("https://") or " " in base:
+            return self._SOUTH_PLUS_BASE_URL
+        return base
+
+    def _south_plus_user_agent(self) -> str:
+        """南+ 浏览器 UA：优先配置值，空时回退默认 Chrome UA。"""
+        user_agent = str(
+            getattr(get_config().circle_external_search, "south_plus_user_agent", "") or ""
+        ).strip()
+        return user_agent or self._DEFAULT_SOUTH_PLUS_USER_AGENT
+
     def _south_plus_search_url(self, rjcode: str) -> str:
         query = {
             "step": "2",
@@ -168,11 +183,24 @@ class CircleExternalSearchService:
             "orderway": "postdate",
             "asc": "DESC",
         }
-        return f"{self._SOUTH_PLUS_BASE_URL}/search.php?{urlencode(query)}"
+        return f"{self._south_plus_base_url()}/search.php?{urlencode(query)}"
 
     @classmethod
-    def _south_plus_headers(cls, cookie: str) -> Dict[str, str]:
-        return {**cls._SOUTH_PLUS_BROWSER_HEADERS, "Cookie": str(cookie or "").strip()}
+    def _south_plus_headers(
+        cls,
+        cookie: str,
+        *,
+        base_url: str = "",
+        user_agent: str = "",
+    ) -> Dict[str, str]:
+        base = str(base_url or "").strip().rstrip("/") or cls._SOUTH_PLUS_BASE_URL
+        ua = str(user_agent or "").strip() or cls._DEFAULT_SOUTH_PLUS_USER_AGENT
+        return {
+            **cls._SOUTH_PLUS_BROWSER_HEADERS,
+            "Referer": f"{base}/search.php",
+            "User-Agent": ua,
+            "Cookie": str(cookie or "").strip(),
+        }
 
     def _source_search_url(self, source: str, rjcode: str) -> str:
         if source == "anime_share":
@@ -189,7 +217,7 @@ class CircleExternalSearchService:
         async with self._semaphore:
             client_kwargs: Dict[str, Any] = {
                 "follow_redirects": True,
-                "timeout": httpx.Timeout(connect=8.0, read=12.0, write=8.0, pool=8.0),
+                "timeout": httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
                 "headers": {
                     "Accept": "text/html,application/xhtml+xml",
                     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
@@ -251,12 +279,15 @@ class CircleExternalSearchService:
             return {"status": "unavailable", "results": [], "search_url": search_url}
         cookie = str(getattr(config, "south_plus_cookie", "") or "").strip()
         proxy = str(getattr(config, "south_plus_proxy", "") or "").strip()
+        base_url = self._south_plus_base_url()
+        user_agent = self._south_plus_user_agent()
+        host = urlparse(base_url).netloc.lower()
         if not cookie:
             return {"status": "unavailable", "results": [], "search_url": search_url}
         try:
             page = await self._fetch_south_plus_text(
                 search_url,
-                headers=self._south_plus_headers(cookie),
+                headers=self._south_plus_headers(cookie, base_url=base_url, user_agent=user_agent),
                 proxy=proxy,
             )
             if "不能使用搜索功能" in page or "用户组权限" in page:
@@ -266,8 +297,8 @@ class CircleExternalSearchService:
             results = []
             for result in parser.results:
                 title = str(result.get("title") or "").strip()
-                url = urljoin(self._SOUTH_PLUS_BASE_URL, str(result.get("url") or ""))
-                if not self._matches_nearby_rjcode(rjcode, title, url) or not self._is_allowed_url(url, "bbs.white-plus.net", ("/read.php", "/thread.php")):
+                url = urljoin(base_url, str(result.get("url") or ""))
+                if not self._matches_nearby_rjcode(rjcode, title, url) or not self._is_allowed_url(url, host, ("/read.php", "/thread.php")):
                     continue
                 if not any(item["url"] == url for item in results):
                     results.append({"url": url, "title": title})
@@ -276,24 +307,39 @@ class CircleExternalSearchService:
             logger.info("[社团补全·外部搜索] 南+ 查询失败 rj=%s", rjcode, exc_info=True)
             return {"status": "error", "results": [], "search_url": search_url}
 
-    async def test_south_plus_connection(self, cookie: str = "", proxy: str = "") -> Dict[str, Any]:
+    async def test_south_plus_connection(
+        self,
+        cookie: str = "",
+        proxy: str = "",
+        *,
+        base_url: str = "",
+        user_agent: str = "",
+    ) -> Dict[str, Any]:
         """只验证南+搜索页可访问性，不写入作品搜索缓存。"""
         cookie = str(cookie or "").strip()
         if not cookie:
             return {"success": False, "status": "missing_cookie", "message": "请先填写南+ Cookie"}
+        effective_base = str(base_url or "").strip().rstrip("/") or self._south_plus_base_url()
+        if not effective_base.startswith("https://") or " " in effective_base:
+            effective_base = self._SOUTH_PLUS_BASE_URL
+        effective_ua = str(user_agent or "").strip() or self._south_plus_user_agent()
         started_at = time.perf_counter()
-        search_url = self._south_plus_search_url("RJ00000000")
+        search_url = f"{effective_base}/search.php?{urlencode({'step': '2', 'keyword': 'RJ00000000', 'method': 'OR', 'pwuser': '', 'sch_area': '0', 'f_fid': 'all', 'sch_time': 'all', 'orderway': 'postdate', 'asc': 'DESC'})}"
         try:
             page = await self._fetch_south_plus_text(
                 search_url,
-                headers=self._south_plus_headers(cookie),
+                headers=self._south_plus_headers(cookie, base_url=effective_base, user_agent=effective_ua),
                 proxy=str(proxy or "").strip(),
             )
             if "不能使用搜索功能" in page or "用户组权限" in page:
                 return {
                     "success": False,
                     "status": "permission_denied",
-                    "message": "南+ 当前账号没有搜索权限",
+                    "message": (
+                        "南+ 返回用户组权限页：通常是浏览器 User-Agent 与复制 Cookie 的浏览器不一致，"
+                        "或被 Cloudflare 判定为新访客。请在下方「浏览器 User-Agent」填入复制 Cookie 的那个浏览器的 UA"
+                        "（浏览器地址栏打开 chrome://version 可查），并确认域名与网络环境可达。"
+                    ),
                     "latency_ms": round((time.perf_counter() - started_at) * 1000),
                 }
             return {
@@ -310,12 +356,23 @@ class CircleExternalSearchService:
                 "http_status": exc.response.status_code,
                 "latency_ms": round((time.perf_counter() - started_at) * 1000),
             }
+        except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
+            logger.info("[社团补全·外部搜索] 南+ 连接测试失败: %s", exc, exc_info=True)
+            return {
+                "success": False,
+                "status": "connect_error",
+                "message": (
+                    f"无法连接南+域名 {effective_base}：请确认当前网络能访问该域名，"
+                    "或在「南+ 域名」里换成可达的镜像域名，必要时填写「南+ HTTP 代理」。"
+                ),
+                "latency_ms": round((time.perf_counter() - started_at) * 1000),
+            }
         except Exception as exc:
             logger.info("[社团补全·外部搜索] 南+ 连接测试失败: %s", exc, exc_info=True)
             return {
                 "success": False,
                 "status": "error",
-                "message": "南+ 连接失败，请检查代理和 Cookie",
+                "message": "南+ 连接失败，请检查代理、域名和 Cookie",
                 "latency_ms": round((time.perf_counter() - started_at) * 1000),
             }
 

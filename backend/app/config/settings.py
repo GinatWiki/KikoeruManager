@@ -404,6 +404,11 @@ class CircleExternalSearchConfig(BaseModel):
     south_plus_enabled: bool = True
     south_plus_cookie: str = ""
     south_plus_proxy: str = ""
+    # 南+ 访问域名可自定义：不同网络环境可换镜像域名（south-plus / white-plus / summer-plus 等）
+    south_plus_base_url: str = "https://bbs.south-plus.net"
+    # 南+ 的 Cloudflare cf_clearance 令牌绑定浏览器 UA：
+    # 需与「复制 Cookie 的那个浏览器」的 UA 一致，否则会被判定为未登录、搜索返回用户组权限页。
+    south_plus_user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 
 class AutoProcessConfig(BaseModel):
     """正常解压缩流程步骤配置"""

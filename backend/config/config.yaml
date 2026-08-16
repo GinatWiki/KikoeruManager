@@ -249,6 +249,8 @@ circle_external_search:
   south_plus_enabled: true
   south_plus_cookie: ''
   south_plus_proxy: ''
+  south_plus_base_url: https://bbs.south-plus.net
+  south_plus_user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36'
 existing_process_sync_subtitle: true
 existing_process_rename: true
 existing_process_classify: true

@@ -215,6 +215,12 @@
           <SettingsFieldCard label="南+ HTTP 代理" hint="只作用于南+搜索请求；留空则直连。支持 http://127.0.0.1:7890。">
             <input v-model="circleExternalSearch.south_plus_proxy" class="field-input" type="text" placeholder="http://127.0.0.1:7890">
           </SettingsFieldCard>
+          <SettingsFieldCard label="南+ 域名" hint="不同网络环境可换镜像域名，例如 https://bbs.white-plus.net 或 https://bbs.summer-plus.net。默认 https://bbs.south-plus.net。">
+            <input v-model="circleExternalSearch.south_plus_base_url" class="field-input" type="text" placeholder="https://bbs.south-plus.net">
+          </SettingsFieldCard>
+          <SettingsFieldCard label="浏览器 User-Agent" hint="南+ 的 Cloudflare 令牌与浏览器 UA 绑定：需与复制 Cookie 的那个浏览器一致，否则搜索会返回「用户组权限」页。可在该浏览器地址栏打开 chrome://version 或 edge://version 查看 UA。">
+            <input v-model="circleExternalSearch.south_plus_user_agent" class="field-input" type="text" placeholder="Mozilla/5.0 ... Chrome/151.0.0.0 Safari/537.36">
+          </SettingsFieldCard>
           <div class="service-action-row">
             <StatefulButton
               type="button"
@@ -511,7 +517,9 @@ const defaultCircleExternalSearchConfig = {
   anime_share_enabled: true,
   south_plus_enabled: true,
   south_plus_cookie: '',
-  south_plus_proxy: ''
+  south_plus_proxy: '',
+  south_plus_base_url: 'https://bbs.south-plus.net',
+  south_plus_user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36'
 }
 
 const circleExternalSearch = computed(() => {
@@ -914,6 +922,8 @@ async function testSouthPlusConnection() {
     const result = await circleCompletionApi.testSouthPlusConnection({
       south_plus_cookie: circleExternalSearch.value.south_plus_cookie,
       south_plus_proxy: circleExternalSearch.value.south_plus_proxy,
+      south_plus_base_url: circleExternalSearch.value.south_plus_base_url,
+      south_plus_user_agent: circleExternalSearch.value.south_plus_user_agent,
     })
     const message = String(result?.message || '南+ 连接测试完成')
     southPlusTestMessage.value = result?.success ? `✓ ${message}` : `✗ ${message}`

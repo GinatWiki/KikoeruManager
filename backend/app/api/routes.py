@@ -17950,6 +17950,8 @@ class CircleCompletionExternalSearchRequest(BaseModel):
 class CircleCompletionExternalSearchTestRequest(BaseModel):
     south_plus_cookie: Optional[str] = None
     south_plus_proxy: Optional[str] = None
+    south_plus_base_url: Optional[str] = None
+    south_plus_user_agent: Optional[str] = None
 
 
 class CircleCompletionDownloadStartRequest(BaseModel):
@@ -20899,7 +20901,14 @@ async def circle_completion_external_search_test(payload: CircleCompletionExtern
     if not cookie or cookie == "********":
         cookie = str(getattr(config, "south_plus_cookie", "") or "").strip()
     proxy = str(payload.south_plus_proxy if payload.south_plus_proxy is not None else getattr(config, "south_plus_proxy", "") or "").strip()
-    return await get_circle_external_search_service().test_south_plus_connection(cookie, proxy)
+    base_url = str(payload.south_plus_base_url or "").strip()
+    user_agent = str(payload.south_plus_user_agent or "").strip()
+    return await get_circle_external_search_service().test_south_plus_connection(
+        cookie,
+        proxy,
+        base_url=base_url,
+        user_agent=user_agent,
+    )
 
 
 @app.get("/api/circle-completion/circles/{circle_id}/work-codes")

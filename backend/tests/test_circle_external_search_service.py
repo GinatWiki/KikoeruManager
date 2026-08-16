@@ -62,9 +62,31 @@ def test_south_plus_connection_test_uses_browser_compatible_headers():
 
     assert result["success"] is True
     assert captured["headers"]["Cookie"] == "bbs_session=test"
-    assert "Edg/150" in captured["headers"]["User-Agent"]
-    assert captured["headers"]["Referer"] == "https://bbs.white-plus.net/search.php"
+    assert "Chrome/151" in captured["headers"]["User-Agent"]
+    assert captured["headers"]["Referer"] == "https://bbs.south-plus.net/search.php"
     assert captured["headers"]["Sec-Fetch-Site"] == "same-origin"
+
+
+def test_south_plus_connection_honors_custom_base_url_and_user_agent():
+    service = CircleExternalSearchService()
+    captured = {}
+
+    async def fake_fetch(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return '<html><title>South Plus search</title><body>没有匹配结果</body></html>'
+
+    service._fetch_text = fake_fetch
+    result = asyncio.run(service.test_south_plus_connection(
+        "bbs_session=test", "",
+        base_url="https://bbs.example-mirror.net",
+        user_agent="CustomUA/9.9",
+    ))
+
+    assert result["success"] is True
+    assert captured["url"].startswith("https://bbs.example-mirror.net/search.php?")
+    assert captured["headers"]["User-Agent"] == "CustomUA/9.9"
+    assert captured["headers"]["Referer"] == "https://bbs.example-mirror.net/search.php"
 
 
 def test_south_plus_probe_schema_version_is_explicit():
@@ -135,7 +157,7 @@ def test_disabled_or_unconfigured_source_keeps_search_url(monkeypatch):
     assert anime_share["status"] == "unavailable"
     assert anime_share["search_url"].startswith("https://www.anime-sharing.com/search/")
     assert south_plus["status"] == "unavailable"
-    assert south_plus["search_url"].startswith("https://bbs.white-plus.net/search.php?")
+    assert south_plus["search_url"].startswith("https://bbs.south-plus.net/search.php?")
 
 
 def test_external_search_aggregates_persistent_variants(monkeypatch):
