@@ -41,6 +41,24 @@ def test_get_task_engine_configures_processing_and_download_slots_separately(mon
     engine.set_max_concurrent_downloads.assert_called_once_with(5)
 
 
+
+def test_get_task_engine_reserves_asmr_file_download_slots(monkeypatch):
+    """任务引擎容量至少覆盖全局文件并发，后续 RJ 才能使用空余槽位。"""
+    engine = Mock()
+    monkeypatch.setattr(task_engine_module, "_task_engine", engine)
+    monkeypatch.setattr(
+        settings_module,
+        "get_config",
+        lambda: SimpleNamespace(
+            processing=SimpleNamespace(max_workers=2),
+            asmr_sync=SimpleNamespace(max_concurrent_downloads=5),
+        ),
+    )
+
+    assert task_engine_module.get_task_engine() is engine
+    engine.set_max_concurrent.assert_called_once_with(5)
+
+
 class TestTaskEngine:
     """测试任务引擎"""
     

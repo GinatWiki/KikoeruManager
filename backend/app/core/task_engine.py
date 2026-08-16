@@ -7931,6 +7931,8 @@ def get_task_engine() -> TaskEngine:
     global _task_engine
     from ..config.settings import get_config
     config = get_config()
+    # 本仓库采用 1716223 的下载/处理双通道并发：下载任务独占
+    # max_concurrent_downloads 通道，处理通道无需为 ASMR 并发预留上限。
     configured_max_workers = max(1, int(config.processing.max_workers))
     configured_max_downloads = max(1, int(config.asmr_sync.max_concurrent_downloads))
     if _task_engine is None:
