@@ -56,7 +56,11 @@ _SHARE_PREVIEW_ONLY_SOURCES = {"pikpak", "transferit"}
 _FILE_LEVEL_SELECTION_SOURCES = _SHARE_PREVIEW_ONLY_SOURCES | {"gofile", "google_drive"}
 _GOFILE_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 _GOFILE_LANGUAGE = "en-US"
-_GOFILE_WEBSITE_TOKEN_SALT = "9844d94d963d30"
+# Gofile 会定期轮换 X-Website-Token 的哈希盐值；盐值失效时 contents 接口
+# 返回 401 error-notPremium。当前值 2026-08 实测有效（旧值为 9844d94d963d30）。
+_GOFILE_WEBSITE_TOKEN_SALT = "12af056dacea0b"
+_GOFILE_CONTENTS_MAX_ATTEMPTS = 3
+_GOFILE_RATE_LIMIT_RETRY_SECONDS = 4.0
 _GOFILE_API_TIMEOUT_SECONDS = 45
 _GOFILE_CDN_ERROR_CONTENT_TYPES = ("text/html", "application/json", "text/plain")
 _GOFILE_NOT_PREMIUM_STATUS = {"error-notpremium", "error-not-premium", "notpremium"}
@@ -158,6 +162,11 @@ def build_http_download_batch_title(metadata: Dict[str, Any], item_count: int = 
 
 class HttpDownloadError(ValueError):
     """HTTP 外链下载的可预期业务错误。"""
+
+    def __init__(self, message: str, api_status: str = ""):
+        super().__init__(message)
+        # 源站 JSON 里的 status 字段（如 error-notPremium / error-rateLimit），便于按状态重试。
+        self.api_status = str(api_status or "")
 
 
 class _TransferitDownloadAbort(RuntimeError):
@@ -1807,7 +1816,12 @@ class HttpDownloadService:
             async with request(url, headers=headers or {}, allow_redirects=True, proxy=proxy) as response:
                 body = await response.text()
                 if response.status >= 400:
-                    raise HttpDownloadError(f"源站 API 返回 HTTP {response.status}: {body[:160]}")
+                    api_status = ""
+                    try:
+                        api_status = str((json.loads(body) or {}).get("status") or "")
+                    except Exception:
+                        pass
+                    raise HttpDownloadError(f"源站 API 返回 HTTP {response.status}: {body[:160]}", api_status)
                 try:
                     data = json.loads(body)
                 except Exception as exc:
@@ -1851,8 +1865,8 @@ class HttpDownloadService:
     def _gofile_token(self) -> str:
         return str(getattr(self._config(), "gofile_token", "") or "").strip()
 
-    def _gofile_website_token(self, token: str) -> str:
-        slot = str(int(time.time() // 14400))
+    def _gofile_website_token(self, token: str, *, window_offset: int = 0) -> str:
+        slot = str(int(time.time() // 14400) + int(window_offset))
         payload = f"{_GOFILE_USER_AGENT}::{_GOFILE_LANGUAGE}::{token}::{slot}::{_GOFILE_WEBSITE_TOKEN_SALT}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -1898,7 +1912,13 @@ class HttpDownloadService:
         return ""
 
     def _gofile_not_premium_message(self) -> str:
-        return "Gofile 拒绝当前账号或临时账号解析；可在 HTTP 下载设置里填写账号 token，或稍后重试"
+        return (
+            "Gofile 拒绝了当前的网站 token（error-notPremium）：可能是 Gofile 轮换了算法盐值，"
+            "请升级版本；或在 HTTP 下载设置里填写账号 token 后重试"
+        )
+
+    def _gofile_rate_limit_message(self) -> str:
+        return "Gofile 请求频率受限（error-rateLimit），请稍后重试"
 
     def _gofile_api_status_error(self, status: Any) -> HttpDownloadError:
         status_text = str(status or "unknown").strip()
@@ -1936,6 +1956,54 @@ class HttpDownloadService:
             item["headers"] = dict(source_item.get("headers") or {})
         return item
 
+    async def _fetch_gofile_contents(self, api_url: str, token: str) -> Dict[str, Any]:
+        """请求 Gofile contents 接口，处理时间窗口与访客限速重试。
+
+        Gofile 校验 X-Website-Token（由 UA/语言/账号 token/4 小时窗口/盐值哈希生成）：
+        - error-notPremium：网站 token 被拒绝。先换上一个 4 小时窗口重试一次（覆盖
+          服务器与本地时钟边界不一致），仍失败则说明 Gofile 轮换了盐值，给出可操作提示；
+        - error-rateLimit：访客限速，按退避间隔重试。
+        """
+        tried_previous_window = False
+        last_status = ""
+        for attempt in range(_GOFILE_CONTENTS_MAX_ATTEMPTS):
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "X-Website-Token": self._gofile_website_token(
+                    token, window_offset=-1 if tried_previous_window else 0
+                ),
+                "X-BL": _GOFILE_LANGUAGE,
+                "User-Agent": _GOFILE_USER_AGENT,
+            }
+            try:
+                data = await self._fetch_gofile_json(api_url, headers=headers)
+            except HttpDownloadError as exc:
+                last_status = str(getattr(exc, "api_status", "") or "").strip().lower()
+                if last_status == "error-ratelimit":
+                    if attempt < _GOFILE_CONTENTS_MAX_ATTEMPTS - 1:
+                        await asyncio.sleep(_GOFILE_RATE_LIMIT_RETRY_SECONDS * (attempt + 1))
+                        continue
+                    raise HttpDownloadError(self._gofile_rate_limit_message()) from exc
+                if last_status == "error-notpremium" and not tried_previous_window:
+                    tried_previous_window = True
+                    continue
+                if last_status == "error-notpremium":
+                    raise HttpDownloadError(self._gofile_not_premium_message()) from exc
+                raise
+            last_status = str(data.get("status") or "").strip().lower()
+            if last_status == "ok":
+                return data
+            if last_status == "error-ratelimit":
+                if attempt < _GOFILE_CONTENTS_MAX_ATTEMPTS - 1:
+                    await asyncio.sleep(_GOFILE_RATE_LIMIT_RETRY_SECONDS * (attempt + 1))
+                    continue
+                raise HttpDownloadError(self._gofile_rate_limit_message())
+            if last_status == "error-notpremium" and not tried_previous_window:
+                tried_previous_window = True
+                continue
+            raise self._gofile_api_status_error(data.get("status"))
+        raise HttpDownloadError(self._gofile_not_premium_message())
+
     async def _collect_gofile_files(self, raw_url: str) -> Dict[str, Any]:
         content_id = self._gofile_content_id_from_url(raw_url)
         configured_token = self._gofile_token()
@@ -1956,17 +2024,7 @@ class HttpDownloadService:
         api_url = f"https://api.gofile.io/contents/{content_id}"
         if params:
             api_url = f"{api_url}?{urlencode(params)}"
-        data = await self._fetch_gofile_json(
-            api_url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "X-Website-Token": self._gofile_website_token(token),
-                "X-BL": _GOFILE_LANGUAGE,
-                "User-Agent": _GOFILE_USER_AGENT,
-            },
-        )
-        if str(data.get("status") or "").lower() != "ok":
-            raise self._gofile_api_status_error(data.get("status"))
+        data = await self._fetch_gofile_contents(api_url, token)
         root = data.get("data") or {}
         if not isinstance(root, dict):
             raise HttpDownloadError("Gofile 返回数据结构异常")

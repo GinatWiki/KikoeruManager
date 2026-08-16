@@ -1497,6 +1497,144 @@ async def test_resolve_gofile_folder_files(monkeypatch, tmp_path):
     assert result["files"][0]["aria2_header"] == ["Cookie: accountToken=secret-token"]
 
 
+def test_gofile_website_token_matches_gofile_formula(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    import hashlib as _hashlib
+
+    from app.core import http_download_service as module
+
+    monkeypatch.setattr(module.time, "time", lambda: 1_000_000_000)
+    expected_slot = str(int(1_000_000_000 // 14400) + 2)
+    expected = _hashlib.sha256(
+        (
+            f"{module._GOFILE_USER_AGENT}::{module._GOFILE_LANGUAGE}::guest-token::"
+            f"{expected_slot}::{module._GOFILE_WEBSITE_TOKEN_SALT}"
+        ).encode("utf-8")
+    ).hexdigest()
+    assert service._gofile_website_token("guest-token", window_offset=2) == expected
+    # 盐值回归保护：Gofile 轮换盐值时必须同步更新
+    assert module._GOFILE_WEBSITE_TOKEN_SALT == "12af056dacea0b"
+
+
+@pytest.mark.asyncio
+async def test_collect_gofile_files_retries_previous_window_on_not_premium(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path, gofile_token="secret-token")
+    service = HttpDownloadService()
+    seen_tokens = []
+    calls = 0
+
+    async def fake_fetch_json(url, headers=None, method="GET", platform="http"):
+        nonlocal calls
+        calls += 1
+        seen_tokens.append(headers["X-Website-Token"])
+        if calls == 1:
+            raise HttpDownloadError("源站 API 返回 HTTP 401: {...}", api_status="error-notPremium")
+        return {
+            "status": "ok",
+            "data": {
+                "id": "content-id",
+                "type": "folder",
+                "name": "root",
+                "children": {
+                    "file-1": {
+                        "id": "file-1",
+                        "name": "voice.zip",
+                        "type": "file",
+                        "size": 12,
+                        "link": "https://store1.gofile.io/download/direct/voice.zip",
+                    }
+                },
+            },
+        }
+
+    monkeypatch.setattr(service, "_fetch_json", fake_fetch_json)
+
+    result = await service._collect_gofile_files("https://gofile.io/d/content-id")
+
+    assert calls == 2
+    assert seen_tokens[0] == service._gofile_website_token("secret-token", window_offset=0)
+    assert seen_tokens[1] == service._gofile_website_token("secret-token", window_offset=-1)
+    assert result["files"][0]["filename"] == "voice.zip"
+
+
+@pytest.mark.asyncio
+async def test_collect_gofile_files_retries_rate_limit_with_backoff(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path, gofile_token="secret-token")
+    service = HttpDownloadService()
+    calls = 0
+    sleep_seconds = []
+
+    async def fake_fetch_json(url, headers=None, method="GET", platform="http"):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise HttpDownloadError("源站 API 返回 HTTP 429: {...}", api_status="error-rateLimit")
+        return {
+            "status": "ok",
+            "data": {
+                "id": "content-id",
+                "type": "folder",
+                "name": "root",
+                "children": {
+                    "file-1": {
+                        "id": "file-1",
+                        "name": "voice.zip",
+                        "type": "file",
+                        "size": 12,
+                        "link": "https://store1.gofile.io/download/direct/voice.zip",
+                    }
+                },
+            },
+        }
+
+    async def fake_sleep(seconds):
+        sleep_seconds.append(seconds)
+
+    monkeypatch.setattr(service, "_fetch_json", fake_fetch_json)
+    monkeypatch.setattr("app.core.http_download_service.asyncio.sleep", fake_sleep)
+
+    result = await service._collect_gofile_files("https://gofile.io/d/content-id")
+
+    assert calls == 2
+    assert sleep_seconds and sleep_seconds[0] > 0
+    assert result["files"][0]["filename"] == "voice.zip"
+
+
+@pytest.mark.asyncio
+async def test_collect_gofile_files_not_premium_exhausted_raises_friendly_message(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path, gofile_token="secret-token")
+    service = HttpDownloadService()
+
+    async def fake_fetch_json(url, headers=None, method="GET", platform="http"):
+        raise HttpDownloadError("源站 API 返回 HTTP 401: {...}", api_status="error-notPremium")
+
+    monkeypatch.setattr(service, "_fetch_json", fake_fetch_json)
+
+    with pytest.raises(HttpDownloadError, match="error-notPremium"):
+        await service._collect_gofile_files("https://gofile.io/d/content-id")
+
+
+@pytest.mark.asyncio
+async def test_collect_gofile_files_rate_limit_exhausted_raises_rate_limit_message(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path, gofile_token="secret-token")
+    service = HttpDownloadService()
+    sleep_seconds = []
+
+    async def fake_fetch_json(url, headers=None, method="GET", platform="http"):
+        raise HttpDownloadError("源站 API 返回 HTTP 429: {...}", api_status="error-rateLimit")
+
+    async def fake_sleep(seconds):
+        sleep_seconds.append(seconds)
+
+    monkeypatch.setattr(service, "_fetch_json", fake_fetch_json)
+    monkeypatch.setattr("app.core.http_download_service.asyncio.sleep", fake_sleep)
+
+    with pytest.raises(HttpDownloadError, match="error-rateLimit"):
+        await service._collect_gofile_files("https://gofile.io/d/content-id")
+    assert len(sleep_seconds) == 2
+
+
 @pytest.mark.asyncio
 async def test_collect_google_drive_folder_files_from_embedded_folder_view(monkeypatch, tmp_path):
     bind_config(monkeypatch, tmp_path)
