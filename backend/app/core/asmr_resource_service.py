@@ -2662,6 +2662,12 @@ class ASMRResourceService:
             metadata,
             status="PENDING",
         )
+        # 任务本身照常完成（入库已成功），进度日志里写明冲突去向，
+        # 避免任务中心显示"已完成"而问题作品里有记录让用户困惑。
+        self._append_task_log(
+            task,
+            f"字幕版本检测冲突 {len(conflicts)} 项，已写入问题作品待人工确认",
+        )
 
     async def _sync_circle_completion_owned_state(self, rjcode: str, folder_path: str, library_id: str = "") -> None:
         if not rjcode or not folder_path:

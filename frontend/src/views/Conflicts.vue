@@ -590,6 +590,20 @@
                 <p class="conflicts-subtitle-conflicts-hint">
                   每个文件给出两种检测结论：目录/文件名标注与字幕内容检测不一致时，无法自动决定语言版本。请人工核对后选择「跳过」结束本条，或修正字幕文件后重新处理。
                 </p>
+                <div v-if="activeConflict.linked_task" class="conflicts-subtitle-task-link">
+                  <Workflow class="w-4 h-4 flex-shrink-0" />
+                  <span class="conflicts-subtitle-task-text">
+                    来源任务
+                    <b>#{{ shortTaskId(activeConflict.linked_task.id) }}</b>
+                    <span
+                      class="conflicts-subtitle-task-status"
+                      :class="{ 'is-done': isTaskDoneStatus(activeConflict.linked_task.status) }"
+                    >{{ taskStatusLabel(activeConflict.linked_task.status) }}</span>
+                    <template v-if="isTaskDoneStatus(activeConflict.linked_task.status)">
+                      —— 作品已入库，任务按正常完成处理，仅字幕版本检测存在冲突待人工确认
+                    </template>
+                  </span>
+                </div>
                 <div class="conflicts-subtitle-conflict-list">
                   <div
                     v-for="(item, index) in getSubtitleDetectionConflicts(activeConflict)"
@@ -796,7 +810,7 @@ import {
   GitMerge, AlertTriangle, FolderOpen, Archive, Info,
   CheckSquare, XSquare, ChevronRight, FileSearch,
   ShieldAlert, Hourglass, Loader2, FileText,
-  Folder, Music, File, X, FileEdit, Captions, ArrowRight,
+  Folder, Music, File, X, FileEdit, Captions, ArrowRight, Workflow,
 } from 'lucide-vue-next'
 import ConflictMergeWorkbench from '../components/conflicts/ConflictMergeWorkbench.vue'
 import BatchRetryPasswordDialog from '../components/conflicts/BatchRetryPasswordDialog.vue'
@@ -1339,6 +1353,31 @@ function subtitleSourceLabel(source) {
     none: '未识别',
   }
   return labels[source] || String(source || '未知')
+}
+
+function shortTaskId(id) {
+  const text = String(id || '')
+  return text.length > 8 ? `${text.slice(0, 8)}…` : text
+}
+
+const TASK_STATUS_LABELS = {
+  completed: '已完成',
+  processing: '处理中',
+  pending: '等待中',
+  failed: '失败',
+  paused: '已暂停',
+  waiting_manual: '等待人工',
+  waiting_retry: '等待重试',
+  cancelled: '已取消',
+}
+
+function taskStatusLabel(status) {
+  const key = String(status || '').toLowerCase()
+  return TASK_STATUS_LABELS[key] || String(status || '未知')
+}
+
+function isTaskDoneStatus(status) {
+  return ['completed', 'cancelled'].includes(String(status || '').toLowerCase())
 }
 
 function isProblemConflict(conflict) {
@@ -4901,6 +4940,43 @@ button:disabled {
   font-size: 12.5px;
   line-height: 1.65;
   color: #64748b;
+}
+.conflicts-subtitle-task-link {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(2, 132, 199, 0.16);
+  border-radius: 10px;
+  background: rgba(240, 249, 255, 0.72);
+  color: #0369a1;
+}
+.conflicts-subtitle-task-text {
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #475569;
+}
+.conflicts-subtitle-task-text b {
+  font-weight: 760;
+  color: #0c4a6e;
+}
+.conflicts-subtitle-task-status {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  margin: 0 6px 0 2px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 750;
+  color: #475569;
+  background: rgba(100, 116, 139, 0.14);
+  white-space: nowrap;
+}
+.conflicts-subtitle-task-status.is-done {
+  color: #047857;
+  background: rgba(16, 185, 129, 0.14);
 }
 .conflicts-subtitle-conflict-list {
   display: flex;

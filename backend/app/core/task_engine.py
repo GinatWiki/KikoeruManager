@@ -5541,6 +5541,12 @@ class TaskEngine:
             metadata,
             status="PENDING",
         )
+        # 任务本身照常完成（入库已成功），进度日志里写明冲突去向，
+        # 避免任务中心显示"已完成"而问题作品里有记录让用户困惑。
+        task.update_progress(
+            task.progress or 82,
+            f"字幕版本检测冲突 {len(conflicts)} 项，已写入问题作品待人工确认",
+        )
 
     async def _sync_subtitle_in_work_dir(self, task: Task, work_dir: str, flow: str) -> None:
         from ..config.settings import get_config

@@ -2111,6 +2111,25 @@ html.kikoerumanager-dark .conflicts-page :is(
 html.kikoerumanager-dark .conflicts-page .conflicts-subtitle-conflicts {
   border-top-color: var(--km-dark-border-soft);
 }
+html.kikoerumanager-dark .conflicts-page .conflicts-subtitle-task-link {
+  border-color: rgba(56, 189, 248, 0.2);
+  background: rgba(12, 74, 110, 0.2);
+  color: #7dd3fc;
+}
+html.kikoerumanager-dark .conflicts-page .conflicts-subtitle-task-text {
+  color: var(--km-dark-text);
+}
+html.kikoerumanager-dark .conflicts-page .conflicts-subtitle-task-text b {
+  color: #7dd3fc;
+}
+html.kikoerumanager-dark .conflicts-page .conflicts-subtitle-task-status {
+  color: rgba(226, 232, 240, 0.82);
+  background: rgba(148, 163, 184, 0.16);
+}
+html.kikoerumanager-dark .conflicts-page .conflicts-subtitle-task-status.is-done {
+  color: #6ee7b7;
+  background: rgba(16, 185, 129, 0.18);
+}
 html.kikoerumanager-dark .conflicts-page .conflicts-subtitle-conflicts-count {
   color: #fbbf24;
   background: rgba(245, 158, 11, 0.16);
