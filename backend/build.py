@@ -62,6 +62,16 @@ def build(console_mode=True):
             if os.path.exists(path):
                 binaries.append((path, "tools/unar"))
 
+    # 收集 litellm 数据文件（model_prices_and_context_window_backup.json 等），
+    # PyInstaller 默认不会自动收集包内的非 Python 文件，需显式声明。
+    try:
+        from PyInstaller.utils.hooks import collect_all
+        litellm_ret = collect_all('litellm')
+        datas += litellm_ret[0]
+        binaries += litellm_ret[1]
+    except Exception:
+        pass
+
     redis_dir = os.path.join(ROOT_DIR, "tools", "redis")
     if os.path.isdir(redis_dir):
         # 完整打包 redis 运行目录（redis-server / redis-cli 及 msys 依赖 DLL），
@@ -80,7 +90,7 @@ a = Analysis(
     pathex=['{ROOT_DIR}'],
     binaries={binaries},
     datas={datas},
-    hiddenimports=['uvicorn', 'fastapi', 'sqlalchemy', 'yaml', 'watchdog', 'filetype', 'requests', 'aiohttp', 'pystray', 'PIL', 'PIL.Image', 'qrcode', 'qrcode.image.pil', 'orjson', 'imapclient', 'imapclient.imapclient'],
+    hiddenimports=['uvicorn', 'fastapi', 'sqlalchemy', 'yaml', 'watchdog', 'filetype', 'requests', 'aiohttp', 'pystray', 'PIL', 'PIL.Image', 'qrcode', 'qrcode.image.pil', 'orjson', 'imapclient', 'imapclient.imapclient', 'litellm'],
     hookspath=[],
     hooksconfig={{}},
     runtime_hooks=[],
