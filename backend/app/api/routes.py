@@ -22350,6 +22350,20 @@ class DuplicateGroupItem(BaseModel):
     total_size: int = 0
     max_mtime: Optional[int] = None
     names: List[str] = Field(default_factory=list)
+    project_name: str = ""
+
+class DuplicateVersionItem(BaseModel):
+    """一个重复版本（按 library_id + parent_path 分组）"""
+    version_key: str
+    library_id: str
+    library_name: str = ""
+    library_type: str = ""
+    root_path: str = ""
+    root_name: str = ""
+    entry_count: int = 0
+    total_size: int = 0
+    max_mtime: Optional[int] = None
+    entries: List["DuplicateEntryItem"] = Field(default_factory=list)
 
 class DuplicateEntryItem(BaseModel):
     id: int
@@ -22363,6 +22377,7 @@ class DuplicateEntryItem(BaseModel):
     size: int = 0
     mtime: Optional[int] = None
     indexed_at: Optional[int] = None
+    version_key: str = ""
 
 class DuplicateGroupListResponse(BaseModel):
     groups: List[DuplicateGroupItem]
@@ -22382,19 +22397,36 @@ async def get_duplicate_groups(
     sort: str = "version_count",
     search: str = "",
 ):
-    """获取重复 RJ 分组列表。按 rjcode 在库存索引中查找出现 ≥2 次的 RJ 号。"""
+    """获取重复 RJ 分组列表。按 (library_id, parent_path) 去重计数版本，避免把同一项目目录下的多个文件误算为多个版本。"""
     from ..models.database import LibraryIndexEntry, get_db
 
     db = next(get_db())
     try:
+        # 版本去重键：每个 (library_id, parent_path) 组合算一个版本
+        version_key_expr = func.concat(
+            LibraryIndexEntry.library_id,
+            "::",
+            func.coalesce(LibraryIndexEntry.parent_path, ""),
+        )
+
         base_q = (
             db.query(
                 LibraryIndexEntry.rjcode,
-                func.count(LibraryIndexEntry.id).label("version_count"),
+                func.count(func.distinct(version_key_expr)).label("version_count"),
                 func.count(func.distinct(LibraryIndexEntry.library_id)).label("library_count"),
-                func.coalesce(func.sum(LibraryIndexEntry.size), 0).label("total_size"),
+                func.coalesce(
+                    func.sum(
+                        func.case(
+                            (LibraryIndexEntry.entry_type == "dir", LibraryIndexEntry.size),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label("total_size"),
                 func.max(LibraryIndexEntry.mtime).label("max_mtime"),
-                func.array_agg(func.distinct(LibraryIndexEntry.name)).label("names"),
+                func.array_agg(
+                    func.distinct(LibraryIndexEntry.parent_path)
+                ).label("parent_paths"),
             )
             .filter(LibraryIndexEntry.rjcode.isnot(None))
             .filter(LibraryIndexEntry.rjcode != "")
@@ -22404,19 +22436,27 @@ async def get_duplicate_groups(
             base_q = base_q.filter(LibraryIndexEntry.rjcode.ilike(f"%{search}%"))
 
         base_q = base_q.group_by(LibraryIndexEntry.rjcode).having(
-            func.count(LibraryIndexEntry.id) > 1
+            func.count(func.distinct(version_key_expr)) > 1
         )
 
         count_q = base_q.subquery()
         total = db.query(func.count()).select_from(count_q).scalar() or 0
 
         sort_map = {
-            "version_count": func.count(LibraryIndexEntry.id).desc(),
-            "total_size": func.coalesce(func.sum(LibraryIndexEntry.size), 0).desc(),
+            "version_count": func.count(func.distinct(version_key_expr)).desc(),
+            "total_size": func.coalesce(
+                func.sum(
+                    func.case(
+                        (LibraryIndexEntry.entry_type == "dir", LibraryIndexEntry.size),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).desc(),
             "rjcode": LibraryIndexEntry.rjcode.asc(),
             "max_mtime": func.max(LibraryIndexEntry.mtime).desc().nullslast(),
         }
-        order = sort_map.get(sort, func.count(LibraryIndexEntry.id).desc())
+        order = sort_map.get(sort, func.count(func.distinct(version_key_expr)).desc())
 
         rows = (
             base_q.order_by(order)
@@ -22427,8 +22467,16 @@ async def get_duplicate_groups(
 
         groups = []
         for row in rows:
-            names_raw = row.names or []
-            names = [str(n) for n in names_raw[:5] if n]
+            # 从 parent_path 提取项目目录名
+            parent_paths = row.parent_paths or []
+            names = []
+            for pp in parent_paths:
+                if pp:
+                    name = str(pp).rstrip("/").rsplit("/", 1)[-1]
+                    if name and name not in names:
+                        names.append(name)
+            # 取第一个目录名作为项目名
+            project_name = names[0] if names else str(row.rjcode)
             groups.append(
                 DuplicateGroupItem(
                     rjcode=str(row.rjcode),
@@ -22437,6 +22485,7 @@ async def get_duplicate_groups(
                     total_size=int(row.total_size),
                     max_mtime=int(row.max_mtime) if row.max_mtime else None,
                     names=names,
+                    project_name=project_name,
                 )
             )
 
@@ -22449,7 +22498,7 @@ async def get_duplicate_groups(
 
 @app.get("/api/duplicate-check/groups/{rjcode}")
 async def get_duplicate_group_detail(rjcode: str):
-    """获取指定 RJ 的所有重复版本详情。"""
+    """获取指定 RJ 的所有重复版本详情，按版本分组（每个 library_id + parent_path 组合为一个版本）。"""
     from ..models.database import LibraryIndexEntry, get_db
     from ..core.library_manager import get_library_manager
 
@@ -22458,7 +22507,7 @@ async def get_duplicate_group_detail(rjcode: str):
         entries = (
             db.query(LibraryIndexEntry)
             .filter(LibraryIndexEntry.rjcode == rjcode.strip())
-            .order_by(LibraryIndexEntry.library_id, LibraryIndexEntry.depth)
+            .order_by(LibraryIndexEntry.library_id, LibraryIndexEntry.parent_path, LibraryIndexEntry.depth)
             .all()
         )
 
@@ -22473,26 +22522,75 @@ async def get_duplicate_group_detail(rjcode: str):
         except Exception:
             pass
 
-        items = []
+        # 构建版本分组：按 (library_id, parent_path) 分组
+        version_map = {}  # version_key -> { info, entries }
+        all_entries = []
         for entry in entries:
             lib_info = libraries.get(entry.library_id, {})
-            items.append(
-                DuplicateEntryItem(
-                    id=entry.id,
-                    library_id=entry.library_id,
-                    library_name=lib_info.get("name", entry.library_id),
-                    library_type=lib_info.get("type", ""),
-                    relative_path=entry.relative_path or "",
-                    absolute_path=entry.absolute_path or "",
-                    name=entry.name or "",
-                    entry_type=entry.entry_type or "",
-                    size=entry.size or 0,
-                    mtime=int(entry.mtime) if entry.mtime else None,
-                    indexed_at=int(entry.indexed_at) if entry.indexed_at else None,
-                )
-            )
+            parent = entry.parent_path or ""
+            version_key = f"{entry.library_id}::{parent}"
 
-        return {"rjcode": rjcode, "entries": items, "total": len(items)}
+            entry_item = DuplicateEntryItem(
+                id=entry.id,
+                library_id=entry.library_id,
+                library_name=lib_info.get("name", entry.library_id),
+                library_type=lib_info.get("type", ""),
+                relative_path=entry.relative_path or "",
+                absolute_path=entry.absolute_path or "",
+                name=entry.name or "",
+                entry_type=entry.entry_type or "",
+                size=entry.size or 0,
+                mtime=int(entry.mtime) if entry.mtime else None,
+                indexed_at=int(entry.indexed_at) if entry.indexed_at else None,
+                version_key=version_key,
+            )
+            all_entries.append(entry_item)
+
+            if version_key not in version_map:
+                root_name = parent.rstrip("/").rsplit("/", 1)[-1] if parent else entry.name
+                version_map[version_key] = {
+                    "version_key": version_key,
+                    "library_id": entry.library_id,
+                    "library_name": lib_info.get("name", entry.library_id),
+                    "library_type": lib_info.get("type", ""),
+                    "root_path": parent,
+                    "root_name": root_name,
+                    "entry_count": 0,
+                    "total_size": 0,
+                    "max_mtime": None,
+                    "entries": [],
+                }
+            ver = version_map[version_key]
+            ver["entries"].append(entry_item)
+            ver["entry_count"] += 1
+            if entry.entry_type == "dir":
+                ver["total_size"] += entry.size or 0
+            if entry.mtime:
+                ver["max_mtime"] = max(ver["max_mtime"] or 0, entry.mtime)
+
+        # 按 library_id + root_path 排序版本
+        versions = sorted(version_map.values(), key=lambda v: (v["library_id"], v["root_path"]))
+
+        return {
+            "rjcode": rjcode,
+            "entries": all_entries,
+            "total": len(all_entries),
+            "versions": [
+                {
+                    "version_key": v["version_key"],
+                    "library_id": v["library_id"],
+                    "library_name": v["library_name"],
+                    "library_type": v["library_type"],
+                    "root_path": v["root_path"],
+                    "root_name": v["root_name"],
+                    "entry_count": v["entry_count"],
+                    "total_size": v["total_size"],
+                    "max_mtime": v["max_mtime"],
+                }
+                for v in versions
+            ],
+            "version_count": len(versions),
+        }
     finally:
         db.close()
 
@@ -22521,55 +22619,112 @@ async def duplicate_keep(body: DuplicateKeepRequest):
         if not entries:
             raise HTTPException(status_code=404, detail=f"未找到 RJ{rjcode} 的索引记录")
 
-        delete_entries = [e for e in entries if e.id not in keep_ids]
-        if not delete_entries:
-            return {"message": "所有版本都已保留，无需删除", "deleted_count": 0}
+        # 按版本分组：每个 (library_id, parent_path) 一个版本
+        version_groups = {}
+        for entry in entries:
+            vk = f"{entry.library_id}::{entry.parent_path or ''}"
+            if vk not in version_groups:
+                version_groups[vk] = []
+            version_groups[vk].append(entry)
 
         manager = get_library_manager()
         engine = get_task_engine()
         results = []
 
-        for entry in delete_entries:
-            try:
-                library = manager.get_library_definition(entry.library_id)
-                target_path = entry.absolute_path or entry.relative_path
-                if not target_path:
-                    continue
+        for vk, group_entries in version_groups.items():
+            # 检查此版本是否在保留列表中（任意一个条目的 id 在 keep_ids 中就算保留）
+            group_ids = {e.id for e in group_entries}
+            if group_ids & keep_ids:
+                continue  # 此版本保留
 
-                task = await engine.create_task(
-                    task_type="delete",
-                    task_domain="library",
-                    task_kind="duplicate_cleanup",
-                    source_page="duplicate_check",
-                    source_action="keep",
-                    business_key=f"{rjcode}_{entry.id}",
-                    metadata={
-                        "rjcode": rjcode,
-                        "library_id": entry.library_id,
-                        "library_name": library.name if library else "",
-                        "target_path": target_path,
-                        "entry_name": entry.name,
-                    },
-                )
-                await manager.delete(
-                    entry.library_id, target_path, confirmed=True,
-                )
-                results.append({
-                    "entry_id": entry.id,
-                    "path": target_path,
-                    "status": "deleted",
-                })
-            except Exception as exc:
-                logger.warning(
-                    "重复版本删除失败 rjcode=%s entry_id=%s path=%s error=%s",
-                    rjcode, entry.id, entry.absolute_path, exc,
-                )
-                results.append({
-                    "entry_id": entry.id,
-                    "path": entry.absolute_path or "",
-                    "status": "failed",
-                    "error": str(exc),
-                })
+            # 优先删除目录条目（会递归删除整个项目目录）
+            dir_entry = next((e for e in group_entries if e.entry_type == "dir"), None)
+            if dir_entry:
+                target_path = dir_entry.absolute_path or dir_entry.relative_path
+                try:
+                    library = manager.get_library_definition(dir_entry.library_id)
+                    task = await engine.create_task(
+                        task_type="delete",
+                        task_domain="library",
+                        task_kind="duplicate_cleanup",
+                        source_page="duplicate_check",
+                        source_action="keep",
+                        business_key=f"{rjcode}_{dir_entry.id}",
+                        metadata={
+                            "rjcode": rjcode,
+                            "library_id": dir_entry.library_id,
+                            "library_name": library.name if library else "",
+                            "target_path": target_path,
+                            "entry_name": dir_entry.name,
+                            "version_key": vk,
+                        },
+                    )
+                    await manager.delete(
+                        dir_entry.library_id, target_path, confirmed=True,
+                    )
+                    results.append({
+                        "version_key": vk,
+                        "entry_id": dir_entry.id,
+                        "path": target_path,
+                        "status": "deleted",
+                    })
+                except Exception as exc:
+                    logger.warning(
+                        "重复版本删除失败 rjcode=%s entry_id=%s path=%s error=%s",
+                        rjcode, dir_entry.id, target_path, exc,
+                    )
+                    results.append({
+                        "version_key": vk,
+                        "entry_id": dir_entry.id,
+                        "path": target_path,
+                        "status": "failed",
+                        "error": str(exc),
+                    })
+            else:
+                # 没有目录条目，逐个删除文件
+                for entry in group_entries:
+                    target_path = entry.absolute_path or entry.relative_path
+                    if not target_path:
+                        continue
+                    try:
+                        library = manager.get_library_definition(entry.library_id)
+                        task = await engine.create_task(
+                            task_type="delete",
+                            task_domain="library",
+                            task_kind="duplicate_cleanup",
+                            source_page="duplicate_check",
+                            source_action="keep",
+                            business_key=f"{rjcode}_{entry.id}",
+                            metadata={
+                                "rjcode": rjcode,
+                                "library_id": entry.library_id,
+                                "library_name": library.name if library else "",
+                                "target_path": target_path,
+                                "entry_name": entry.name,
+                                "version_key": vk,
+                            },
+                        )
+                        await manager.delete(
+                            entry.library_id, target_path, confirmed=True,
+                        )
+                        results.append({
+                            "version_key": vk,
+                            "entry_id": entry.id,
+                            "path": target_path,
+                            "status": "deleted",
+                        })
+                    except Exception as exc:
+                        logger.warning(
+                            "重复版本删除失败 rjcode=%s entry_id=%s path=%s error=%s",
+                            rjcode, entry.id, target_path, exc,
+                        )
+                        results.append({
+                            "version_key": vk,
+                            "entry_id": entry.id,
+                            "path": target_path,
+                            "status": "failed",
+                            "error": str(exc),
+                        })
 
         return {
             "message": f"已处理 {len(results)} 个版本",
