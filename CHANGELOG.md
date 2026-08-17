@@ -2,6 +2,10 @@
 
 本文件记录 KikoeruManager 的版本变化、功能更新与问题修复。更早的历史版本可通过 GitHub Tags 与提交历史查看。
 
+## v2.4.64
+
+- 修复：PyInstaller 打包 exe 后 AI 字幕配对提示"后端未安装 litellm"——litellm 数据文件 `model_prices_and_context_window_backup.json` 未被打包进 exe，运行时找不到文件
+
 ## v2.4.63
 
 - 修复：社团补全作品卡片按语言版本分行展示——之前搜索用日文原版 RJ 却显示简中标题、多版本只展示一行；现在每个作品按官方实际拥有的语言版本（原版 / 简中 / 繁中 / 英文……有什么显示什么）各显示一行：该版本的 RJ 号 + 该 RJ 在 AnimeShare、南+、asmr.one 三个来源的独立检索状态，不存在的版本不显示。
