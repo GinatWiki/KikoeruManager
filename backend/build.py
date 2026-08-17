@@ -72,6 +72,53 @@ def build(console_mode=True):
     except Exception:
         pass
 
+    # 收集 tiktoken 编码数据文件（cl100k_base 等），
+    # litellm 依赖 tiktoken 做 token 计数，tiktoken 通过 tiktoken_ext 命名空间包动态加载编码。
+    # PyInstaller 无法自动检测这些动态导入，需显式收集。
+    # 同时解决命名空间包问题：PyInstaller 的 FrozenImporter 对无 __init__.py 的命名空间包
+    # 不会正确设置 __path__，导致 tiktoken 的 importlib.import_module("tiktoken_ext.xxx") 失败。
+    # 创建空的 __init__.py 将其转为常规包。
+    try:
+        from PyInstaller.utils.hooks import collect_all
+        tiktoken_ret = collect_all('tiktoken')
+        datas += tiktoken_ret[0]
+        binaries += tiktoken_ret[1]
+    except Exception:
+        pass
+    try:
+        import importlib.util as _iu
+        import tempfile as _tmpf
+        _spec = _iu.find_spec('tiktoken_ext')
+        if _spec and _spec.submodule_search_locations:
+            _tmpdir = _tmpf.mkdtemp(prefix='kikoerumanager_build_tiktoken_')
+            for _loc in _spec.submodule_search_locations:
+                if not os.path.isdir(_loc):
+                    continue
+                # 遍历并添加所有 .tiktoken 编码数据文件
+                for _root, _dirs, _files in os.walk(_loc):
+                    for _file in _files:
+                        _src = os.path.join(_root, _file)
+                        _dst = os.path.join('tiktoken_ext', os.path.relpath(_root, _loc))
+                        datas.append((_src, _dst))
+                # 检查 tiktoken_ext 是否为命名空间包（无 __init__.py），
+                # 是则创建空的 __init__.py 转为常规包
+                if not os.path.exists(os.path.join(_loc, '__init__.py')):
+                    _init_py = os.path.join(_tmpdir, 'tiktoken_ext', '__init__.py')
+                    os.makedirs(os.path.dirname(_init_py), exist_ok=True)
+                    with open(_init_py, 'w', encoding='utf-8') as _f:
+                        _f.write('# PyInstaller: namespace package → regular package\n')
+                    datas.append((_init_py, 'tiktoken_ext'))
+                # 对 openai_public 子目录同样处理
+                _openai_dir = os.path.join(_loc, 'openai_public')
+                if os.path.isdir(_openai_dir) and not os.path.exists(os.path.join(_openai_dir, '__init__.py')):
+                    _init_py2 = os.path.join(_tmpdir, 'tiktoken_ext', 'openai_public', '__init__.py')
+                    os.makedirs(os.path.dirname(_init_py2), exist_ok=True)
+                    with open(_init_py2, 'w', encoding='utf-8') as _f:
+                        _f.write('# PyInstaller: namespace package → regular package\n')
+                    datas.append((_init_py2, 'tiktoken_ext/openai_public'))
+    except Exception:
+        pass
+
     redis_dir = os.path.join(ROOT_DIR, "tools", "redis")
     if os.path.isdir(redis_dir):
         # 完整打包 redis 运行目录（redis-server / redis-cli 及 msys 依赖 DLL），
@@ -90,7 +137,7 @@ a = Analysis(
     pathex=['{ROOT_DIR}'],
     binaries={binaries},
     datas={datas},
-    hiddenimports=['uvicorn', 'fastapi', 'sqlalchemy', 'yaml', 'watchdog', 'filetype', 'requests', 'aiohttp', 'pystray', 'PIL', 'PIL.Image', 'qrcode', 'qrcode.image.pil', 'orjson', 'imapclient', 'imapclient.imapclient', 'litellm'],
+    hiddenimports=['uvicorn', 'fastapi', 'sqlalchemy', 'yaml', 'watchdog', 'filetype', 'requests', 'aiohttp', 'pystray', 'PIL', 'PIL.Image', 'qrcode', 'qrcode.image.pil', 'orjson', 'imapclient', 'imapclient.imapclient', 'litellm', 'tiktoken', 'tiktoken_ext', 'tiktoken_ext.openai_public'],
     hookspath=[],
     hooksconfig={{}},
     runtime_hooks=[],
