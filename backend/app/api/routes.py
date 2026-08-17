@@ -8,7 +8,7 @@ from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES, GZipRespon
 from starlette.responses import FileResponse as StarletteFileResponse
 from starlette.staticfiles import NotModifiedResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, func, or_, text
+from sqlalchemy import case, desc, func, or_, text
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
@@ -22416,7 +22416,7 @@ async def get_duplicate_groups(
                 func.count(func.distinct(LibraryIndexEntry.library_id)).label("library_count"),
                 func.coalesce(
                     func.sum(
-                        func.case(
+                        case(
                             (LibraryIndexEntry.entry_type == "dir", LibraryIndexEntry.size),
                             else_=0,
                         )
@@ -22446,7 +22446,7 @@ async def get_duplicate_groups(
             "version_count": func.count(func.distinct(version_key_expr)).desc(),
             "total_size": func.coalesce(
                 func.sum(
-                    func.case(
+                    case(
                         (LibraryIndexEntry.entry_type == "dir", LibraryIndexEntry.size),
                         else_=0,
                     )
