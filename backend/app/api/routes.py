@@ -22341,6 +22341,246 @@ async def preview_notification_blocks(body: PreviewBlocksRequest):
 
 
 
+# ========== 仓库查重 API ==========
+
+class DuplicateGroupItem(BaseModel):
+    rjcode: str
+    version_count: int = 0
+    library_count: int = 0
+    total_size: int = 0
+    max_mtime: Optional[int] = None
+    names: List[str] = Field(default_factory=list)
+
+class DuplicateEntryItem(BaseModel):
+    id: int
+    library_id: str
+    library_name: str = ""
+    library_type: str = ""
+    relative_path: str
+    absolute_path: str
+    name: str
+    entry_type: str
+    size: int = 0
+    mtime: Optional[int] = None
+    indexed_at: Optional[int] = None
+
+class DuplicateGroupListResponse(BaseModel):
+    groups: List[DuplicateGroupItem]
+    total: int = 0
+    page: int = 1
+    page_size: int = 20
+
+class DuplicateKeepRequest(BaseModel):
+    rjcode: str
+    keep_entry_ids: List[int] = Field(default_factory=list)
+
+
+@app.get("/api/duplicate-check/groups")
+async def get_duplicate_groups(
+    page: int = 1,
+    page_size: int = 20,
+    sort: str = "version_count",
+    search: str = "",
+):
+    """获取重复 RJ 分组列表。按 rjcode 在库存索引中查找出现 ≥2 次的 RJ 号。"""
+    from ..models.database import LibraryIndexEntry, get_db
+
+    db = next(get_db())
+    try:
+        base_q = (
+            db.query(
+                LibraryIndexEntry.rjcode,
+                func.count(LibraryIndexEntry.id).label("version_count"),
+                func.count(func.distinct(LibraryIndexEntry.library_id)).label("library_count"),
+                func.coalesce(func.sum(LibraryIndexEntry.size), 0).label("total_size"),
+                func.max(LibraryIndexEntry.mtime).label("max_mtime"),
+                func.array_agg(func.distinct(LibraryIndexEntry.name)).label("names"),
+            )
+            .filter(LibraryIndexEntry.rjcode.isnot(None))
+            .filter(LibraryIndexEntry.rjcode != "")
+        )
+
+        if search:
+            base_q = base_q.filter(LibraryIndexEntry.rjcode.ilike(f"%{search}%"))
+
+        base_q = base_q.group_by(LibraryIndexEntry.rjcode).having(
+            func.count(LibraryIndexEntry.id) > 1
+        )
+
+        count_q = base_q.subquery()
+        total = db.query(func.count()).select_from(count_q).scalar() or 0
+
+        sort_map = {
+            "version_count": func.count(LibraryIndexEntry.id).desc(),
+            "total_size": func.coalesce(func.sum(LibraryIndexEntry.size), 0).desc(),
+            "rjcode": LibraryIndexEntry.rjcode.asc(),
+            "max_mtime": func.max(LibraryIndexEntry.mtime).desc().nullslast(),
+        }
+        order = sort_map.get(sort, func.count(LibraryIndexEntry.id).desc())
+
+        rows = (
+            base_q.order_by(order)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+            .all()
+        )
+
+        groups = []
+        for row in rows:
+            names_raw = row.names or []
+            names = [str(n) for n in names_raw[:5] if n]
+            groups.append(
+                DuplicateGroupItem(
+                    rjcode=str(row.rjcode),
+                    version_count=int(row.version_count),
+                    library_count=int(row.library_count),
+                    total_size=int(row.total_size),
+                    max_mtime=int(row.max_mtime) if row.max_mtime else None,
+                    names=names,
+                )
+            )
+
+        return DuplicateGroupListResponse(
+            groups=groups, total=total, page=page, page_size=page_size,
+        )
+    finally:
+        db.close()
+
+
+@app.get("/api/duplicate-check/groups/{rjcode}")
+async def get_duplicate_group_detail(rjcode: str):
+    """获取指定 RJ 的所有重复版本详情。"""
+    from ..models.database import LibraryIndexEntry, get_db
+    from ..core.library_manager import get_library_manager
+
+    db = next(get_db())
+    try:
+        entries = (
+            db.query(LibraryIndexEntry)
+            .filter(LibraryIndexEntry.rjcode == rjcode.strip())
+            .order_by(LibraryIndexEntry.library_id, LibraryIndexEntry.depth)
+            .all()
+        )
+
+        if not entries:
+            raise HTTPException(status_code=404, detail=f"未找到 RJ{rjcode} 的索引记录")
+
+        manager = get_library_manager()
+        libraries = {}
+        try:
+            for lib in manager._active_libraries(manager.load_config()):
+                libraries[lib.id] = {"name": lib.name, "type": lib.type}
+        except Exception:
+            pass
+
+        items = []
+        for entry in entries:
+            lib_info = libraries.get(entry.library_id, {})
+            items.append(
+                DuplicateEntryItem(
+                    id=entry.id,
+                    library_id=entry.library_id,
+                    library_name=lib_info.get("name", entry.library_id),
+                    library_type=lib_info.get("type", ""),
+                    relative_path=entry.relative_path or "",
+                    absolute_path=entry.absolute_path or "",
+                    name=entry.name or "",
+                    entry_type=entry.entry_type or "",
+                    size=entry.size or 0,
+                    mtime=int(entry.mtime) if entry.mtime else None,
+                    indexed_at=int(entry.indexed_at) if entry.indexed_at else None,
+                )
+            )
+
+        return {"rjcode": rjcode, "entries": items, "total": len(items)}
+    finally:
+        db.close()
+
+
+@app.post("/api/duplicate-check/keep")
+async def duplicate_keep(body: DuplicateKeepRequest):
+    """保留选中版本，删除其余重复版本。"""
+    from ..models.database import LibraryIndexEntry, get_db
+    from ..core.library_manager import get_library_manager
+    from ..core.task_engine import get_task_engine
+
+    rjcode = body.rjcode.strip()
+    keep_ids = set(body.keep_entry_ids)
+
+    if not keep_ids:
+        raise HTTPException(status_code=400, detail="至少需要保留一个版本")
+
+    db = next(get_db())
+    try:
+        entries = (
+            db.query(LibraryIndexEntry)
+            .filter(LibraryIndexEntry.rjcode == rjcode)
+            .all()
+        )
+
+        if not entries:
+            raise HTTPException(status_code=404, detail=f"未找到 RJ{rjcode} 的索引记录")
+
+        delete_entries = [e for e in entries if e.id not in keep_ids]
+        if not delete_entries:
+            return {"message": "所有版本都已保留，无需删除", "deleted_count": 0}
+
+        manager = get_library_manager()
+        engine = get_task_engine()
+        results = []
+
+        for entry in delete_entries:
+            try:
+                library = manager.get_library_definition(entry.library_id)
+                target_path = entry.absolute_path or entry.relative_path
+                if not target_path:
+                    continue
+
+                task = await engine.create_task(
+                    task_type="delete",
+                    task_domain="library",
+                    task_kind="duplicate_cleanup",
+                    source_page="duplicate_check",
+                    source_action="keep",
+                    business_key=f"{rjcode}_{entry.id}",
+                    metadata={
+                        "rjcode": rjcode,
+                        "library_id": entry.library_id,
+                        "library_name": library.name if library else "",
+                        "target_path": target_path,
+                        "entry_name": entry.name,
+                    },
+                )
+                await manager.delete(
+                    entry.library_id, target_path, confirmed=True,
+                )
+                results.append({
+                    "entry_id": entry.id,
+                    "path": target_path,
+                    "status": "deleted",
+                })
+            except Exception as exc:
+                logger.warning(
+                    "重复版本删除失败 rjcode=%s entry_id=%s path=%s error=%s",
+                    rjcode, entry.id, entry.absolute_path, exc,
+                )
+                results.append({
+                    "entry_id": entry.id,
+                    "path": entry.absolute_path or "",
+                    "status": "failed",
+                    "error": str(exc),
+                })
+
+        return {
+            "message": f"已处理 {len(results)} 个版本",
+            "deleted_count": sum(1 for r in results if r["status"] == "deleted"),
+            "failed_count": sum(1 for r in results if r["status"] == "failed"),
+            "results": results,
+        }
+    finally:
+        db.close()
+
+
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 

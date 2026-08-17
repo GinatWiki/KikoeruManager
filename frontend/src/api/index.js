@@ -715,6 +715,33 @@ export const conflictApi = {
   }
 }
 
+export const duplicateCheckApi = {
+  groups: async ({ page = 1, pageSize = 20, sort = 'version_count', search = '' } = {}) => {
+    const response = await apiClient.get('/duplicate-check/groups', {
+      params: { page, page_size: pageSize, sort, search },
+      timeout: 30000,
+    })
+    return response.data
+  },
+
+  groupDetail: async (rjcode) => {
+    const response = await apiClient.get(`/duplicate-check/groups/${encodeURIComponent(rjcode)}`, {
+      timeout: 30000,
+    })
+    return response.data
+  },
+
+  keep: async (rjcode, keepEntryIds = []) => {
+    const response = await apiClient.post('/duplicate-check/keep', {
+      rjcode,
+      keep_entry_ids: keepEntryIds,
+    }, {
+      timeout: 120000,
+    })
+    return response.data
+  },
+}
+
 export const processedArchiveApi = {
   list: async (params = {}) => {
     const response = await apiClient.get('/processed-archives', { params })
@@ -2769,5 +2796,6 @@ export default {
   backup: backupApi,
   activityLog: activityLogApi,
   emailWatcher: emailWatcherApi,
-  notification: notificationApi
+  notification: notificationApi,
+  duplicateCheck: duplicateCheckApi
 }

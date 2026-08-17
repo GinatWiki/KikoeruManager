@@ -142,6 +142,11 @@
             <span>社团补全</span>
           </el-menu-item>
 
+          <el-menu-item index="/duplicate-check" title="仓库查重" class="sidebar-nav-item sidebar-nav-duplicate" data-route-path="/duplicate-check">
+            <GitCompare :size="18" :stroke-width="2.2" />
+            <span>仓库查重</span>
+          </el-menu-item>
+
           <el-menu-item index="/library-backup" title="库存打包" class="sidebar-nav-item sidebar-nav-backup" data-route-path="/library-backup">
             <Archive :size="18" :stroke-width="2.2" />
             <span>库存打包</span>
@@ -232,6 +237,7 @@ import {
   ChevronsRight,
   Download,
   FolderTree,
+  GitCompare,
   History,
   House,
   KeyRound,
@@ -287,6 +293,7 @@ const routePreloadQueue = [
   '/settings',
   '/asmr-sync',
   '/circle-completion',
+  '/duplicate-check',
   '/subtitle-import',
   '/activity-history',
   '/conflicts',
@@ -5855,6 +5862,7 @@ html.kikoerumanager-dark .logo-update-badge.is-checking {
 :deep(.sidebar-menu .sidebar-nav-folders) { --sidebar-nav-icon: var(--km-nav-folders-icon); }
 :deep(.sidebar-menu .sidebar-nav-asmr) { --sidebar-nav-icon: var(--km-nav-asmr-icon); }
 :deep(.sidebar-menu .sidebar-nav-circle) { --sidebar-nav-icon: var(--km-nav-circle-icon); }
+:deep(.sidebar-menu .sidebar-nav-duplicate) { --sidebar-nav-icon: var(--km-nav-duplicate-icon, #8b5cf6); }
 :deep(.sidebar-menu .sidebar-nav-backup) { --sidebar-nav-icon: var(--km-nav-backup-icon); }
 :deep(.sidebar-menu .sidebar-nav-settings) { --sidebar-nav-icon: var(--km-nav-settings-icon); }
 :deep(.sidebar-menu .sidebar-nav-logs) { --sidebar-nav-icon: var(--km-nav-logs-icon); }

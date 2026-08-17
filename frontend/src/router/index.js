@@ -14,6 +14,7 @@ const LibraryBackup = () => import('../views/LibraryBackup.vue')
 const SubtitleImport = () => import('../views/SubtitleImport.vue')
 const ActivityHistory = () => import('../views/ActivityHistory.vue')
 const CircleCompletion = () => import('../views/CircleCompletion.vue')
+const DuplicateCheck = () => import('../views/DuplicateCheck.vue')
 const VerifyGate = () => import('../views/VerifyGate.vue')
 const BlockedGate = () => import('../views/BlockedGate.vue')
 
@@ -31,6 +32,7 @@ const routeComponentLoaders = {
   '/settings': Settings,
   '/logs': Logs,
   '/circle-completion': CircleCompletion,
+  '/duplicate-check': DuplicateCheck,
   '/activity-history': ActivityHistory,
   '/verify': VerifyGate,
   '/blocked': BlockedGate,
@@ -176,6 +178,16 @@ const routes = [
     meta: {
       title: '社团补全',
       icon: 'CollectionTag',
+      cache: true
+    }
+  },
+  {
+    path: '/duplicate-check',
+    name: 'DuplicateCheck',
+    component: DuplicateCheck,
+    meta: {
+      title: '仓库查重',
+      icon: 'CopyCheck',
       cache: true
     }
   },
