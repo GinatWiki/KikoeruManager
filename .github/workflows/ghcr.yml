@@ -6,69 +6,56 @@ on:
     tags: [ 'v*.*.*' ]
   workflow_dispatch:
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
     - name: Log in to Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-        tags: |
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=raw,value=latest
-          type=edge,branch=main
+      run: |
+        echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
 
     - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: |
-          ${{ steps.meta.outputs.labels }}
-          org.opencontainers.image.version=${{ github.ref_name }}
-          org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-        build-args: |
-          KIKOERUMANAGER_VERSION=${{ github.ref_name }}
-        no-cache: true
-        platforms: linux/amd64
+      env:
+        IMAGE: ghcr.io/${{ github.repository }}
+      run: |
+        set -euo pipefail
+        IMAGE_LOWER=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
+        REF_NAME="${{ github.ref_name }}"
+        if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          VERSION="$REF_NAME"
+          VER_NO_V="${VERSION#v}"
+          MAJOR_MINOR="${VER_NO_V%.*}"
+          TAGS=("$IMAGE_LOWER:$VERSION" "$IMAGE_LOWER:$MAJOR_MINOR" "$IMAGE_LOWER:latest")
+        else
+          TAGS=("$IMAGE_LOWER:edge" "$IMAGE_LOWER:latest")
+        fi
+        BUILD_ARGS=()
+        for t in "${TAGS[@]}"; do
+          BUILD_ARGS+=("-t" "$t")
+        done
+        docker build --no-cache \
+          --build-arg "KIKOERUMANAGER_VERSION=$REF_NAME" \
+          --label "org.opencontainers.image.version=$REF_NAME" \
+          --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+          "${BUILD_ARGS[@]}" .
+        for t in "${TAGS[@]}"; do
+          echo "推送镜像: $t"
+          docker push "$t"
+        done
 
-    - name: Add package description
-      uses: actions/github-script@v7
-      with:
-        script: |
-          const fs = require('fs');
-          const readme = fs.readFileSync('./README.md', 'utf8');
-          try {
-            await github.rest.packages.updatePackageDescriptionForAuthenticatedUser({
-              package_type: 'container',
-              package_name: '${{ github.event.repository.name }}',
-              description: 'DLsite 作品自动整理工具 - 支持智能查重、自动解压、元数据获取',
-            });
-          } catch (error) {
-            console.log('Package description update failed:', error.message);
-          }
+    - name: Update package description (best effort)
+      run: |
+        curl -fsS -X PATCH \
+          -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/orgs/${{ github.repository_owner }}/packages/container/${{ github.event.repository.name }}" \
+          -d '{"description":"DLsite 作品自动整理工具 - 支持智能查重、自动解压、元数据获取"}' \
+        || echo "包描述更新失败（不影响构建结果）"
