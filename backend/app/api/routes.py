@@ -2375,6 +2375,55 @@ def _task_phase_metric_cleanup_config() -> dict:
     }
 
 
+def _library_index_maintenance_config() -> dict:
+    """库存索引低频维护参数；每轮都有写入和时间预算。"""
+    return {
+        "initial_delay_seconds": max(
+            30,
+            int(os.getenv("KIKOERUMANAGER_LIBRARY_INDEX_MAINTENANCE_INITIAL_DELAY_SECONDS", "300") or 300),
+        ),
+        "interval_seconds": max(
+            300,
+            int(os.getenv("KIKOERUMANAGER_LIBRARY_INDEX_MAINTENANCE_INTERVAL_SECONDS", "3600") or 3600),
+        ),
+        "generation_chunk_size": max(
+            100,
+            min(
+                5000,
+                int(os.getenv("KIKOERUMANAGER_LIBRARY_INDEX_GENERATION_CLEANUP_CHUNK_SIZE", "1000") or 1000),
+            ),
+        ),
+        "generation_max_chunks": max(
+            1,
+            min(
+                50,
+                int(os.getenv("KIKOERUMANAGER_LIBRARY_INDEX_GENERATION_CLEANUP_MAX_CHUNKS", "10") or 10),
+            ),
+        ),
+        "generation_time_budget_seconds": max(
+            1.0,
+            min(
+                60.0,
+                float(os.getenv("KIKOERUMANAGER_LIBRARY_INDEX_GENERATION_CLEANUP_SECONDS", "15") or 15),
+            ),
+        ),
+        "rjcode_limit": max(
+            100,
+            min(
+                5000,
+                int(os.getenv("KIKOERUMANAGER_LIBRARY_INDEX_RJCODE_BACKFILL_LIMIT", "1000") or 1000),
+            ),
+        ),
+        "rjcode_max_batches": max(
+            1,
+            min(
+                50,
+                int(os.getenv("KIKOERUMANAGER_LIBRARY_INDEX_RJCODE_BACKFILL_MAX_BATCHES", "10") or 10),
+            ),
+        ),
+    }
+
+
 # 通知定期清理协程（每24h按 notification_center.retain_days / max_items 清理已读通知）
 async def _periodic_notification_cleanup():
     while True:
@@ -2439,6 +2488,29 @@ async def _periodic_task_phase_metric_cleanup():
         except Exception as e:
             logger.warning(f"[任务阶段指标] 自动清理异常: {e}")
         await asyncio.sleep(24 * 3600)
+
+
+async def _periodic_library_index_maintenance():
+    config = _library_index_maintenance_config()
+    await asyncio.sleep(config.pop("initial_delay_seconds"))
+    interval_seconds = config.pop("interval_seconds")
+    while True:
+        try:
+            result = await asyncio.to_thread(
+                get_library_index_service().run_periodic_maintenance,
+                **config,
+            )
+            if (
+                int(result.get("generation_rows_removed") or 0) > 0
+                or int((result.get("rjcodes") or {}).get("repaired") or 0) > 0
+                or int((result.get("status_stats") or {}).get("repaired") or 0) > 0
+            ):
+                logger.info("[索引维护] 周期维护完成: %s", result)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.warning("[索引维护] 周期维护异常", exc_info=True)
+        await asyncio.sleep(interval_seconds)
 
 
 # 启动事件
@@ -2556,6 +2628,9 @@ async def startup_event():
 
     # 启动任务阶段指标清理任务（性能观测表只保留近期样本）
     asyncio.create_task(_periodic_task_phase_metric_cleanup())
+
+    # 启动库存索引低频维护：过期 generation、旧 RJ 字段和状态统计漂移。
+    asyncio.create_task(_periodic_library_index_maintenance())
 
 # 关闭事件
 @app.on_event("shutdown")
@@ -3203,6 +3278,32 @@ async def get_task_center_item(item_id: Optional[str] = None, engine_task_id: Op
         return await service.get_item(item_id=item_id, engine_task_id=engine_task_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/task-center/item-files")
+async def get_task_center_item_files(
+    item_id: Optional[str] = None,
+    engine_task_id: Optional[str] = None,
+    offset: int = 0,
+    limit: int = 200,
+    field: str = "download_files",
+):
+    """按字段分页读取下载明细或文件树，不阻塞任务详情首屏。"""
+    from ..core.task_center_service import get_task_center_service
+
+    try:
+        result = await get_task_center_service().get_item_files(
+            item_id=item_id,
+            engine_task_id=engine_task_id,
+            offset=offset,
+            limit=limit,
+            field=field,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if result is None:
+        raise HTTPException(status_code=404, detail="任务未找到")
+    return result
 
 
 @app.get("/api/task-center/stream")
@@ -9140,7 +9241,13 @@ def _stored_mutation_replay_response(
     }
 
 
-def _index_status_to_dict(status, fallback_library_id: Optional[str] = None) -> Dict[str, Any]:
+def _index_status_to_dict(
+    status,
+    fallback_library_id: Optional[str] = None,
+    *,
+    pending_effects: int = 0,
+    pending_batches: int = 0,
+) -> Dict[str, Any]:
     if status is None:
         return {
             "library_id": fallback_library_id or "",
@@ -9156,6 +9263,8 @@ def _index_status_to_dict(status, fallback_library_id: Optional[str] = None) -> 
             "accepted_seq": 0,
             "materialized_seq": 0,
             "pending_events": 0,
+            "pending_effects": 0,
+            "pending_batches": 0,
             "state_revision": 0,
             "view_revision": 0,
             "active_generation": 1,
@@ -9176,6 +9285,8 @@ def _index_status_to_dict(status, fallback_library_id: Optional[str] = None) -> 
         "accepted_seq": int(getattr(status, "accepted_seq", 0) or 0),
         "materialized_seq": int(getattr(status, "materialized_seq", 0) or 0),
         "pending_events": int(getattr(status, "pending_events", 0) or 0),
+        "pending_effects": int(pending_effects or 0),
+        "pending_batches": int(pending_batches or 0),
         "state_revision": int(getattr(status, "state_revision", 0) or 0),
         "view_revision": int(getattr(status, "view_revision", 0) or 0),
         "active_generation": int(getattr(status, "active_generation", 1) or 1),
@@ -9330,7 +9441,17 @@ async def get_library_index_status(library_id: Optional[str] = None):
             library = None
         if library is not None and library.type == "synology_filestation":
             return _disabled_remote_index_status(library)
-        return _index_status_to_dict(service.get_status(normalized), fallback_library_id=normalized)
+        status = service.get_status(normalized)
+        pending = service.pending_effect_summary(
+            normalized,
+            getattr(status, "materialized_seq", 0) if status is not None else 0,
+            getattr(status, "accepted_seq", 0) if status is not None else 0,
+        )
+        return _index_status_to_dict(
+            status,
+            fallback_library_id=normalized,
+            **pending,
+        )
 
     manager = get_library_manager()
     remote_library_ids = {
@@ -9342,8 +9463,16 @@ async def get_library_index_status(library_id: Optional[str] = None):
         item for item in service.list_all_status()
         if item.library_id not in remote_library_ids
     ]
+    items = []
+    for item in statuses:
+        pending = service.pending_effect_summary(
+            item.library_id,
+            item.materialized_seq,
+            item.accepted_seq,
+        )
+        items.append(_index_status_to_dict(item, **pending))
     return {
-        "items": [_index_status_to_dict(item) for item in statuses],
+        "items": items,
         "count": len(statuses),
     }
 
@@ -18153,7 +18282,7 @@ class LocalUploadStartRequest(BaseModel):
     circle_name: str = ""
 
 
-def _serialize_http_download_task(task) -> dict:
+def _serialize_http_download_task(task, *, compact: bool = False) -> dict:
     from ..core.baidu_netdisk_service import (
         build_baidu_netdisk_batch_title,
         get_baidu_netdisk_service,
@@ -18196,6 +18325,8 @@ def _serialize_http_download_task(task) -> dict:
         sanitize_download_item(item)
         for item in download_files
     ]
+    download_files_total = len(download_files)
+    download_files_truncated = download_files_total > _TRANSFER_STATUS_PREVIEW_LIMIT
     merged_failed_files = [
         item for item in download_files
         if str((item or {}).get("status") or "").strip().lower() == "failed"
@@ -18206,14 +18337,16 @@ def _serialize_http_download_task(task) -> dict:
     success_count = int(performance_metrics.get("success_count") or 0)
     if not success_count:
         success_count = len([item for item in download_files if str((item or {}).get("status") or "") == "completed"])
+    if compact and download_files_truncated:
+        download_files = download_files[:_TRANSFER_STATUS_PREVIEW_LIMIT]
     display_status = "partial_failed" if failed_files and success_count > 0 else status_value
     work_title = (
         metadata.get("batch_name")
         or metadata.get("source_label")
         or (
-            build_baidu_netdisk_batch_title(metadata, item_count=len(download_files))
+            build_baidu_netdisk_batch_title(metadata, item_count=download_files_total)
             if is_baidu_netdisk
-            else build_http_download_batch_title(metadata, item_count=len(download_files))
+            else build_http_download_batch_title(metadata, item_count=download_files_total)
         )
         or ("百度网盘下载" if is_baidu_netdisk else "HTTP 下载")
     )
@@ -18232,6 +18365,8 @@ def _serialize_http_download_task(task) -> dict:
         "completed_at": task.completed_at.isoformat() if getattr(task, "completed_at", None) else None,
         "output_path": getattr(task, "output_path", ""),
         "download_files": download_files,
+        "download_files_total": download_files_total,
+        "download_files_truncated": download_files_truncated,
         "download_runtime": metadata.get("download_runtime", {}),
         "failed_files": [sanitize_download_item(item) for item in failed_files if isinstance(item, dict)],
         "progress_log": metadata.get("progress_log", []),
@@ -18313,11 +18448,28 @@ def _serialize_local_upload_task_status(task) -> dict:
     }
 
 
-def _serialize_asmr_sync_task_status(task, session_map: Dict[str, dict]) -> dict:
+_TRANSFER_STATUS_PREVIEW_LIMIT = 120
+
+
+def _compact_transfer_rows(rows: Any, limit: int = _TRANSFER_STATUS_PREVIEW_LIMIT) -> tuple[list, int, bool]:
+    """状态轮询只返回有限明细，避免大批量下载每 2 秒重复传输整棵文件树。"""
+    if not isinstance(rows, list):
+        return [], 0, False
+    total = len(rows)
+    return rows[:limit], total, total > limit
+
+
+def _serialize_asmr_sync_task_status(task, session_map: Dict[str, dict], *, compact: bool = False) -> dict:
     metadata = _task_metadata_with_redis_runtime(task)
     status_value, progress, current_step = _task_runtime_response_values(task)
     session_id = str(metadata.get("session_id") or "").strip()
     session_state = session_map.get(session_id, {})
+    raw_download_files = metadata.get("download_files") if isinstance(metadata.get("download_files"), list) else []
+    if compact:
+        download_files, download_files_total, download_files_truncated = _compact_transfer_rows(raw_download_files)
+    else:
+        download_files, download_files_total, download_files_truncated = raw_download_files, len(raw_download_files), False
+    failed_files = metadata.get("failed_files") if isinstance(metadata.get("failed_files"), list) else []
     return {
         "session_state": session_state,
         "id": task.id,
@@ -18334,11 +18486,13 @@ def _serialize_asmr_sync_task_status(task, session_map: Dict[str, dict]) -> dict
         "started_at": task.started_at.isoformat() if getattr(task, "started_at", None) else None,
         "completed_at": task.completed_at.isoformat() if getattr(task, "completed_at", None) else None,
         "output_path": getattr(task, "output_path", ""),
-        "download_files": metadata.get("download_files", []),
+        "download_files": download_files,
+        "download_files_total": download_files_total,
+        "download_files_truncated": download_files_truncated,
         "download_runtime": metadata.get("download_runtime", {}),
         "upload_files": metadata.get("upload_files", []),
         "upload_runtime": metadata.get("upload_runtime", {}),
-        "failed_files": metadata.get("failed_files", []),
+        "failed_files": failed_files,
         "uploaded_files": metadata.get("uploaded_files", []),
         "verification_failures": metadata.get("verification_failures", []),
         "progress_log": metadata.get("progress_log", []),
@@ -18367,6 +18521,8 @@ def _serialize_asmr_sync_task_status(task, session_map: Dict[str, dict]) -> dict
             "local_download_ready": session_state.get("local_download_ready", False),
             "local_download_root": session_state.get("local_download_root", ""),
             "local_downloaded_count": session_state.get("local_downloaded_count", 0),
+            "download_files_total": download_files_total,
+            "download_files_truncated": download_files_truncated,
         }
     }
 
@@ -19048,7 +19204,7 @@ async def http_download_google_drive_oauth_token(request: GoogleDriveOAuthTokenR
 
 
 @app.get("/api/http-download/status")
-async def http_download_status():
+async def http_download_status(compact: bool = False):
     from ..core.task_engine import TaskType, get_task_engine
 
     try:
@@ -19066,7 +19222,7 @@ async def http_download_status():
             "pending": len([t for t in tasks if t.status.value == "pending"]),
             "completed": len([t for t in tasks if t.status.value == "completed"]),
             "failed": len([t for t in tasks if t.status.value == "failed"]),
-            "tasks": [_serialize_http_download_task(t) for t in tasks[:50]],
+            "tasks": [_serialize_http_download_task(t, compact=compact) for t in tasks[:50]],
         }
         return _download_status_cache_set("http_download", version, payload)
     except Exception as exc:
@@ -19086,7 +19242,7 @@ async def baidu_netdisk_backend_health():
 
 
 @app.get("/api/baidu-netdisk/status")
-async def baidu_netdisk_status():
+async def baidu_netdisk_status(compact: bool = False):
     from ..core.baidu_netdisk_service import get_baidu_netdisk_service
     from ..core.task_engine import TaskType, get_task_engine
 
@@ -19109,7 +19265,7 @@ async def baidu_netdisk_status():
             "pending": len([t for t in tasks if t.status.value == "pending"]),
             "completed": len([t for t in tasks if t.status.value == "completed"]),
             "failed": len([t for t in tasks if t.status.value == "failed"]),
-            "tasks": [_serialize_http_download_task(t) for t in tasks[:50]],
+            "tasks": [_serialize_http_download_task(t, compact=compact) for t in tasks[:50]],
         }
         return _download_status_cache_set("baidu_netdisk", version, payload)
     except Exception as exc:
@@ -19905,6 +20061,13 @@ async def asmr_sync_start(request: ASMRSyncStartRequest):
             raise HTTPException(status_code=400, detail="没有要下载的作品")
 
         engine = get_task_engine()
+        config = get_config()
+        engine.set_max_concurrent(
+            max(
+                int(getattr(config.asmr_sync, "enhanced_max_parallel_sessions", 5) or 5),
+                int(getattr(config.asmr_sync, "max_concurrent_downloads", 3) or 3),
+            )
+        )
         created_tasks = []
 
         for item in items:
@@ -20011,7 +20174,12 @@ async def asmr_sync_enhanced_start(request: ASMRSyncEnhancedStartRequest):
         raise HTTPException(status_code=400, detail="没有可启动的增强下载任务")
 
     engine = get_task_engine()
-    engine.set_max_concurrent(int(getattr(config.asmr_sync, "enhanced_max_parallel_sessions", 5) or 5))
+    engine.set_max_concurrent(
+        max(
+            int(getattr(config.asmr_sync, "enhanced_max_parallel_sessions", 5) or 5),
+            int(getattr(config.asmr_sync, "max_concurrent_downloads", 3) or 3),
+        )
+    )
     service = get_asmr_resource_service()
     created_tasks = []
     for item in request.items:
@@ -21375,7 +21543,12 @@ async def circle_completion_download_start(request: CircleCompletionDownloadStar
     config = get_config()
     batch_id = str(uuid.uuid4())
     engine = get_task_engine()
-    engine.set_max_concurrent(int(getattr(config.asmr_sync, "enhanced_max_parallel_sessions", 5) or 5))
+    engine.set_max_concurrent(
+        max(
+            int(getattr(config.asmr_sync, "enhanced_max_parallel_sessions", 5) or 5),
+            int(getattr(config.asmr_sync, "max_concurrent_downloads", 3) or 3),
+        )
+    )
     session_service = get_asmr_resource_service()
     created_tasks = []
     child_rows = []
@@ -21664,7 +21837,7 @@ async def local_upload_status(task_ids: str = "", include_hidden: bool = True):
 
 
 @app.get("/api/asmr-sync/status")
-async def asmr_sync_status(task_ids: str = ""):
+async def asmr_sync_status(task_ids: str = "", compact: bool = False):
     """获取当前同步任务状态"""
     from ..core.task_engine import TaskType, get_task_engine
 
@@ -21738,7 +21911,7 @@ async def asmr_sync_status(task_ids: str = ""):
             "completed": len([t for t in asmr_tasks if t.status.value == "completed"]),
             "failed": len([t for t in asmr_tasks if t.status.value == "failed"]),
             "waiting_retry": len([t for t in asmr_tasks if t.status.value == "waiting_retry"]),
-            "tasks": [_serialize_asmr_sync_task_status(t, session_map) for t in (asmr_tasks if requested_ids else asmr_tasks[:20])]
+            "tasks": [_serialize_asmr_sync_task_status(t, session_map, compact=compact) for t in (asmr_tasks if requested_ids else asmr_tasks[:20])]
         }
 
     except Exception as e:

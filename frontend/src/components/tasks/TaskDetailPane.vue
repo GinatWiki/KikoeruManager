@@ -298,14 +298,28 @@
           </div>
           <div class="flex flex-wrap items-center justify-between gap-2">
             <div class="flex flex-wrap gap-1.5">
-              <span v-if="section.totalCount" class="inline-flex h-6 items-center rounded-md border border-slate-200 bg-white px-2 text-[10.5px] font-bold tabular-nums text-slate-700">文件 {{ section.totalCount }}</span>
+              <span v-if="section.totalCount" class="inline-flex h-6 items-center rounded-md border border-slate-200 bg-white px-2 text-[10.5px] font-bold tabular-nums text-slate-700">
+                <template v-if="section.truncated">已加载 {{ section.visibleCount }} / {{ section.totalCount }} 项</template>
+                <template v-else>文件 {{ section.totalCount }}</template>
+              </span>
               <span v-if="section.removedCount" class="inline-flex h-6 items-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 text-[10.5px] font-bold tabular-nums text-rose-700">
                 <span class="h-1.5 w-1.5 rounded-full bg-rose-500" />
                 已删除 {{ section.directRemovedCount || section.removedCount }}
                 <span v-if="section.removedCount > (section.directRemovedCount || section.removedCount)" class="text-rose-500/75">影响 {{ section.removedCount }}</span>
               </span>
             </div>
-            <button type="button" class="task-tree-toggle" @click="$emit('expand-section', section, !section.allExpanded)">
+            <div class="flex flex-wrap items-center gap-1.5">
+              <button
+                v-if="section.truncated"
+                type="button"
+                class="task-tree-toggle"
+                :disabled="loadingMoreFiles"
+                @click="$emit('load-more-files')"
+              >
+                <RefreshCw v-if="loadingMoreFiles" :size="12" class="animate-spin" />
+                <span>{{ loadingMoreFiles ? '加载中...' : `加载更多（剩余 ${section.totalCount - section.visibleCount}）` }}</span>
+              </button>
+              <button type="button" class="task-tree-toggle" @click="$emit('expand-section', section, !section.allExpanded)">
               <component
                 :is="section.allExpanded ? ChevronRight : ChevronDown"
                 :size="12"
@@ -313,22 +327,24 @@
                 class="task-tree-toggle__icon"
               />
               <span>{{ section.allExpanded ? '收起文件树' : '展开文件树' }}</span>
-            </button>
+              </button>
+            </div>
           </div>
         </div>
 
         <div class="task-file-tree-card">
-          <div class="task-file-tree detail-scroll">
-            <div
-              v-for="entry in section.rows"
+            <div ref="treeScrollRef" class="task-file-tree detail-scroll">
+              <div class="task-file-tree-virtual-canvas" :style="treeVirtualCanvasStyle">
+              <div
+              v-for="{ virtualRow, entry } in virtualTreeRows"
               :key="`${item.id}-${section.key}-${entry.key}`"
               class="task-file-tree-row tree-row"
               :class="{
                 'tree-row-filtered': entry.status === 'removed',
                 'tree-row-restored': entry.status === 'restored',
               }"
-              :style="{ paddingLeft: `${entry.depth * 16 + 8}px` }"
-              @contextmenu.prevent.stop="openEntryMenu($event, entry, section)"
+:style="{ height: `${virtualRow.size}px`, transform: `translateY(${virtualRow.start}px)`, paddingLeft: `${entry.depth * 16 + 8}px` }"
+              @contextmenu.prevent.stop="openRestoreMenu($event, entry)"
             >
               <div class="tree-main">
                 <button
@@ -360,8 +376,9 @@
                 </span>
               </div>
               <span v-if="entry.sizeText" class="tree-size">{{ entry.sizeText }}</span>
+              </div>
+              </div>
             </div>
-          </div>
         </div>
       </section>
 
@@ -407,29 +424,29 @@
 
   <Teleport to="body">
     <div
-      v-if="entryMenu"
+      v-if="restoreMenu"
       class="task-filter-restore-menu"
-      :style="{ left: `${entryMenu.x}px`, top: `${entryMenu.y}px` }"
+      :style="{ left: `${restoreMenu.x}px`, top: `${restoreMenu.y}px` }"
       @click.stop
       @contextmenu.prevent.stop
     >
-      <template v-if="entryMenu.kind === 'restore'">
+      <template v-if="restoreMenu.kind === 'restore'">
         <button
           type="button"
           class="task-filter-restore-menu__action"
-          :disabled="!entryMenu.availability.enabled || restoringRecoveryId === restoreEntryKey(entryMenu.entry)"
+          :disabled="!restoreMenu.availability.enabled || restoringRecoveryId === restoreEntryKey(restoreMenu.entry)"
           @click="restoreSelectedEntry"
         >
           <RefreshCw
-            v-if="restoringRecoveryId === restoreEntryKey(entryMenu.entry)"
+            v-if="restoringRecoveryId === restoreEntryKey(restoreMenu.entry)"
             :size="15"
             class="animate-spin"
           />
           <RotateCcw v-else :size="15" :stroke-width="2.3" />
-          <span>{{ entryMenu.entry.type === 'dir' ? '还原目录' : '还原文件' }}</span>
+          <span>{{ restoreMenu.entry.type === 'dir' ? '还原目录' : '还原文件' }}</span>
         </button>
-        <div v-if="!entryMenu.availability.enabled" class="task-filter-restore-menu__hint">
-          {{ entryMenu.availability.reason }}
+        <div v-if="!restoreMenu.availability.enabled" class="task-filter-restore-menu__hint">
+          {{ restoreMenu.availability.reason }}
         </div>
       </template>
       <template v-else>
@@ -439,7 +456,7 @@
           @click="deleteSelectedEntry"
         >
           <Trash2 :size="15" :stroke-width="2.3" />
-          <span>{{ isTreeDirectory(entryMenu.entry) ? '删除目录' : '删除文件' }}</span>
+          <span>{{ isTreeDirectory(restoreMenu.entry) ? '删除目录' : '删除文件' }}</span>
         </button>
         <div class="task-filter-restore-menu__hint">从库存中删除，不可恢复</div>
       </template>
@@ -448,7 +465,7 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   AlertTriangle,
   ArrowRight,
@@ -471,10 +488,12 @@ import { getTaskDomainMeta } from '../common/taskDomainMeta.js'
 import { getHttpDownloadDisplayMeta } from '../common/httpDownloadPlatformMeta.js'
 import { classifyLibraryEntryKind, libraryEntryIconFor } from '../library/_libraryFileKind.js'
 import { getFilterRestoreAvailability } from './_filterRecovery.js'
+import { useVirtualizer } from '@tanstack/vue-virtual'
 
 const props = defineProps({
   item: { type: Object, default: null },
   detailLoading: { type: Boolean, default: false },
+  loadingMoreFiles: { type: Boolean, default: false },
   fileTreeSections: { type: Array, default: () => [] },
   circleMeta: { type: Array, default: () => [] },
   circleLog: { type: Array, default: () => [] },
@@ -494,11 +513,53 @@ const emit = defineEmits([
   'update:treeFilterMode',
   'expand-section',
   'toggle-node',
+  'load-more-files',
   'restore-filtered',
   'delete-library-file',
 ])
 
-const entryMenu = ref(null)
+const restoreMenu = ref(null)
+const treeScrollRef = ref(null)
+const TREE_ROW_HEIGHT = 34
+const TREE_ROW_OVERSCAN = 18
+const treeRows = computed(() => props.fileTreeSections?.[0]?.rows || [])
+const treeRowVirtualizer = useVirtualizer(computed(() => ({
+  count: treeRows.value.length,
+  getScrollElement: () => treeScrollRef.value,
+  estimateSize: () => TREE_ROW_HEIGHT,
+  overscan: TREE_ROW_OVERSCAN,
+})))
+const virtualTreeRows = computed(() => {
+  const rows = treeRowVirtualizer.value.getVirtualItems()
+    .map(virtualRow => ({ virtualRow, entry: treeRows.value[virtualRow.index] }))
+    .filter(item => item.entry)
+  if (rows.length || !treeRows.value.length) return rows
+
+  // 首屏数据先于滚动容器测量完成时，虚拟器可能暂时返回空集合；先画少量行，测量完成后自动切回虚拟列表。
+  return treeRows.value.slice(0, 40).map((entry, index) => ({
+    entry,
+    virtualRow: {
+      index,
+      key: entry.key || index,
+      start: index * TREE_ROW_HEIGHT,
+      size: TREE_ROW_HEIGHT,
+    },
+  }))
+})
+const treeVirtualCanvasStyle = computed(() => ({
+  height: `${Math.max(
+    treeRowVirtualizer.value.getTotalSize(),
+    treeRows.value.length ? treeRows.value.length * TREE_ROW_HEIGHT : 0,
+  )}px`,
+}))
+
+watch(() => treeRows.value.length, () => {
+  nextTick(() => treeRowVirtualizer.value.measure())
+}, { flush: 'post' })
+
+onMounted(() => {
+  nextTick(() => treeRowVirtualizer.value.measure())
+})
 
 function menuPosition(event, width = 210, height = 96) {
   return {
@@ -514,9 +575,10 @@ function canDeleteLibraryEntry(entry, section) {
   return true
 }
 
-function openEntryMenu(event, entry, section) {
+function openRestoreMenu(event, entry) {
+  const section = props.fileTreeSections?.[0]
   if (['removed', 'restored'].includes(entry?.status)) {
-    entryMenu.value = {
+    restoreMenu.value = {
       kind: 'restore',
       entry,
       availability: getFilterRestoreAvailability(entry, props.item),
@@ -525,7 +587,7 @@ function openEntryMenu(event, entry, section) {
     return
   }
   if (canDeleteLibraryEntry(entry, section)) {
-    entryMenu.value = {
+    restoreMenu.value = {
       kind: 'delete',
       entry,
       section,
@@ -533,26 +595,26 @@ function openEntryMenu(event, entry, section) {
     }
     return
   }
-  entryMenu.value = null
+  restoreMenu.value = null
 }
 
-function closeEntryMenu() {
-  entryMenu.value = null
+function closeRestoreMenu() {
+  restoreMenu.value = null
 }
 
 function restoreSelectedEntry() {
-  const current = entryMenu.value
+  const current = restoreMenu.value
   if (!current || current.kind !== 'restore') return
   if (!current?.availability?.enabled || props.restoringRecoveryId === restoreEntryKey(current.entry)) return
   emit('restore-filtered', { entry: current.entry })
-  closeEntryMenu()
+  closeRestoreMenu()
 }
 
 function deleteSelectedEntry() {
-  const current = entryMenu.value
+  const current = restoreMenu.value
   if (!current || current.kind !== 'delete') return
   emit('delete-library-file', { entry: current.entry, section: current.section })
-  closeEntryMenu()
+  closeRestoreMenu()
 }
 
 function restoreEntryKey(entry) {
@@ -560,17 +622,17 @@ function restoreEntryKey(entry) {
 }
 
 onMounted(() => {
-  document.addEventListener('click', closeEntryMenu)
-  document.addEventListener('contextmenu', closeEntryMenu)
-  window.addEventListener('resize', closeEntryMenu)
-  window.addEventListener('scroll', closeEntryMenu, true)
+  document.addEventListener('click', closeRestoreMenu)
+  document.addEventListener('contextmenu', closeRestoreMenu)
+  window.addEventListener('resize', closeRestoreMenu)
+  window.addEventListener('scroll', closeRestoreMenu, true)
 })
 
 onUnmounted(() => {
-  document.removeEventListener('click', closeEntryMenu)
-  document.removeEventListener('contextmenu', closeEntryMenu)
-  window.removeEventListener('resize', closeEntryMenu)
-  window.removeEventListener('scroll', closeEntryMenu, true)
+  document.removeEventListener('click', closeRestoreMenu)
+  document.removeEventListener('contextmenu', closeRestoreMenu)
+  window.removeEventListener('resize', closeRestoreMenu)
+  window.removeEventListener('scroll', closeRestoreMenu, true)
 })
 
 function domainMeta(domain) {
@@ -893,10 +955,25 @@ function actionToneClass(action) {
 }
 
 .task-file-tree {
-  overflow: visible;
+  position: relative;
+  max-height: 560px;
+  overflow: auto;
   padding: 10px 12px;
   scrollbar-width: thin;
   scrollbar-color: rgba(148, 163, 184, 0.65) transparent;
+}
+
+.task-file-tree-virtual-canvas {
+  position: relative;
+  width: 100%;
+}
+
+.task-file-tree-virtual-canvas > .tree-row {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  margin-bottom: 0;
 }
 
 .tree-row {

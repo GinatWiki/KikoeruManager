@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 class TaskCenterService:
     """统一聚合业务任务与引擎任务，供任务中心页面使用。"""
 
-    # detail 模式给 get_item / 详情面板用，需要完整 metadata + 文件树
+    # detail 模式给 get_item / 详情面板用，文件树大数组按页返回，避免阻塞首屏
     CACHE_TTL_SECONDS = 1.2
     # summary 模式给 list / overview 用，可容忍稍长的延迟换取明显更轻的开销
     SUMMARY_CACHE_TTL_SECONDS = 2.5
@@ -39,6 +39,18 @@ class TaskCenterService:
     PENDING_CACHE_TTL_SECONDS = 5.0
     CONFLICT_CACHE_TTL_SECONDS = 3.0
     WAITING_RETRY_CACHE_TTL_SECONDS = 3.0
+
+    # 详情首屏只传一小页，避免数万目录节点被一次性 JSON 化和渲染。
+    # 后续由 /task-center/item-files 按字段分页续取。
+    DETAIL_ARRAY_PREVIEW_LIMIT = 600
+    PAGINATED_DETAIL_FIELDS = (
+        "download_files",
+        "upload_files",
+        "uploaded_files",
+        "final_file_tree_items",
+        "extracted_file_tree_items",
+        "file_tree_items",
+    )
 
     # summary 模式输出的 details.metadata 仅保留这些键，避免对完整 task_metadata 做 json_safe 深拷贝
     # 注意：必须涵盖任务中心内部 dedup / merge 逻辑会读的字段，否则会破坏行为
@@ -398,7 +410,8 @@ class TaskCenterService:
         return out
 
     def _should_skip_directory_file_tree_snapshot(self, metadata: Dict[str, Any], domain: str) -> bool:
-        return domain == "http_download"
+        # 下载任务自身已经维护 download_files，详情读取不应再对目标目录做一次 os.walk。
+        return domain in {"http_download", "asmr_sync", "baidu_netdisk"}
 
     def _ensure_file_tree_metadata(
         self,
@@ -524,6 +537,24 @@ class TaskCenterService:
         if isinstance(value, (list, tuple, set)):
             return [self._json_safe(current) for current in value]
         return str(value)
+
+    def _build_detail_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """构造详情首屏 metadata，并把可分页的大数组限制在预览页大小。"""
+        if not isinstance(metadata, dict) or not metadata:
+            return {}
+        out = dict(metadata)
+        preview_limit = self.DETAIL_ARRAY_PREVIEW_LIMIT
+        for field in self.PAGINATED_DETAIL_FIELDS:
+            rows = out.get(field)
+            if not isinstance(rows, list):
+                continue
+            total = len(rows)
+            if total <= preview_limit:
+                continue
+            out[field] = rows[:preview_limit]
+            out[f"{field}_total"] = total
+            out[f"{field}_truncated"] = True
+        return self._json_safe(out)
 
     def _summary_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """任务列表/概览用轻量结构，避免轮询时反复传大 metadata。"""
@@ -1609,7 +1640,7 @@ class TaskCenterService:
 
         # 关键优化：summary 模式下只挑几个必要的键，跳过全量深拷贝
         if mode == "detail":
-            details_metadata = self._json_safe(metadata)
+            details_metadata = self._build_detail_metadata(metadata)
         else:
             details_metadata = self._build_summary_metadata(metadata)
 
@@ -2328,7 +2359,16 @@ class TaskCenterService:
         if not normalized_item_id and not normalized_engine_task_id:
             raise ValueError("item_id 和 engine_task_id 不能同时为空")
 
-        # get_item 需要完整 metadata + 文件树，走 detail 模式
+        # engine 任务可以直接按 ID 序列化，不要为了一个详情把所有任务都做一次 detail。
+        if normalized_item_id.startswith("engine:"):
+            engine_task_id = normalized_item_id.split(":", 1)[1].strip()
+            task = get_task_engine().get_task(engine_task_id)
+            return self._safe_serialize_engine_task(task, mode="detail") if task else None
+        if normalized_engine_task_id:
+            task = get_task_engine().get_task(normalized_engine_task_id)
+            return self._safe_serialize_engine_task(task, mode="detail") if task else None
+
+        # 非 engine 项（例如待处理字幕项）仍走聚合路径。
         items = await self._build_all_items(mode="detail")
         for item in items:
             if normalized_item_id and self._safe_text(item.get("id")) == normalized_item_id:
@@ -2336,6 +2376,51 @@ class TaskCenterService:
             if normalized_engine_task_id and self._safe_text(item.get("engine_task_id")) == normalized_engine_task_id:
                 return item
         return None
+
+    async def get_item_files(
+        self,
+        *,
+        item_id: Optional[str] = None,
+        engine_task_id: Optional[str] = None,
+        offset: int = 0,
+        limit: int = 200,
+        field: str = "download_files",
+    ) -> Optional[Dict[str, Any]]:
+        """按字段分页读取传输明细或文件树，避免详情首屏加载超大数组。"""
+        normalized_item_id = self._safe_text(item_id)
+        normalized_engine_task_id = self._safe_text(engine_task_id)
+        task_id = normalized_engine_task_id
+        if normalized_item_id.startswith("engine:"):
+            task_id = normalized_item_id.split(":", 1)[1].strip()
+        if not task_id:
+            return None
+        task = get_task_engine().get_task(task_id)
+        if not task:
+            return None
+        metadata = dict(task.task_metadata or {})
+        domain = self._infer_domain(task)
+        if domain == "http_download":
+            metadata = sanitize_http_download_metadata(metadata)
+        elif domain == "baidu_netdisk":
+            metadata = sanitize_baidu_netdisk_metadata(metadata)
+        requested_field = self._safe_text(field) or "download_files"
+        if requested_field not in self.PAGINATED_DETAIL_FIELDS:
+            requested_field = "download_files"
+        rows = metadata.get(requested_field)
+        if not isinstance(rows, list):
+            rows = []
+        safe_offset = max(0, int(offset or 0))
+        safe_limit = max(1, min(int(limit or 200), 500))
+        return {
+            "item_id": normalized_item_id or f"engine:{task.id}",
+            "engine_task_id": task.id,
+            "field": requested_field,
+            "items": self._json_safe(rows[safe_offset:safe_offset + safe_limit]),
+            "total": len(rows),
+            "offset": safe_offset,
+            "limit": safe_limit,
+            "has_more": safe_offset + safe_limit < len(rows),
+        }
 
     async def get_overview(self) -> Dict[str, Any]:
         now = time.monotonic()

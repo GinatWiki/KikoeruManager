@@ -228,6 +228,75 @@ def test_summary_engine_item_cache_reuses_unchanged_task(monkeypatch):
     assert serialize.call_count == 2
 
 
+def test_task_center_detail_paginates_large_download_rows_without_mutating_task():
+    service = TaskCenterService()
+    rows = [{"name": f"file-{index}.wav", "relative_path": f"dir/file-{index}.wav"} for index in range(3478)]
+    task = Task(
+        TaskType.ASMR_SYNC_DOWNLOAD,
+        "/tmp/source",
+        task_id="task-large-download-detail",
+        metadata={"download_files": rows, "rjcode": "RJ01571862"},
+    )
+
+    item = service._serialize_engine_task(task, mode="detail")
+    metadata = item["details"]["metadata"]
+
+    assert len(metadata["download_files"]) == service.DETAIL_ARRAY_PREVIEW_LIMIT
+    assert metadata["download_files_total"] == 3478
+    assert metadata["download_files_truncated"] is True
+    assert len(task.task_metadata["download_files"]) == 3478
+
+
+@pytest.mark.asyncio
+async def test_task_center_item_files_reads_paginated_file_tree_field(monkeypatch):
+    service = TaskCenterService()
+    rows = [{"name": f"dir-{index}", "relative_path": f"dir-{index}", "type": "dir"} for index in range(1400)]
+    task = Task(
+        TaskType.EXTRACT,
+        "/tmp/source.zip",
+        task_id="task-large-file-tree",
+        metadata={"final_file_tree_items": rows},
+    )
+    engine = Mock()
+    engine.get_task.return_value = task
+    monkeypatch.setattr("app.core.task_center_service.get_task_engine", lambda: engine)
+
+    detail = service._serialize_engine_task(task, mode="detail")
+    detail_metadata = detail["details"]["metadata"]
+    assert len(detail_metadata["final_file_tree_items"]) == service.DETAIL_ARRAY_PREVIEW_LIMIT
+    assert detail_metadata["final_file_tree_items_total"] == 1400
+    assert detail_metadata["final_file_tree_items_truncated"] is True
+
+    result = await service.get_item_files(
+        item_id="engine:task-large-file-tree",
+        field="final_file_tree_items",
+        offset=600,
+        limit=120,
+    )
+
+    assert result["field"] == "final_file_tree_items"
+    assert result["offset"] == 600
+    assert result["total"] == 1400
+    assert len(result["items"]) == 120
+    assert result["items"][0]["relative_path"] == "dir-600"
+
+
+@pytest.mark.asyncio
+async def test_task_center_get_item_reads_single_engine_task(monkeypatch):
+    service = TaskCenterService()
+    task = Task(TaskType.ASMR_SYNC_DOWNLOAD, "/tmp/source", task_id="task-direct-detail")
+    engine = Mock()
+    engine.get_task.return_value = task
+    monkeypatch.setattr("app.core.task_center_service.get_task_engine", lambda: engine)
+    build_all = AsyncMock(side_effect=AssertionError("不应重建所有任务详情"))
+    monkeypatch.setattr(service, "_build_all_items", build_all)
+
+    result = await service.get_item(item_id="engine:task-direct-detail")
+
+    assert result["engine_task_id"] == "task-direct-detail"
+    build_all.assert_not_awaited()
+
+
 def test_completed_task_detail_prefers_final_file_tree(monkeypatch, tmp_path):
     extracted = tmp_path / "RJ01645332_1"
     final = tmp_path / "巨乳大好き屋" / "[巨乳大好き屋][RJ01645332]"
