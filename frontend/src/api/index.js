@@ -2344,8 +2344,11 @@ export const rjSubtitleApi = {
 
 export const aiSubtitleMatchApi = {
   test: async (config = {}) => {
+    // 后端连接测试已改为流式探测，超时跟随配置（最长 300 秒）；
+    // 前端请求超时按配置预留余量，避免先于后端中断。
+    const probeTimeout = Math.min(Math.max(Number(config?.timeout_seconds) || 30, 5), 300)
     const response = await apiClient.post('/ai-subtitle-match/test', { config }, {
-      timeout: 45000
+      timeout: (probeTimeout + 15) * 1000
     })
     return response.data
   },

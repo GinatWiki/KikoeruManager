@@ -589,6 +589,7 @@ async function testAISubtitleMatching() {
 function formatAISubtitleProbeMode(result) {
   const mode = result?.probe_mode || ''
   if (mode === 'hi') return 'hi 基础测试'
+  if (mode === 'hi_stream') return 'hi 流式探测'
   if (mode === 'stream_json') return '流式轻量探测'
   if (mode === 'non_stream_json') return '非流式兼容'
   if (mode === 'request_failed') return '请求未完成'

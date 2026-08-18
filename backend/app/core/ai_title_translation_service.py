@@ -374,11 +374,49 @@ class AITitleTranslationService:
         messages = [
             {"role": "user", "content": "你好，请回复\"OK\"表示连接正常。"}
         ]
-        kwargs = self._completion_kwargs(config, messages, timeout_seconds=15)
+        # 与 AI 字幕配对保持一致：流式优先。流式下 timeout 是“两次数据块之间的停滞超时”，
+        # 首包到达即证明链路连通，因此直接尊重用户配置的超时（最长 300 秒），
+        # 慢速推理模型 / 高延迟代理不再被固定的 15 秒上限误杀；wait_for 只做总时长兜底。
+        probe_timeout = max(5, min(_safe_int(config.get("timeout_seconds"), 30), 300))
+        kwargs = self._completion_kwargs(config, messages, timeout_seconds=probe_timeout)
+        from .ai_subtitle_match_service import _extract_litellm_stream_delta, _is_stream_unsupported_error
+
+
+        async def _stream_probe() -> Tuple[str, Dict[str, int]]:
+            stream_kwargs = dict(kwargs)
+            stream_kwargs["stream"] = True
+            parts: List[str] = []
+            usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            stream = await litellm.acompletion(**stream_kwargs)
+            async for chunk in stream:
+                delta, chunk_usage = _extract_litellm_stream_delta(chunk)
+                if delta:
+                    parts.append(delta)
+                if any(chunk_usage.values()):
+                    usage = chunk_usage
+            return "".join(parts), usage
+
+
+        hard_timeout = probe_timeout + 5
         try:
             async with _temporary_proxy(config.get("proxy_url", "")):
-                response = await litellm.acompletion(**kwargs)
-            content, usage = _extract_litellm_content(response)
+                try:
+                    content, usage = await asyncio.wait_for(_stream_probe(), timeout=hard_timeout)
+                except (asyncio.TimeoutError, TimeoutError):
+                    raise
+                except Exception as exc:
+                    if not _is_stream_unsupported_error(exc):
+                        raise
+                    logger.warning("[AI标题] 连接测试流式不可用，回退非流式: %s", exc)
+                    response = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=hard_timeout)
+                    content, usage = _extract_litellm_content(response)
+            if not _safe_text(content):
+                total_tokens = _safe_int((usage or {}).get("total_tokens"))
+                completion_tokens = _safe_int((usage or {}).get("completion_tokens"))
+                if total_tokens <= 0 and completion_tokens <= 0:
+                    raise ValueError("empty_response: 模型未返回内容")
+                # 推理模型常见：思考消耗了全部输出额度导致正文为空，但服务确实有响应，判定连接正常。
+                content = "（模型服务有响应但未输出正文，可能是推理模型的思考占满了输出额度：连接正常）"
             duration_ms = int((time.perf_counter() - started) * 1000)
             return {
                 "success": True,
@@ -386,6 +424,18 @@ class AITitleTranslationService:
                 "model": config.get("model", ""),
                 "response": content[:200],
                 "tokens": usage.get("total_tokens", 0),
+            }
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            return {
+                "success": False,
+                "error": {
+                    "code": "timeout",
+                    "title": "请求超时",
+                    "suggestion": "调大超时时间，或检查代理/模型服务响应速度",
+                },
+                "duration_ms": duration_ms,
+                "model": config.get("model", ""),
             }
         except Exception as exc:
             duration_ms = int((time.perf_counter() - started) * 1000)

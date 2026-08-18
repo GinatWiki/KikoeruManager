@@ -481,7 +481,10 @@ class AISubtitleMatchService:
         except Exception as exc:
             raise RuntimeError(f"missing_config: 后端未安装 litellm: {exc}") from exc
 
-        probe_timeout = max(3, min(_safe_int(config.get("timeout_seconds"), 30), 15))
+        # 连接测试改为流式优先：流式下 litellm/httpx 的 timeout 是“两次数据块之间的停滞
+        # 超时”，首包到达即证明链路连通，因此直接尊重用户配置的超时（配置已限制 1-300 秒），
+        # 慢速推理模型 / 高延迟代理不再被固定的 15 秒上限误杀；wait_for 只做总时长兜底。
+        probe_timeout = max(5, min(_safe_int(config.get("timeout_seconds"), 30), 300))
         messages = [
             {"role": "user", "content": "hi"},
         ]
@@ -495,25 +498,49 @@ class AISubtitleMatchService:
             response_format=False,
         )
         request_label = f"连接测试[{uuid.uuid4().hex[:8]}]"
-        hard_timeout = probe_timeout + 2
+        hard_timeout = probe_timeout + 5
         logger.info(
-            "[AI字幕] %s hi 探测开始: timeout=%s hard_timeout=%s max_tokens=16 model=%s",
+            "[AI字幕] %s hi 探测开始: stream=preferred timeout=%s hard_timeout=%s max_tokens=16 model=%s",
             request_label,
             probe_timeout,
             hard_timeout,
             config.get("model", ""),
         )
+        # 此前探测漏掉了 _temporary_proxy，用户配置代理时测试连接不走代理，这里补上。
+        stream_used = True
         try:
-            content, usage = await asyncio.wait_for(
-                self._complete_non_streaming(
-                    litellm,
-                    kwargs,
-                    request_label=request_label,
-                ),
-                timeout=hard_timeout,
-            )
+            async with _temporary_proxy(config.get("proxy_url", "")):
+                try:
+                    content, usage = await asyncio.wait_for(
+                        self._complete_streaming(
+                            litellm,
+                            kwargs,
+                            request_label=request_label,
+                        ),
+                        timeout=hard_timeout,
+                    )
+                except (asyncio.TimeoutError, TimeoutError):
+                    # 流式超时不回退非流式重试，避免双倍等待。
+                    raise
+                except Exception as exc:
+                    if not _is_stream_unsupported_error(exc):
+                        raise
+                    stream_used = False
+                    logger.warning(
+                        "[AI字幕] %s 流式探测不可用，回退非流式: %s",
+                        request_label,
+                        sanitize_text_for_log(str(exc) or exc.__class__.__name__, max_length=240),
+                    )
+                    content, usage = await asyncio.wait_for(
+                        self._complete_non_streaming(
+                            litellm,
+                            kwargs,
+                            request_label=request_label,
+                        ),
+                        timeout=hard_timeout,
+                    )
         except asyncio.TimeoutError as exc:
-            raise TimeoutError(f"连接测试超过 {hard_timeout} 秒仍未完成，模型服务或代理响应过慢") from exc
+            raise TimeoutError(f"连接测试超过 {hard_timeout} 秒仍无数据返回，模型服务或代理已断联") from exc
         response_text = _safe_text(content)
         if not response_text:
             total_tokens = _safe_int((usage or {}).get("total_tokens"))
@@ -540,6 +567,7 @@ class AISubtitleMatchService:
             "usage": usage,
             "timeout_seconds": probe_timeout,
             "hard_timeout_seconds": hard_timeout,
+            "stream_used": stream_used,
         }
 
     def _models_endpoint(self, config: Dict[str, Any]) -> Tuple[str, bool]:
@@ -1300,7 +1328,7 @@ class AISubtitleMatchService:
                     "chat_completion": True,
                     "model_response": True,
                 },
-                "probe_mode": "hi",
+                "probe_mode": "hi_stream" if probe.get("stream_used") else "hi",
                 "probe_timeout_seconds": probe.get("timeout_seconds"),
                 "response_preview": probe.get("response_preview", ""),
                 "usage": probe.get("usage") or {},
