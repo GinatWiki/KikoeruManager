@@ -138,7 +138,7 @@
 
       <!-- 版本比对详情面板 -->
       <transition name="duplicate-detail-slide">
-        <div v-if="activeRjcode" class="duplicate-detail-panel">
+        <div v-if="activeRjcode" class="duplicate-detail-panel" :class="{ 'is-wide': detailTab === 'diff' }">
           <!-- 详情加载态 -->
           <div v-if="detailLoading" class="duplicate-detail-loading">
             <AppLoadingAnimation variant="inline" :size="24" />
@@ -175,8 +175,27 @@
               </StatefulButton>
             </div>
 
+            <!-- 详情页签 -->
+            <div class="duplicate-detail-tabs">
+              <button
+                class="duplicate-detail-tab"
+                :class="{ 'is-active': detailTab === 'versions' }"
+                @click="detailTab = 'versions'"
+              >
+                版本列表
+              </button>
+              <button
+                class="duplicate-detail-tab"
+                :class="{ 'is-active': detailTab === 'diff' }"
+                :disabled="versions.length < 2"
+                @click="detailTab = 'diff'"
+              >
+                差异比对
+              </button>
+            </div>
+
             <!-- 版本列表 -->
-            <div class="duplicate-detail-body">
+            <div v-if="detailTab === 'versions'" class="duplicate-detail-body">
               <div
                 v-for="version in versions"
                 :key="version.version_key"
@@ -190,7 +209,18 @@
                   </div>
                 </div>
                 <div class="duplicate-version-card-body">
-                  <div class="duplicate-version-card-name">{{ version.root_name || version.library_name }}</div>
+                  <div class="duplicate-version-card-name">
+                    <span class="duplicate-version-card-name-text" :title="version.root_name || version.library_name">
+                      {{ version.root_name || version.library_name }}
+                    </span>
+                    <span
+                      v-if="version.language"
+                      class="duplicate-version-lang"
+                      :class="langChipClass(version.language)"
+                    >
+                      {{ version.language }}
+                    </span>
+                  </div>
                   <div class="duplicate-version-card-path">
                     <FolderTree :size="12" />
                     <span class="duplicate-version-card-path-text" :title="version.root_path">
@@ -215,7 +245,107 @@
                       {{ formatDate(version.max_mtime) }}
                     </span>
                   </div>
+                  <button
+                    class="duplicate-version-files-toggle"
+                    @click.stop="toggleVersionFiles(version.version_key)"
+                  >
+                    <ChevronDown
+                      :size="12"
+                      class="duplicate-version-files-chevron"
+                      :class="{ 'is-open': expandedVersionKeys.has(version.version_key) }"
+                    />
+                    {{ expandedVersionKeys.has(version.version_key) ? '收起文件列表' : `查看内部文件（${version.file_count}）` }}
+                  </button>
+                  <div
+                    v-if="expandedVersionKeys.has(version.version_key)"
+                    class="duplicate-version-files"
+                    @click.stop
+                  >
+                    <div v-if="!version.files || version.files.length === 0" class="duplicate-version-files-empty">
+                      索引中暂无内部文件记录
+                    </div>
+                    <template v-else>
+                      <div class="duplicate-version-files-list">
+                        <div
+                          v-for="item in version.files"
+                          :key="item.entry_type + ':' + item.path"
+                          class="duplicate-version-file-row"
+                          :style="{ paddingLeft: `${8 + fileDepth(item) * 14}px` }"
+                          :title="item.path"
+                        >
+                          <Folder v-if="item.entry_type === 'dir'" :size="11" class="is-dir" />
+                          <File v-else :size="11" />
+                          <span class="duplicate-version-file-name">{{ fileBaseName(item) }}</span>
+                          <span class="duplicate-version-file-size">{{ formatSize(item.size) }}</span>
+                        </div>
+                      </div>
+                      <div v-if="version.files_truncated" class="duplicate-version-files-truncated">
+                        文件过多，仅显示前 {{ version.files.length }} 条，差异比对结果可能不完整
+                      </div>
+                    </template>
+                  </div>
                 </div>
+              </div>
+            </div>
+
+            <!-- 差异比对 -->
+            <div v-else class="duplicate-detail-body duplicate-diff">
+              <div class="duplicate-diff-selectors">
+                <AppDropdown
+                  v-model="compareA"
+                  :options="versionOptions"
+                  placeholder="版本 A"
+                  size="small"
+                  class="duplicate-diff-selector"
+                />
+                <GitCompare :size="13" class="duplicate-diff-vs" />
+                <AppDropdown
+                  v-model="compareB"
+                  :options="versionOptions"
+                  placeholder="版本 B"
+                  size="small"
+                  class="duplicate-diff-selector"
+                />
+              </div>
+
+              <div v-if="compareTruncated" class="duplicate-diff-warning">
+                <AlertTriangle :size="12" />
+                有版本的文件列表被截断，比对结果可能不完整
+              </div>
+
+              <template v-if="diffResult">
+                <div class="duplicate-diff-summary">
+                  <button
+                    v-for="chip in diffFilterChips"
+                    :key="chip.value"
+                    class="duplicate-diff-chip"
+                    :class="[{ 'is-active': diffFilter === chip.value }, chip.tone]"
+                    @click="diffFilter = chip.value"
+                  >
+                    {{ chip.label }}
+                    <span v-if="chip.count != null" class="duplicate-diff-chip-count">{{ chip.count }}</span>
+                  </button>
+                </div>
+                <div v-if="filteredDiffRows.length === 0" class="duplicate-diff-empty">
+                  当前筛选下没有文件差异
+                </div>
+                <div v-else class="duplicate-diff-list">
+                  <div
+                    v-for="row in filteredDiffRows"
+                    :key="row.status + ':' + row.path"
+                    class="duplicate-diff-row"
+                    :title="row.path"
+                  >
+                    <span class="duplicate-diff-status" :class="`is-${row.status}`">
+                      {{ diffStatusLabel(row.status) }}
+                    </span>
+                    <span class="duplicate-diff-path">{{ row.path }}</span>
+                    <span class="duplicate-diff-size">{{ diffSizeText(row) }}</span>
+                  </div>
+                </div>
+              </template>
+              <div v-else class="duplicate-diff-empty">
+                请选择两个不同版本进行比对
               </div>
             </div>
           </template>
@@ -229,9 +359,11 @@
 import { computed, nextTick, onMounted, ref } from 'vue'
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowLeft,
   Check,
   CheckCircle2,
+  ChevronDown,
   Clock,
   File,
   Folder,
@@ -276,6 +408,22 @@ const detailEntries = ref([])
 const versions = ref([])
 const selectedVersionKeys = ref(new Set())
 const batchRunning = ref(false)
+
+// ── 页签 / 文件展开 / 差异比对 ──
+const detailTab = ref('versions')
+const expandedVersionKeys = ref(new Set())
+const compareA = ref('')
+const compareB = ref('')
+const diffFilter = ref('changes')
+
+const diffFilterOptions = [
+  { label: '只看差异', value: 'changes', tone: 'is-changes' },
+  { label: '仅 A 有', value: 'onlyA', tone: 'is-onlyA', countKey: 'onlyA' },
+  { label: '仅 B 有', value: 'onlyB', tone: 'is-onlyB', countKey: 'onlyB' },
+  { label: '大小不同', value: 'diffSize', tone: 'is-diffSize', countKey: 'diffSize' },
+  { label: '完全相同', value: 'same', tone: 'is-same', countKey: 'same' },
+  { label: '全部', value: 'all', tone: 'is-all' },
+]
 
 // ── 构建 WorkCard 数据 ──
 function buildWorkCardItem(group) {
@@ -326,6 +474,12 @@ async function selectGroup(group) {
     if (versions.value.length > 0) {
       selectedVersionKeys.value = new Set([versions.value[0].version_key])
     }
+    // 重置页签 / 展开 / 比对状态
+    detailTab.value = 'versions'
+    expandedVersionKeys.value = new Set()
+    diffFilter.value = 'changes'
+    compareA.value = versions.value[0]?.version_key || ''
+    compareB.value = versions.value[1]?.version_key || versions.value[0]?.version_key || ''
     await nextTick()
   } catch (err) {
     errorMessage.value = err?.response?.data?.detail || err.message || '获取版本详情失败'
@@ -339,6 +493,129 @@ function closeDetail() {
   detailEntries.value = []
   versions.value = []
   selectedVersionKeys.value = new Set()
+  detailTab.value = 'versions'
+  expandedVersionKeys.value = new Set()
+  compareA.value = ''
+  compareB.value = ''
+  diffFilter.value = 'changes'
+}
+
+// ── 版本语言标签 ──
+function langChipClass(language) {
+  const text = String(language || '')
+  if (text.includes('简体')) return 'is-sc'
+  if (text.includes('繁体')) return 'is-tc'
+  if (text.includes('翻译')) return 'is-tr'
+  if (text.includes('日文')) return 'is-jp'
+  if (text.includes('英文')) return 'is-en'
+  return 'is-unknown'
+}
+
+// ── 版本内文件展开 ──
+function toggleVersionFiles(versionKey) {
+  const next = new Set(expandedVersionKeys.value)
+  if (next.has(versionKey)) {
+    next.delete(versionKey)
+  } else {
+    next.add(versionKey)
+  }
+  expandedVersionKeys.value = next
+}
+
+function fileDepth(item) {
+  return Math.max(String(item?.path || '').split('/').length - 1, 0)
+}
+
+function fileBaseName(item) {
+  const path = String(item?.path || '')
+  return path.split('/').pop() || path
+}
+
+// ── 差异比对 ──
+const versionOptions = computed(() =>
+  versions.value.map((v, index) => ({
+    label: `版本${index + 1} · ${v.root_name || v.library_name}${v.language ? `（${v.language}）` : ''}`,
+    value: v.version_key,
+  }))
+)
+
+const compareTruncated = computed(() => {
+  const a = versions.value.find(v => v.version_key === compareA.value)
+  const b = versions.value.find(v => v.version_key === compareB.value)
+  return Boolean(a?.files_truncated || b?.files_truncated)
+})
+
+const diffResult = computed(() => {
+  const a = versions.value.find(v => v.version_key === compareA.value)
+  const b = versions.value.find(v => v.version_key === compareB.value)
+  if (!a || !b || a.version_key === b.version_key) return null
+
+  const mapA = new Map()
+  for (const item of a.files || []) {
+    if (item.entry_type === 'file') mapA.set(item.path, item.size || 0)
+  }
+  const mapB = new Map()
+  for (const item of b.files || []) {
+    if (item.entry_type === 'file') mapB.set(item.path, item.size || 0)
+  }
+
+  const rows = []
+  const counts = { onlyA: 0, onlyB: 0, diffSize: 0, same: 0 }
+  for (const [path, size] of mapA) {
+    if (mapB.has(path)) {
+      const sizeB = mapB.get(path)
+      if (sizeB === size) {
+        rows.push({ path, status: 'same', sizeA: size, sizeB })
+        counts.same += 1
+      } else {
+        rows.push({ path, status: 'diffSize', sizeA: size, sizeB })
+        counts.diffSize += 1
+      }
+    } else {
+      rows.push({ path, status: 'onlyA', sizeA: size })
+      counts.onlyA += 1
+    }
+  }
+  for (const [path, size] of mapB) {
+    if (!mapA.has(path)) {
+      rows.push({ path, status: 'onlyB', sizeB: size })
+      counts.onlyB += 1
+    }
+  }
+  rows.sort((x, y) => String(x.path).localeCompare(String(y.path)))
+  return { rows, counts }
+})
+
+const diffFilterChips = computed(() => {
+  const counts = diffResult.value?.counts || {}
+  return diffFilterOptions.map(option => ({
+    ...option,
+    count: option.countKey != null ? counts[option.countKey] ?? 0 : null,
+  }))
+})
+
+const filteredDiffRows = computed(() => {
+  const result = diffResult.value
+  if (!result) return []
+  if (diffFilter.value === 'all') return result.rows
+  if (diffFilter.value === 'changes') return result.rows.filter(row => row.status !== 'same')
+  return result.rows.filter(row => row.status === diffFilter.value)
+})
+
+function diffStatusLabel(status) {
+  return {
+    onlyA: '仅 A',
+    onlyB: '仅 B',
+    diffSize: '大小不同',
+    same: '相同',
+  }[status] || status
+}
+
+function diffSizeText(row) {
+  if (row.status === 'onlyA') return formatSize(row.sizeA)
+  if (row.status === 'onlyB') return formatSize(row.sizeB)
+  if (row.status === 'diffSize') return `${formatSize(row.sizeA)} → ${formatSize(row.sizeB)}`
+  return formatSize(row.sizeA)
 }
 
 // ── 版本选择 ──
@@ -844,13 +1121,338 @@ onMounted(() => {
 }
 
 .duplicate-version-card-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-weight: 600;
   font-size: 13px;
   color: #1e293b;
   margin-bottom: 4px;
+}
+
+.duplicate-version-card-name-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ── 版本语言标签 ── */
+.duplicate-version-lang {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 5px;
+  line-height: 1.6;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.duplicate-version-lang.is-sc {
+  background: rgba(16, 185, 129, 0.1);
+  color: #059669;
+  border-color: rgba(16, 185, 129, 0.25);
+}
+
+.duplicate-version-lang.is-tc {
+  background: rgba(14, 165, 233, 0.1);
+  color: #0284c7;
+  border-color: rgba(14, 165, 233, 0.25);
+}
+
+.duplicate-version-lang.is-tr {
+  background: rgba(245, 158, 11, 0.1);
+  color: #d97706;
+  border-color: rgba(245, 158, 11, 0.28);
+}
+
+.duplicate-version-lang.is-jp {
+  background: rgba(244, 63, 94, 0.1);
+  color: #e11d48;
+  border-color: rgba(244, 63, 94, 0.25);
+}
+
+.duplicate-version-lang.is-en {
+  background: rgba(99, 102, 241, 0.1);
+  color: #4f46e5;
+  border-color: rgba(99, 102, 241, 0.25);
+}
+
+.duplicate-version-lang.is-unknown {
+  background: rgba(100, 116, 139, 0.08);
+  color: #94a3b8;
+  border-color: rgba(100, 116, 139, 0.2);
+}
+
+/* ── 版本内文件展开 ── */
+.duplicate-version-files-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 2px 0;
+  font-size: 11px;
+  color: #8b5cf6;
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.duplicate-version-files-toggle:hover {
+  color: #7c3aed;
+}
+
+.duplicate-version-files-chevron {
+  transition: transform 0.2s;
+}
+
+.duplicate-version-files-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+.duplicate-version-files {
+  margin-top: 6px;
+  border: 1px solid #f1f5f9;
+  border-radius: 8px;
+  background: #f8fafc;
+  overflow: hidden;
+}
+
+.duplicate-version-files-empty {
+  padding: 10px 12px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.duplicate-version-files-list {
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 6px 0;
+}
+
+.duplicate-version-file-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: #475569;
+}
+
+.duplicate-version-file-row svg {
+  color: #94a3b8;
+  flex-shrink: 0;
+}
+
+.duplicate-version-file-row svg.is-dir {
+  color: #c4b5fd;
+}
+
+.duplicate-version-file-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.duplicate-version-file-size {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #94a3b8;
+}
+
+.duplicate-version-files-truncated {
+  padding: 5px 10px;
+  font-size: 10px;
+  color: #d97706;
+  background: rgba(245, 158, 11, 0.06);
+  border-top: 1px solid rgba(245, 158, 11, 0.12);
+}
+
+/* ── 详情页签 ── */
+.duplicate-detail-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 16px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.duplicate-detail-tab {
+  font-size: 12px;
+  padding: 8px 12px;
+  border: none;
+  background: none;
+  color: #64748b;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.duplicate-detail-tab:hover:not(:disabled) {
+  color: #8b5cf6;
+}
+
+.duplicate-detail-tab.is-active {
+  color: #8b5cf6;
+  border-bottom-color: #8b5cf6;
+  font-weight: 600;
+}
+
+.duplicate-detail-tab:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ── 差异比对 ── */
+.duplicate-detail-panel.is-wide {
+  width: 560px;
+}
+
+.duplicate-diff-selectors {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.duplicate-diff-selector {
+  flex: 1;
+  min-width: 0;
+}
+
+.duplicate-diff-vs {
+  color: #94a3b8;
+  flex-shrink: 0;
+}
+
+.duplicate-diff-warning {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: #d97706;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin-bottom: 10px;
+}
+
+.duplicate-diff-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.duplicate-diff-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  color: #64748b;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.duplicate-diff-chip:hover {
+  border-color: #c4b5fd;
+  color: #8b5cf6;
+}
+
+.duplicate-diff-chip.is-active {
+  background: rgba(139, 92, 246, 0.1);
+  border-color: rgba(139, 92, 246, 0.4);
+  color: #7c3aed;
+  font-weight: 600;
+}
+
+.duplicate-diff-chip-count {
+  font-size: 10px;
+  font-weight: 700;
+  opacity: 0.85;
+}
+
+.duplicate-diff-empty {
+  padding: 32px 0;
+  text-align: center;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.duplicate-diff-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.duplicate-diff-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.duplicate-diff-row:hover {
+  background: #f8fafc;
+}
+
+.duplicate-diff-status {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.duplicate-diff-status.is-onlyA {
+  background: rgba(139, 92, 246, 0.1);
+  color: #7c3aed;
+  border-color: rgba(139, 92, 246, 0.25);
+}
+
+.duplicate-diff-status.is-onlyB {
+  background: rgba(14, 165, 233, 0.1);
+  color: #0284c7;
+  border-color: rgba(14, 165, 233, 0.25);
+}
+
+.duplicate-diff-status.is-diffSize {
+  background: rgba(245, 158, 11, 0.1);
+  color: #d97706;
+  border-color: rgba(245, 158, 11, 0.28);
+}
+
+.duplicate-diff-status.is-same {
+  background: rgba(16, 185, 129, 0.08);
+  color: #059669;
+  border-color: rgba(16, 185, 129, 0.22);
+}
+
+.duplicate-diff-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #334155;
+}
+
+.duplicate-diff-size {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #94a3b8;
 }
 
 .duplicate-version-card-path {
@@ -939,10 +1541,73 @@ onMounted(() => {
   color: #64748b;
 }
 
+:global(html.kikoerumanager-dark) .duplicate-detail-tabs {
+  border-color: var(--km-dark-border, #2a2b3d);
+}
+
+:global(html.kikoerumanager-dark) .duplicate-detail-tab {
+  color: #94a3b8;
+}
+
+:global(html.kikoerumanager-dark) .duplicate-version-files {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: var(--km-dark-border, #2a2b3d);
+}
+
+:global(html.kikoerumanager-dark) .duplicate-version-file-row {
+  color: #cbd5e1;
+}
+
+:global(html.kikoerumanager-dark) .duplicate-version-file-row svg {
+  color: #64748b;
+}
+
+:global(html.kikoerumanager-dark) .duplicate-version-file-row svg.is-dir {
+  color: #8b5cf6;
+}
+
+:global(html.kikoerumanager-dark) .duplicate-version-files-truncated {
+  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(245, 158, 11, 0.2);
+}
+
+:global(html.kikoerumanager-dark) .duplicate-diff-chip {
+  background: var(--km-dark-card, #1a1b2e);
+  border-color: var(--km-dark-border, #2a2b3d);
+  color: #94a3b8;
+}
+
+:global(html.kikoerumanager-dark) .duplicate-diff-chip:hover {
+  border-color: rgba(139, 92, 246, 0.4);
+  color: #a78bfa;
+}
+
+:global(html.kikoerumanager-dark) .duplicate-diff-chip.is-active {
+  background: rgba(139, 92, 246, 0.16);
+  border-color: rgba(139, 92, 246, 0.5);
+  color: #c4b5fd;
+}
+
+:global(html.kikoerumanager-dark) .duplicate-diff-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+:global(html.kikoerumanager-dark) .duplicate-diff-path {
+  color: #cbd5e1;
+}
+
+:global(html.kikoerumanager-dark) .duplicate-diff-empty {
+  color: #64748b;
+}
+
 /* ── 响应式 ── */
 @media (max-width: 900px) {
   .duplicate-detail-panel {
     width: 360px;
+  }
+
+  .duplicate-detail-panel.is-wide {
+    width: 480px;
   }
 
   .duplicate-card-grid {

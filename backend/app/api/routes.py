@@ -22413,6 +22413,109 @@ def _duplicate_version_root(relative_path: str, parent_path: Optional[str], entr
     return parent_path or ""
 
 
+# ── 查重详情：版本语言识别与版本内文件列表 ──
+
+# 语言标记按优先级互斥判定：简体 > 繁体 > 中文翻译 > 日文 > 英文
+_VERSION_LANG_SIMPLIFIED = (
+    "简体中文", "簡體中文", "简中", "簡中", "简体", "簡体",
+    "zh-hans", "zh_cn", "chs",
+)
+_VERSION_LANG_TRADITIONAL = (
+    "繁體中文", "繁体中文", "繁中", "繁體", "繁体",
+    "zh-hant", "zh_tw", "cht",
+)
+_VERSION_LANG_TRANSLATED = (
+    "汉化", "漢化", "翻译", "翻譯", "中文字幕", "中文音声",
+    "台本", "字幕版", "中文",
+)
+_VERSION_LANG_JAPANESE = ("日本語", "日文", "日语", "日語")
+_VERSION_LANG_ENGLISH = ("英文", "英語", "english")
+
+# 单版本文件列表上限，避免超大作品详情响应失控
+_DUPLICATE_VERSION_FILES_CAP = 5000
+
+
+def _duplicate_version_language(root_path: str, names) -> str:
+    """根据版本根路径与内部条目名称推测版本语言标签。"""
+    text = str(root_path or "")
+    for name in list(names or [])[:1000]:
+        text += "\n" + str(name or "")
+    lowered = text.casefold()
+
+    def hit(markers) -> bool:
+        return any(marker.casefold() in lowered for marker in markers)
+
+    if hit(_VERSION_LANG_SIMPLIFIED):
+        return "简体中文版"
+    if hit(_VERSION_LANG_TRADITIONAL):
+        return "繁体中文版"
+    if hit(_VERSION_LANG_TRANSLATED):
+        return "中文翻译版"
+    if hit(_VERSION_LANG_JAPANESE):
+        return "日文版"
+    if hit(_VERSION_LANG_ENGLISH):
+        return "英文版"
+    return "未标注"
+
+
+def _duplicate_collect_version_files(
+    db, version: dict, rjcode: str, cap: int = _DUPLICATE_VERSION_FILES_CAP
+):
+    """收集版本内部条目（路径相对版本根），供前端展示与差异比对。
+
+    - 版本根是真实作品目录（根目录名含本组 RJ 号）：列出整个子树；
+    - 散放 RJ 文件 / 桶目录版本（根目录名不含本组 RJ 号）：只列版本自身的 RJ 条目，
+      避免把桶目录下其它作品混进来。
+    """
+    from ..models.database import LibraryIndexEntry
+
+    root = str(version.get("root_path") or "").strip("/")
+    library_id = version.get("library_id")
+    rj = (rjcode or "").casefold()
+    last_component = root.rsplit("/", 1)[-1].casefold() if root else ""
+    items = []
+    truncated = False
+
+    if root and rj and rj in last_component:
+        prefix = root + "/"
+        rows = (
+            db.query(LibraryIndexEntry)
+            .filter(LibraryIndexEntry.library_id == library_id)
+            .filter(LibraryIndexEntry.relative_path.startswith(prefix))
+            .order_by(LibraryIndexEntry.relative_path)
+            .limit(cap + 1)
+            .all()
+        )
+        truncated = len(rows) > cap
+        for row in rows[:cap]:
+            rel = row.relative_path or ""
+            sub = rel[len(prefix):] if rel.startswith(prefix) else rel
+            items.append({
+                "path": sub,
+                "name": row.name or sub.rsplit("/", 1)[-1],
+                "entry_type": row.entry_type or "",
+                "size": int(row.size or 0),
+                "mtime": int(row.mtime) if row.mtime else None,
+            })
+    else:
+        entries = version.get("entries") or []
+        truncated = len(entries) > cap
+        for entry in entries[:cap]:
+            rel = entry.relative_path or ""
+            if root and rel.startswith(root + "/"):
+                rel = rel[len(root) + 1:]
+            items.append({
+                "path": rel or (entry.name or ""),
+                "name": entry.name or "",
+                "entry_type": entry.entry_type or "",
+                "size": int(entry.size or 0),
+                "mtime": entry.mtime,
+            })
+
+    items.sort(key=lambda item: str(item.get("path") or "").casefold())
+    return items, truncated
+
+
 @app.get("/api/duplicate-check/groups")
 async def get_duplicate_groups(
     page: int = 1,
@@ -22636,6 +22739,18 @@ async def get_duplicate_group_detail(rjcode: str):
         # 按 library_id + root_path 排序版本
         versions = sorted(version_map.values(), key=lambda v: (v["library_id"], v["root_path"]))
 
+        # 补充版本内文件列表与语言标签（files 用于详情展示和前端差异比对）
+        for ver in versions:
+            files, files_truncated = _duplicate_collect_version_files(
+                db, ver, rjcode.strip()
+            )
+            ver["files"] = files
+            ver["files_truncated"] = files_truncated
+            ver["language"] = _duplicate_version_language(
+                ver.get("root_path") or "",
+                [f.get("path") or "" for f in files],
+            )
+
         return {
             "rjcode": rjcode,
             "entries": all_entries,
@@ -22652,6 +22767,9 @@ async def get_duplicate_group_detail(rjcode: str):
                     "file_count": v["file_count"],
                     "total_size": v["total_size"],
                     "max_mtime": v["max_mtime"],
+                    "language": v["language"],
+                    "files": v["files"],
+                    "files_truncated": v["files_truncated"],
                 }
                 for v in versions
             ],
