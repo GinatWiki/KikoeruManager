@@ -22834,7 +22834,6 @@ async def duplicate_keep(body: DuplicateKeepRequest):
     """保留选中版本，删除其余重复版本。"""
     from ..models.database import LibraryIndexEntry, get_db
     from ..core.library_manager import get_library_manager
-    from ..core.task_engine import get_task_engine
 
     rjcode = body.rjcode.strip()
     keep_ids = set(body.keep_entry_ids)
@@ -22867,7 +22866,6 @@ async def duplicate_keep(body: DuplicateKeepRequest):
             version_groups[vk].append(entry)
 
         manager = get_library_manager()
-        engine = get_task_engine()
         results = []
 
         for vk, group_entries in version_groups.items():
@@ -22881,23 +22879,6 @@ async def duplicate_keep(body: DuplicateKeepRequest):
             if dir_entry:
                 target_path = dir_entry.absolute_path or dir_entry.relative_path
                 try:
-                    library = manager.get_library_definition(dir_entry.library_id)
-                    task = await engine.create_task(
-                        task_type="delete",
-                        task_domain="library",
-                        task_kind="duplicate_cleanup",
-                        source_page="duplicate_check",
-                        source_action="keep",
-                        business_key=f"{rjcode}_{dir_entry.id}",
-                        metadata={
-                            "rjcode": rjcode,
-                            "library_id": dir_entry.library_id,
-                            "library_name": library.name if library else "",
-                            "target_path": target_path,
-                            "entry_name": dir_entry.name,
-                            "version_key": vk,
-                        },
-                    )
                     await manager.delete(
                         dir_entry.library_id, target_path, confirmed=True,
                     )
@@ -22926,23 +22907,6 @@ async def duplicate_keep(body: DuplicateKeepRequest):
                     if not target_path:
                         continue
                     try:
-                        library = manager.get_library_definition(entry.library_id)
-                        task = await engine.create_task(
-                            task_type="delete",
-                            task_domain="library",
-                            task_kind="duplicate_cleanup",
-                            source_page="duplicate_check",
-                            source_action="keep",
-                            business_key=f"{rjcode}_{entry.id}",
-                            metadata={
-                                "rjcode": rjcode,
-                                "library_id": entry.library_id,
-                                "library_name": library.name if library else "",
-                                "target_path": target_path,
-                                "entry_name": entry.name,
-                                "version_key": vk,
-                            },
-                        )
                         await manager.delete(
                             entry.library_id, target_path, confirmed=True,
                         )
