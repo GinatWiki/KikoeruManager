@@ -90,6 +90,19 @@ def _extract_litellm_content(response: Any) -> Tuple[str, Dict[str, int]]:
 
 
 
+def _extract_finish_reason(response: Any) -> str:
+    """提取 finish_reason，用于识别输出被 max_tokens 截断（length）的情况。"""
+    choices = response.get("choices") if isinstance(response, dict) else getattr(response, "choices", None)
+    if not choices:
+        return ""
+    choice = choices[0]
+    if isinstance(choice, dict):
+        return str(choice.get("finish_reason") or "").strip().lower()
+    return str(getattr(choice, "finish_reason", "") or "").strip().lower()
+
+
+
+
 def _is_azure_config(config: Dict[str, Any]) -> bool:
     base_url = _safe_text(config.get("api_base")).lower()
     api_version = _safe_text(config.get("api_version"))
@@ -177,7 +190,9 @@ class AITitleTranslationService:
             "model": _safe_text(config.get("model")),
             "messages": messages,
             "temperature": float(config.get("temperature", 0.1)),
-            "max_tokens": 200,
+            # 文件级重命名会返回「作品标题 + 全部文件名」的 JSON 映射，200 token 必被截断，
+            # 截断的 JSON 残骸曾被当成翻译结果直接把项目文件夹重命名成垃圾名，这里默认放宽到 4096。
+            "max_tokens": max(200, _safe_int(config.get("max_tokens"), 4096)),
         }
         api_key = _safe_text(config.get("api_key"))
         if api_key:
@@ -223,8 +238,14 @@ class AITitleTranslationService:
                 async with _temporary_proxy(config.get("proxy_url", "")):
                     response = await litellm.acompletion(**kwargs)
                 content, usage = _extract_litellm_content(response)
+                finish_reason = _extract_finish_reason(response)
                 if not content:
                     raise ValueError("模型返回为空")
+                if finish_reason == "length":
+                    raise ValueError(
+                        f"模型输出达到 max_tokens 上限（{kwargs.get('max_tokens')}）被截断，"
+                        "请在 AI 标题汉化设置中调大输出 token 上限"
+                    )
                 # 清理输出：尝试提取 JSON，如果 AI 返回了 {key: value} 格式则解析
                 import json as _json
                 content = content.strip()
@@ -233,14 +254,20 @@ class AITitleTranslationService:
                 if json_start >= 0 and json_end > json_start:
                     try:
                         parsed = _json.loads(content[json_start:json_end])
-                        if isinstance(parsed, dict):
-                            values = [v.strip() for v in parsed.values() if isinstance(v, str) and v.strip()]
-                            if len(values) == 1:
-                                content = values[0]
-                            elif len(values) > 1:
-                                content = _json.dumps(parsed, ensure_ascii=False)
-                    except _json.JSONDecodeError:
-                        content = content.strip().strip('"').strip("'").strip("「").strip("」").strip()
+                    except _json.JSONDecodeError as exc:
+                        # JSON 残骸不能当翻译结果传下去，否则会被直接用作文件夹 / 文件新名字
+                        raise ValueError(f"模型返回的 JSON 无法解析或不完整: {exc}") from exc
+                    if isinstance(parsed, dict):
+                        values = [v.strip() for v in parsed.values() if isinstance(v, str) and v.strip()]
+                        if len(values) == 1:
+                            content = values[0]
+                        elif len(values) > 1:
+                            content = _json.dumps(parsed, ensure_ascii=False)
+                        else:
+                            raise ValueError("模型返回的 JSON 没有可用翻译结果")
+                elif json_start >= 0:
+                    # 有 '{' 没有 '}'：典型的输出截断残骸，绝不能当标题使用
+                    raise ValueError("模型返回了不完整的 JSON（缺少结束括号），输出可能被截断")
                 else:
                     content = content.strip().strip('"').strip("'").strip("「").strip("」").strip()
                 logger.info(

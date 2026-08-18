@@ -385,6 +385,7 @@ export const defaultConfig = {
     timeout_seconds: 30,
     max_retries: 2,
     temperature: 0.1,
+    max_tokens: 4096,
     overwrite_manual: false,
     use_ai_subtitle_api: false,
     batch_size: 5,

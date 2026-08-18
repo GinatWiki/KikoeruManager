@@ -512,6 +512,7 @@ class AITitleTranslationConfig(BaseModel):
     timeout_seconds: int = 30
     max_retries: int = 2
     temperature: float = 0.1
+    max_tokens: int = 4096  # 输出 token 上限：文件级重命名会返回「标题 + 全部文件名」的 JSON，200 必然截断
     overwrite_manual: bool = False
     use_ai_subtitle_api: bool = False  # 复用 AI 字幕配对的 API 配置
     batch_size: int = 5

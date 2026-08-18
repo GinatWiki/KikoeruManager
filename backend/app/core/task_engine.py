@@ -7366,6 +7366,10 @@ class TaskEngine:
                                 # 移除插件注入的 emoji
                                 folder_title = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]", "", folder_title).strip()
                                 folder_title_clean = re.sub(r'[<>:"/\\|?*]', '', folder_title).strip()
+                                # 防御：AI 输出被截断等原因导致标题是 JSON 残骸时，绝不用它重命名项目文件夹
+                                if folder_title_clean.startswith(("{", "[")):
+                                    logger.warning("[AI标题] 文件夹重命名跳过，标题疑似 JSON 残骸: %s", folder_title_clean[:80])
+                                    folder_title_clean = ""
                                 if folder_title_clean:
                                     # 保留 RJ 号前缀，避免汉化后项目文件夹丢失 RJ 标识
                                     rj_match = re.search(r"RJ(\d{4,})", str(rj or ""), re.IGNORECASE)

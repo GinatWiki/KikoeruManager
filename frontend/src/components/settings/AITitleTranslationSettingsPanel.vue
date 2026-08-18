@@ -13,6 +13,9 @@
             <SettingsFieldCard label="每批数量">
               <SettingsNumberStepper v-model="cfg.batch_size" :min="1" :max="20" />
             </SettingsFieldCard>
+            <SettingsFieldCard label="输出上限（tokens）" hint="文件级重命名会返回标题与全部文件名的 JSON，上限过低会截断输出导致重命名异常">
+              <SettingsNumberStepper v-model="cfg.max_tokens" :min="200" :max="32768" :step="512" />
+            </SettingsFieldCard>
           </div>
         </div>
       </div>
