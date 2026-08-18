@@ -5626,9 +5626,12 @@ html.kikoerumanager-dark .logo-update-badge.is-checking {
 
 .sidebar-menu {
   flex: 1;
+  min-height: 0;
   width: 100%;
   padding: 4px 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  /* 低高度视口（如 1080p + 125% 系统缩放）下允许纵向滚动，避免底部导航项被裁掉不可达 */
+  overflow-y: auto;
   scrollbar-width: none;
   border-right: none;
   background: transparent;
@@ -5801,6 +5804,68 @@ html.kikoerumanager-dark .logo-update-badge.is-checking {
   opacity: 1;
   padding: 4px 10px;
   transform: translate3d(0, 0, 0);
+}
+
+/* 桌面端低高度视口紧凑模式：1080p + 125% 系统缩放等效视口只有 1536×864，
+   默认间距下 14 个导航项 + 监视器卡片约需 976px，底部「设置/日志/操作记录」会被裁掉。
+   这里压缩 logo / 导航项 / 监视器卡片间距，让 864px 视口完整可见；
+   更矮的视口由 .sidebar-menu 的纵向滚动兜底。 */
+@media (min-width: 1025px) and (max-height: 1000px) {
+  .sidebar-shell {
+    padding: 6px 0;
+  }
+
+  .logo {
+    min-height: 36px;
+    padding: 2px 0 4px 12px;
+  }
+
+  .logo-mark {
+    width: 34px;
+    height: 34px;
+    border-radius: 11px;
+  }
+
+  .sidebar:hover .sidebar-section-label,
+  .sidebar.is-sidebar-pinned .sidebar-section-label,
+  .sidebar.is-notification-panel-open .sidebar-section-label {
+    height: 16px;
+    margin: 0 10px 4px;
+  }
+
+  :deep(.sidebar-menu .el-menu-item) {
+    height: 34px;
+    margin: 2px 8px;
+    border-radius: 10px;
+  }
+
+  .sidebar-footer {
+    gap: 6px;
+    padding: 8px 0 0;
+  }
+
+  .sidebar:hover .sidebar-status-card,
+  .sidebar.is-sidebar-pinned .sidebar-status-card,
+  .sidebar.is-notification-panel-open .sidebar-status-card {
+    height: 96px;
+    padding: 10px 14px;
+  }
+
+  .sidebar-status-header {
+    margin-bottom: 6px;
+  }
+
+  .sidebar-status-text {
+    display: none;
+  }
+
+  .watcher-button {
+    height: 32px;
+  }
+
+  .version-info {
+    min-height: 32px;
+  }
 }
 
 .main-frame {
