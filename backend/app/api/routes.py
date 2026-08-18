@@ -22415,6 +22415,33 @@ def _duplicate_version_root(relative_path: str, parent_path: Optional[str], entr
 
 # ── 查重详情：版本语言识别与版本内文件列表 ──
 
+# 与 library_index._helpers._RJ_PATTERN 同源，供 SQL 过滤噪声条目使用
+_DUPLICATE_NOISE_RJ_SQL_PATTERN = r"[rvb]j(\d{6}|\d{8})(?!\d)"
+
+
+def _duplicate_is_noise_entry(
+    relative_path: str, parent_path: Optional[str], entry_type: str, rjcode: str
+) -> bool:
+    """判断是否为查重噪声条目：RJ 号只出现在文件名、且文件嵌在其它作品目录内。
+
+    典型噪声：作品文件夹里的 @folder-icon-RJxxxx.ico、img/classic 下的宣传图。
+    这类散文件不是作品版本，却会因版本根回退把父目录（如 img/classic、
+    别人的作品文件夹）误判成一个版本；保留删除时还可能误伤其它作品。
+    """
+    if entry_type != "file":
+        return False
+    rel = relative_path or ""
+    rj = (rjcode or "").lower()
+    pos = rel.lower().find(rj) if rj else -1
+    if pos >= 0 and rel.find("/", pos) > 0:
+        return False  # RJ 命中某个目录组件，是正常版本锚点
+    parent = parent_path or ""
+    if not parent:
+        return False
+    from ..core.library_index._helpers import extract_rjcode
+
+    return any(extract_rjcode(component) for component in parent.split("/"))
+
 # 语言标记按优先级互斥判定：简体 > 繁体 > 中文翻译 > 日文 > 英文
 _VERSION_LANG_SIMPLIFIED = (
     "简体中文", "簡體中文", "简中", "簡中", "简体", "簡体",
@@ -22584,6 +22611,18 @@ async def get_duplicate_groups(
             .filter(LibraryIndexEntry.rjcode != "")
         )
 
+        # 排除噪声散文件：RJ 只在文件名（未命中目录组件）、且父路径嵌在其它作品目录内
+        # （如 @folder-icon 图标、img/classic 宣传图），与 _duplicate_is_noise_entry 同口径
+        noise_entry_cond = and_(
+            rj_pos > 0,
+            tail_slash.is_(None),
+            LibraryIndexEntry.entry_type == "file",
+            func.coalesce(LibraryIndexEntry.parent_path, "").op("~*")(
+                _DUPLICATE_NOISE_RJ_SQL_PATTERN
+            ),
+        )
+        base_q = base_q.filter(~noise_entry_cond)
+
         if search:
             base_q = base_q.filter(LibraryIndexEntry.rjcode.ilike(f"%{search}%"))
 
@@ -22671,6 +22710,11 @@ async def get_duplicate_group_detail(rjcode: str):
         version_map = {}  # version_key -> { info, entries }
         all_entries = []
         for entry in entries:
+            # 噪声散文件（图标 / 宣传图嵌在其它作品目录内）不算版本，与列表端点同口径
+            if _duplicate_is_noise_entry(
+                entry.relative_path, entry.parent_path, entry.entry_type, entry.rjcode
+            ):
+                continue
             lib_info = libraries.get(entry.library_id, {})
             version_root = _duplicate_version_root(
                 entry.relative_path, entry.parent_path, entry.entry_type, entry.rjcode
@@ -22714,6 +22758,12 @@ async def get_duplicate_group_detail(rjcode: str):
             ver["entry_count"] += 1
             if entry.mtime:
                 ver["max_mtime"] = max(ver["max_mtime"] or 0, entry.mtime)
+
+        if not all_entries:
+            raise HTTPException(
+                status_code=404,
+                detail=f"RJ{rjcode} 的索引记录均为嵌在其它作品内的关联文件，没有可比对的有效版本",
+            )
 
         # 版本大小 / 文件数：优先取版本根目录行的递归汇总值；
         # 没有根目录行（散放 RJ 文件）时按文件条目自身累加，避免嵌套目录重复计数。
@@ -22803,9 +22853,14 @@ async def duplicate_keep(body: DuplicateKeepRequest):
         if not entries:
             raise HTTPException(status_code=404, detail=f"未找到 RJ{rjcode} 的索引记录")
 
-        # 按版本分组：每个 (library_id, parent_path) 一个版本
+        # 按版本分组：每个 (library_id, parent_path) 一个版本；
+        # 噪声散文件（嵌在其它作品目录内的图标 / 宣传图）不参与删除，避免误伤别的作品
         version_groups = {}
         for entry in entries:
+            if _duplicate_is_noise_entry(
+                entry.relative_path, entry.parent_path, entry.entry_type, entry.rjcode
+            ):
+                continue
             vk = f"{entry.library_id}::{entry.parent_path or ''}"
             if vk not in version_groups:
                 version_groups[vk] = []
