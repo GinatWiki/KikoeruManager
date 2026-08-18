@@ -252,7 +252,8 @@ class FolderWatcher:
         )
         observer = Observer()
         # inotify 后端 schedule 会递归 os.walk 监视目录，放到线程执行避免阻塞主事件循环
-        await asyncio.to_thread(observer.schedule, self.handler, watch_path, True)
+        # watchdog 3.x 的 schedule 中 recursive 是仅限关键字参数，按位置传参会直接 TypeError
+        await asyncio.to_thread(observer.schedule, self.handler, watch_path, recursive=True)
         observer.start()
         self.observer = observer
 
