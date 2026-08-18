@@ -95,8 +95,8 @@
                     {{ group.version_count }} 个版本
                   </span>
                   <span class="duplicate-card-meta-item is-libraries">
-                    <HardDrive :size="11" />
-                    {{ group.library_count }} 个库存
+                    <File :size="11" />
+                    {{ group.file_count }} 个文件
                   </span>
                 </div>
               </template>
@@ -208,7 +208,7 @@
                     </span>
                     <span class="duplicate-version-meta-item">
                       <File :size="11" />
-                      {{ version.entry_count }} 个文件
+                      {{ version.file_count }} 个文件
                     </span>
                     <span v-if="version.max_mtime" class="duplicate-version-meta-item">
                       <Clock :size="11" />

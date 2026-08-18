@@ -8,7 +8,7 @@ from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES, GZipRespon
 from starlette.responses import FileResponse as StarletteFileResponse
 from starlette.staticfiles import NotModifiedResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import case, desc, func, or_, text
+from sqlalchemy import and_, case, desc, func, or_, text
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
@@ -22347,13 +22347,14 @@ class DuplicateGroupItem(BaseModel):
     rjcode: str
     version_count: int = 0
     library_count: int = 0
+    file_count: int = 0
     total_size: int = 0
     max_mtime: Optional[int] = None
     names: List[str] = Field(default_factory=list)
     project_name: str = ""
 
 class DuplicateVersionItem(BaseModel):
-    """一个重复版本（按 library_id + parent_path 分组）"""
+    """一个重复版本（按 library_id + 作品根目录分组）"""
     version_key: str
     library_id: str
     library_name: str = ""
@@ -22361,6 +22362,7 @@ class DuplicateVersionItem(BaseModel):
     root_path: str = ""
     root_name: str = ""
     entry_count: int = 0
+    file_count: int = 0
     total_size: int = 0
     max_mtime: Optional[int] = None
     entries: List["DuplicateEntryItem"] = Field(default_factory=list)
@@ -22375,6 +22377,7 @@ class DuplicateEntryItem(BaseModel):
     name: str
     entry_type: str
     size: int = 0
+    file_count: int = 0
     mtime: Optional[int] = None
     indexed_at: Optional[int] = None
     version_key: str = ""
@@ -22390,6 +22393,26 @@ class DuplicateKeepRequest(BaseModel):
     keep_entry_ids: List[int] = Field(default_factory=list)
 
 
+def _duplicate_version_root(relative_path: str, parent_path: Optional[str], entry_type: str, rjcode: str) -> str:
+    """定位 RJ 作品的版本根路径。
+
+    版本 = 一份作品拷贝，锚定在"路径中第一个包含 RJ 号的目录组件"：
+    - RJ 出现在某个目录组件里 -> 截到该目录结束（同一作品文件夹下的所有条目归为一个版本）
+    - RJ 只在最后一个组件且该条目是目录 -> 该目录自身即版本根
+    - 其余情况（散放 RJ 文件、路径未命中）-> 所在目录
+    """
+    rel = relative_path or ""
+    rj = (rjcode or "").lower()
+    pos = rel.lower().find(rj) if rj else -1
+    if pos >= 0:
+        slash = rel.find("/", pos)
+        if slash > 0:
+            return rel[:slash]
+        if entry_type == "dir":
+            return rel
+    return parent_path or ""
+
+
 @app.get("/api/duplicate-check/groups")
 async def get_duplicate_groups(
     page: int = 1,
@@ -22397,16 +22420,49 @@ async def get_duplicate_groups(
     sort: str = "version_count",
     search: str = "",
 ):
-    """获取重复 RJ 分组列表。按 (library_id, parent_path) 去重计数版本，避免把同一项目目录下的多个文件误算为多个版本。"""
+    """获取重复 RJ 分组列表。按"作品根目录"（路径中第一个包含 RJ 号的目录组件）聚合版本，
+    避免同一作品文件夹下文件名带 RJ 的多个文件被误算为多个版本。"""
     from ..models.database import LibraryIndexEntry, get_db
 
     db = next(get_db())
     try:
-        # 版本去重键：每个 (library_id, parent_path) 组合算一个版本
+        rel = LibraryIndexEntry.relative_path
+        # RJ 号在相对路径中的起始位置（1 起，0 表示未命中；rjcode 统一大写、路径按原样存储，统一 lower 比较）
+        rj_pos = func.strpos(func.lower(rel), func.lower(LibraryIndexEntry.rjcode))
+        # 命中位置之后第一个 "/" 的位置（非空说明 RJ 出现在某个目录组件中）
+        tail_slash = func.nullif(
+            func.strpos(func.substring(rel, func.greatest(rj_pos, 1)), "/"),
+            0,
+        )
+        # 版本根表达式：与 _duplicate_version_root 的 Python 逻辑保持一致
+        work_root_expr = case(
+            (
+                and_(rj_pos > 0, tail_slash.isnot(None)),
+                func.substring(rel, 1, rj_pos + tail_slash - 2),
+            ),
+            (
+                and_(rj_pos > 0, LibraryIndexEntry.entry_type == "dir"),
+                rel,
+            ),
+            else_=func.coalesce(LibraryIndexEntry.parent_path, ""),
+        )
+        # 版本去重键：每个 (library_id, 作品根目录) 组合算一个版本
         version_key_expr = func.concat(
             LibraryIndexEntry.library_id,
             "::",
-            func.coalesce(LibraryIndexEntry.parent_path, ""),
+            work_root_expr,
+        )
+        # 版本根目录行自身（目录行 size / file_count 是递归汇总值，直接取用避免嵌套目录重复计数）；
+        # 散放 RJ 文件没有目录行，大小和文件数按自身计 1。
+        root_row_cond = and_(rj_pos > 0, tail_slash.is_(None))
+        size_value = case(
+            (root_row_cond, LibraryIndexEntry.size),
+            else_=0,
+        )
+        file_count_value = case(
+            (and_(root_row_cond, LibraryIndexEntry.entry_type == "dir"), LibraryIndexEntry.file_count),
+            (and_(root_row_cond, LibraryIndexEntry.entry_type == "file"), 1),
+            else_=0,
         )
 
         base_q = (
@@ -22414,19 +22470,12 @@ async def get_duplicate_groups(
                 LibraryIndexEntry.rjcode,
                 func.count(func.distinct(version_key_expr)).label("version_count"),
                 func.count(func.distinct(LibraryIndexEntry.library_id)).label("library_count"),
-                func.coalesce(
-                    func.sum(
-                        case(
-                            (LibraryIndexEntry.entry_type == "dir", LibraryIndexEntry.size),
-                            else_=0,
-                        )
-                    ),
-                    0,
-                ).label("total_size"),
+                func.coalesce(func.sum(file_count_value), 0).label("file_count"),
+                func.coalesce(func.sum(size_value), 0).label("total_size"),
                 func.max(LibraryIndexEntry.mtime).label("max_mtime"),
                 func.array_agg(
-                    func.distinct(LibraryIndexEntry.parent_path)
-                ).label("parent_paths"),
+                    func.distinct(work_root_expr)
+                ).label("root_paths"),
             )
             .filter(LibraryIndexEntry.rjcode.isnot(None))
             .filter(LibraryIndexEntry.rjcode != "")
@@ -22444,15 +22493,7 @@ async def get_duplicate_groups(
 
         sort_map = {
             "version_count": func.count(func.distinct(version_key_expr)).desc(),
-            "total_size": func.coalesce(
-                func.sum(
-                    case(
-                        (LibraryIndexEntry.entry_type == "dir", LibraryIndexEntry.size),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).desc(),
+            "total_size": func.coalesce(func.sum(size_value), 0).desc(),
             "rjcode": LibraryIndexEntry.rjcode.asc(),
             "max_mtime": func.max(LibraryIndexEntry.mtime).desc().nullslast(),
         }
@@ -22467,12 +22508,12 @@ async def get_duplicate_groups(
 
         groups = []
         for row in rows:
-            # 从 parent_path 提取项目目录名
-            parent_paths = row.parent_paths or []
+            # 从作品根路径提取项目目录名
+            root_paths = row.root_paths or []
             names = []
-            for pp in parent_paths:
-                if pp:
-                    name = str(pp).rstrip("/").rsplit("/", 1)[-1]
+            for rp in root_paths:
+                if rp:
+                    name = str(rp).rstrip("/").rsplit("/", 1)[-1]
                     if name and name not in names:
                         names.append(name)
             # 取第一个目录名作为项目名
@@ -22482,6 +22523,7 @@ async def get_duplicate_groups(
                     rjcode=str(row.rjcode),
                     version_count=int(row.version_count),
                     library_count=int(row.library_count),
+                    file_count=int(row.file_count),
                     total_size=int(row.total_size),
                     max_mtime=int(row.max_mtime) if row.max_mtime else None,
                     names=names,
@@ -22522,13 +22564,15 @@ async def get_duplicate_group_detail(rjcode: str):
         except Exception:
             pass
 
-        # 构建版本分组：按 (library_id, parent_path) 分组
+        # 构建版本分组：按 (library_id, 作品根目录) 分组，与列表端点同一套版本根语义
         version_map = {}  # version_key -> { info, entries }
         all_entries = []
         for entry in entries:
             lib_info = libraries.get(entry.library_id, {})
-            parent = entry.parent_path or ""
-            version_key = f"{entry.library_id}::{parent}"
+            version_root = _duplicate_version_root(
+                entry.relative_path, entry.parent_path, entry.entry_type, entry.rjcode
+            )
+            version_key = f"{entry.library_id}::{version_root}"
 
             entry_item = DuplicateEntryItem(
                 id=entry.id,
@@ -22540,6 +22584,7 @@ async def get_duplicate_group_detail(rjcode: str):
                 name=entry.name or "",
                 entry_type=entry.entry_type or "",
                 size=entry.size or 0,
+                file_count=entry.file_count or 0,
                 mtime=int(entry.mtime) if entry.mtime else None,
                 indexed_at=int(entry.indexed_at) if entry.indexed_at else None,
                 version_key=version_key,
@@ -22547,15 +22592,16 @@ async def get_duplicate_group_detail(rjcode: str):
             all_entries.append(entry_item)
 
             if version_key not in version_map:
-                root_name = parent.rstrip("/").rsplit("/", 1)[-1] if parent else entry.name
+                root_name = version_root.rstrip("/").rsplit("/", 1)[-1] if version_root else entry.name
                 version_map[version_key] = {
                     "version_key": version_key,
                     "library_id": entry.library_id,
                     "library_name": lib_info.get("name", entry.library_id),
                     "library_type": lib_info.get("type", ""),
-                    "root_path": parent,
+                    "root_path": version_root,
                     "root_name": root_name,
                     "entry_count": 0,
+                    "file_count": 0,
                     "total_size": 0,
                     "max_mtime": None,
                     "entries": [],
@@ -22563,10 +22609,29 @@ async def get_duplicate_group_detail(rjcode: str):
             ver = version_map[version_key]
             ver["entries"].append(entry_item)
             ver["entry_count"] += 1
-            if entry.entry_type == "dir":
-                ver["total_size"] += entry.size or 0
             if entry.mtime:
                 ver["max_mtime"] = max(ver["max_mtime"] or 0, entry.mtime)
+
+        # 版本大小 / 文件数：优先取版本根目录行的递归汇总值；
+        # 没有根目录行（散放 RJ 文件）时按文件条目自身累加，避免嵌套目录重复计数。
+        for ver in version_map.values():
+            root_item = next(
+                (
+                    e for e in ver["entries"]
+                    if e.entry_type == "dir" and e.relative_path == ver["root_path"]
+                ),
+                None,
+            )
+            if root_item is not None:
+                ver["total_size"] = root_item.size or 0
+                ver["file_count"] = root_item.file_count or 0
+            else:
+                ver["total_size"] = sum(
+                    e.size or 0 for e in ver["entries"] if e.entry_type == "file"
+                )
+                ver["file_count"] = sum(
+                    1 for e in ver["entries"] if e.entry_type == "file"
+                )
 
         # 按 library_id + root_path 排序版本
         versions = sorted(version_map.values(), key=lambda v: (v["library_id"], v["root_path"]))
@@ -22584,6 +22649,7 @@ async def get_duplicate_group_detail(rjcode: str):
                     "root_path": v["root_path"],
                     "root_name": v["root_name"],
                     "entry_count": v["entry_count"],
+                    "file_count": v["file_count"],
                     "total_size": v["total_size"],
                     "max_mtime": v["max_mtime"],
                 }
