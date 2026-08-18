@@ -22852,7 +22852,8 @@ async def duplicate_keep(body: DuplicateKeepRequest):
         if not entries:
             raise HTTPException(status_code=404, detail=f"未找到 RJ{rjcode} 的索引记录")
 
-        # 按版本分组：每个 (library_id, parent_path) 一个版本；
+        # 按版本分组：与详情端点同一套版本根语义（路径中第一个含 RJ 的目录截断），
+        # 避免同一版本被拆成多组后先删上层目录、再删已不存在的子条目级联报错；
         # 噪声散文件（嵌在其它作品目录内的图标 / 宣传图）不参与删除，避免误伤别的作品
         version_groups = {}
         for entry in entries:
@@ -22860,74 +22861,105 @@ async def duplicate_keep(body: DuplicateKeepRequest):
                 entry.relative_path, entry.parent_path, entry.entry_type, entry.rjcode
             ):
                 continue
-            vk = f"{entry.library_id}::{entry.parent_path or ''}"
+            version_root = _duplicate_version_root(
+                entry.relative_path, entry.parent_path, entry.entry_type, entry.rjcode
+            )
+            vk = f"{entry.library_id}::{version_root}"
             if vk not in version_groups:
-                version_groups[vk] = []
-            version_groups[vk].append(entry)
+                version_groups[vk] = {"root": version_root, "entries": []}
+            version_groups[vk]["entries"].append(entry)
 
         manager = get_library_manager()
         results = []
 
-        for vk, group_entries in version_groups.items():
+        for vk, group in version_groups.items():
+            group_entries = group["entries"]
             # 检查此版本是否在保留列表中（任意一个条目的 id 在 keep_ids 中就算保留）
             group_ids = {e.id for e in group_entries}
             if group_ids & keep_ids:
                 continue  # 此版本保留
 
-            # 优先删除目录条目（会递归删除整个项目目录）
-            dir_entry = next((e for e in group_entries if e.entry_type == "dir"), None)
-            if dir_entry:
-                target_path = dir_entry.absolute_path or dir_entry.relative_path
+            # 优先删版本根目录：递归删除一次即覆盖组内全部子条目
+            root_dir_entry = next(
+                (
+                    e for e in group_entries
+                    if e.entry_type == "dir" and (e.relative_path or "") == group["root"]
+                ),
+                None,
+            )
+            if root_dir_entry is not None:
+                target_path = root_dir_entry.absolute_path or root_dir_entry.relative_path
                 try:
                     await manager.delete(
-                        dir_entry.library_id, target_path, confirmed=True,
+                        root_dir_entry.library_id, target_path, confirmed=True,
                     )
                     results.append({
                         "version_key": vk,
-                        "entry_id": dir_entry.id,
+                        "entry_id": root_dir_entry.id,
                         "path": target_path,
                         "status": "deleted",
                     })
                 except Exception as exc:
                     logger.warning(
                         "重复版本删除失败 rjcode=%s entry_id=%s path=%s error=%s",
-                        rjcode, dir_entry.id, target_path, exc,
+                        rjcode, root_dir_entry.id, target_path, exc,
                     )
                     results.append({
                         "version_key": vk,
-                        "entry_id": dir_entry.id,
+                        "entry_id": root_dir_entry.id,
                         "path": target_path,
                         "status": "failed",
                         "error": str(exc),
                     })
-            else:
-                # 没有目录条目，逐个删除文件
-                for entry in group_entries:
-                    target_path = entry.absolute_path or entry.relative_path
-                    if not target_path:
-                        continue
-                    try:
-                        await manager.delete(
-                            entry.library_id, target_path, confirmed=True,
-                        )
-                        results.append({
-                            "version_key": vk,
-                            "entry_id": entry.id,
-                            "path": target_path,
-                            "status": "deleted",
-                        })
-                    except Exception as exc:
-                        logger.warning(
-                            "重复版本删除失败 rjcode=%s entry_id=%s path=%s error=%s",
-                            rjcode, entry.id, target_path, exc,
-                        )
-                        results.append({
-                            "version_key": vk,
-                            "entry_id": entry.id,
-                            "path": target_path,
-                            "status": "failed",
-                            "error": str(exc),
-                        })
+                continue
+
+            # 版本根目录不在组内（散放 RJ 文件等）：目录优先逐个删除；
+            # 已被本次删除的上层目录覆盖的条目直接计为删除，避免级联 ENOENT 误报
+            deleted_dir_targets: list[str] = []
+            ordered_entries = sorted(
+                group_entries, key=lambda e: 0 if e.entry_type == "dir" else 1
+            )
+            for entry in ordered_entries:
+                target_path = entry.absolute_path or entry.relative_path
+                if not target_path:
+                    continue
+                if any(
+                    deleted_dir != target_path
+                    and _is_path_under_base(target_path, deleted_dir)
+                    for deleted_dir in deleted_dir_targets
+                ):
+                    results.append({
+                        "version_key": vk,
+                        "entry_id": entry.id,
+                        "path": target_path,
+                        "status": "deleted",
+                        "covered_by_dir": True,
+                    })
+                    continue
+                try:
+                    await manager.delete(
+                        entry.library_id, target_path, confirmed=True,
+                    )
+                    if entry.entry_type == "dir":
+                        deleted_dir_targets.append(target_path)
+                    results.append({
+                        "version_key": vk,
+                        "entry_id": entry.id,
+                        "path": target_path,
+                        "status": "deleted",
+                    })
+                except Exception as exc:
+                    logger.warning(
+                        "重复版本删除失败 rjcode=%s entry_id=%s path=%s error=%s",
+                        rjcode, entry.id, target_path, exc,
+                    )
+                    results.append({
+                        "version_key": vk,
+                        "entry_id": entry.id,
+                        "path": target_path,
+                        "status": "failed",
+                        "error": str(exc),
+                    })
 
         return {
             "message": f"已处理 {len(results)} 个版本",
