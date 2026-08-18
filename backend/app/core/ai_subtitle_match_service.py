@@ -84,9 +84,13 @@ def _extract_litellm_content(response: Any) -> Tuple[str, Dict[str, int]]:
     choice = choices[0]
     message = choice.get("message") if isinstance(choice, dict) else getattr(choice, "message", None)
     if isinstance(message, dict):
-        content = message.get("content") or ""
+        # 推理模型正文为空时回退到 reasoning_content，避免误判为空响应
+        content = message.get("content") or message.get("reasoning_content") or ""
     else:
-        content = getattr(message, "content", "") if message is not None else ""
+        if message is not None:
+            content = getattr(message, "content", None) or getattr(message, "reasoning_content", None) or ""
+        else:
+            content = ""
     return str(content or ""), {
         "prompt_tokens": _safe_int(usage.get("prompt_tokens")),
         "completion_tokens": _safe_int(usage.get("completion_tokens")),
@@ -512,7 +516,19 @@ class AISubtitleMatchService:
             raise TimeoutError(f"连接测试超过 {hard_timeout} 秒仍未完成，模型服务或代理响应过慢") from exc
         response_text = _safe_text(content)
         if not response_text:
-            raise ValueError("empty_response: 模型未返回内容")
+            total_tokens = _safe_int((usage or {}).get("total_tokens"))
+            completion_tokens = _safe_int((usage or {}).get("completion_tokens"))
+            if total_tokens > 0 or completion_tokens > 0:
+                # 推理模型常见：思考消耗了全部输出额度导致正文为空，但模型服务确实有响应，
+                # 连接测试的目标是验证连通性，按成功处理。
+                logger.info(
+                    "[AI字幕] %s hi 探测正文为空但 tokens=%s，判定连接正常（推理模型空正文）",
+                    request_label,
+                    total_tokens,
+                )
+                response_text = "（模型服务有响应但未输出正文，可能是推理模型的思考占满了输出额度：连接正常）"
+            else:
+                raise ValueError("empty_response: 模型未返回内容")
         logger.info(
             "[AI字幕] %s hi 探测成功: reply_chars=%s tokens=%s",
             request_label,
