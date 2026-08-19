@@ -4455,23 +4455,23 @@ async def ai_title_translation_file_rename(request: AITitleTranslationFileRename
     if not library:
         raise HTTPException(status_code=404, detail="未找到库")
 
-    # 1. 扫描文件
-    data = await manager.list_files(
+    # 1. 扫描文件（递归整个目录树：作品音频/字幕通常在 本編/ 等子目录里，
+    # 只扫顶层会漏掉全部文件，误判为"未找到可重命名的音频或字幕文件"）
+    scan_data = await manager.folder_contents(
         library_id=library_id,
-        current_path=path,
-        page=1,
-        page_size=9999,
-        sort_by="name",
-        sort_order="asc",
+        path=path,
+        recursive=True,
+        prefer_index=True,
+        include_dirs=False,
     )
 
-    items = data.get("items", [])
+    items = scan_data.get("items", []) if isinstance(scan_data, dict) else []
     audio_files = []
     subtitle_files = []
     base_name_to_items = {}
 
     for item in items:
-        if item.get("is_directory"):
+        if item.get("is_directory") or item.get("type") == "dir":
             continue
         name = item.get("name", "")
         file_path = item.get("path", "")

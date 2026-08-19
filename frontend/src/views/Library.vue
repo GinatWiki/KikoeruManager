@@ -5042,6 +5042,7 @@ const libraryRowContextMenuProps = computed(() => {
     apiRenameRunning: batchMode ? apiRenameBusy.value : Boolean(hasRow && (isSingleApiRenameRunning(row) || isBatchApiRenameRunning(row))),
     apiBatchTarget: batchMode || Boolean(hasRow && isBatchApiRenameTarget(row)),
     disableSubtitle: batchMode ? (!selectedSubtitleCandidates.value.length || subtitleSubmitting.value) : (subtitleSubmitting.value || (!canFetchRJSubtitle(row) && !hasCircleVirtualTargets)),
+    disableAiTitle: batchMode ? !selectedAiTitleRows.value.length : !canAiTitleRow(row),
     disableManage: (!actionRow?.is_directory || !circleRealRow) && !hasCircleVirtualTargets,
     disableDelete: batchMode ? batchDeleting.value : (batchDeleting.value || (!rowWritable && !hasCircleVirtualTargets) || (!circleRealRow && !hasCircleVirtualTargets)),
     showMove: Boolean(hasRow && localLibrary && circleRealRow),
@@ -22277,6 +22278,8 @@ async function handleLibraryRowContextMenuAction (action) {
 
     if (action === 'api_rename') return handleBatchApiRename()
 
+    if (action === 'ai_title') return handleBatchAiTitle()
+
     if (action === 'subtitle') return openRJSubtitleDialog(selectedSubtitleCandidates.value)
 
     if (action === 'compute_size') return handleBatchComputeSize()
@@ -23467,28 +23470,50 @@ async function renameItem (row) {
 
 
 
-async function aiTitleRenameItem (row) {
-  if (!row?.path && !row?.name) {
-    ElMessage.warning('缺少路径，无法执行 AI 标题汉化')
+// AI 标题汉化是作品级操作，只对「含 RJ 号的目录」开放；
+// 文件行（含带 RJ 号的压缩包）不开放，避免后端把文件意图归并成重命名项目文件夹
+function canAiTitleRow (row) {
+  if (!row?.is_directory) return false
+  return Boolean(row.rjcode || extractRJCode(row.name || row.path || ''))
+}
+
+const selectedAiTitleRows = computed(() => selectedRows.value.filter(row => canAiTitleRow(row)))
+
+async function submitAiTitleTask (rows, { emptyMessage } = {}) {
+  const targets = (Array.isArray(rows) ? rows : []).filter(row => canAiTitleRow(row))
+  if (!targets.length) {
+    ElMessage.warning(emptyMessage || '没有可 AI 标题汉化的作品目录')
     return
   }
-  const rjcode = row.rjcode || extractRJCode(row.path || row.name || '')
-  if (!rjcode) {
+  const rjcodes = []
+  const workNames = {}
+  for (const row of targets) {
+    const rj = String(row.rjcode || extractRJCode(row.name || row.path || '') || '').toUpperCase()
+    if (!rj || rjcodes.includes(rj)) continue
+    rjcodes.push(rj)
+    workNames[rj] = row.name || row.path || ''
+  }
+  if (!rjcodes.length) {
     ElMessage.warning('未识别到 RJ 编号')
     return
   }
+  const first = targets[0]
   try {
-    const folderName = row.name || row.path || ''
-    const rowLibraryId = row.library_id || row.libraryId || selectedLibraryId.value || ''
-    const rowPath = row.path || ''
     const resp = await fetch('/api/task-center/ai-title-translation', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rjcodes: [rjcode], work_names: { [rjcode]: folderName }, library_id: rowLibraryId, path: rowPath }),
+      body: JSON.stringify({
+        rjcodes,
+        work_names: workNames,
+        library_id: first.library_id || first.libraryId || selectedLibraryId.value || '',
+        path: first.path || '',
+      }),
     })
     const result = await resp.json()
     if (result.success) {
-      ElMessage.success('AI 标题汉化任务已提交，请到任务中心查看进度')
+      ElMessage.success(rjcodes.length > 1
+        ? `已提交 ${rjcodes.length} 个作品的 AI 标题汉化任务，请到任务中心查看进度`
+        : 'AI 标题汉化任务已提交，请到任务中心查看进度')
       refreshCurrentLibraryAndStatsInBackground('AI 标题汉化任务已提交')
     } else {
       ElMessage.info(result.detail || result.message || '提交失败')
@@ -23496,6 +23521,33 @@ async function aiTitleRenameItem (row) {
   } catch (e) {
     ElMessage.error('AI 标题汉化提交失败：' + (e.response?.data?.detail || e.message))
   }
+}
+
+// 工具栏「AI 标题汉化」：对当前目录的作品执行 AI 翻译
+async function startAITitleTranslation () {
+  if (!canProcessCurrentFolder.value) return
+  let rows = libraryViewMode.value === 'circle' ? currentPageDirectoryRows.value : currentPageRealDirectoryRows.value
+  rows = (rows || []).filter(row => canAiTitleRow(row))
+  if (!rows.length && currentPath.value && currentFolderRJCode.value) {
+    rows = [{ path: currentPath.value, name: getFileName(currentPath.value), is_directory: true, library_id: selectedLibraryId.value, rjcode: currentFolderRJCode.value }]
+  }
+  await submitAiTitleTask(rows, { emptyMessage: '当前页没有可 AI 标题汉化的作品目录' })
+}
+
+async function handleBatchAiTitle () {
+  await submitAiTitleTask(selectedAiTitleRows.value, { emptyMessage: '选中的目录里没有可 AI 标题汉化的作品' })
+}
+
+async function aiTitleRenameItem (row) {
+  if (!row?.path && !row?.name) {
+    ElMessage.warning('缺少路径，无法执行 AI 标题汉化')
+    return
+  }
+  if (!canAiTitleRow(row)) {
+    ElMessage.warning('AI 标题汉化只支持含 RJ 号的作品目录')
+    return
+  }
+  await submitAiTitleTask([row])
 }
 
 async function apiRenameItem (row) {
