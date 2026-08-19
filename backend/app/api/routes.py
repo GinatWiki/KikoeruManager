@@ -5408,6 +5408,22 @@ async def update_configuration(request: Request):
             await archive_cleanup_service.restart()
             logger.info("已处理压缩包清理服务已重启")
 
+        # 设置页「启用监视器」开关与监视器运行态保持同步：
+        # 保存配置时显式带了 watcher.enabled，就立即应用到运行中的监视器
+        watcher_payload = config_data.get('watcher')
+        if isinstance(watcher_payload, dict) and 'enabled' in watcher_payload:
+            try:
+                watcher = get_watcher()
+                watcher_enabled = bool(watcher_payload.get('enabled'))
+                if watcher_enabled and not watcher.is_running:
+                    await watcher.start()
+                    logger.info("配置保存：watcher.enabled=True，监视器已同步启动")
+                elif not watcher_enabled and watcher.is_running:
+                    watcher.stop()
+                    logger.info("配置保存：watcher.enabled=False，监视器已同步停止")
+            except Exception:
+                logger.warning("配置保存后同步监视器运行态失败", exc_info=True)
+
         return {"message": "配置已保存", "config": config_data}
     except Exception as e:
         logger.error(f"保存配置失败: {e}", exc_info=True)
@@ -5491,11 +5507,23 @@ async def get_library_backup_checkpoint():
     return checkpoint or {"has_checkpoint": False}
 
 
+def _persist_watcher_enabled(enabled: bool) -> None:
+    """把监视器运行状态写回配置文件，保持与设置页「启用监视器」开关一致。
+
+    写配置失败只记日志，不影响监视器本身的启停结果。
+    """
+    try:
+        save_config({"watcher": {"enabled": bool(enabled)}})
+    except Exception:
+        logger.warning("写回 watcher.enabled=%s 到配置文件失败", enabled, exc_info=True)
+
+
 @app.post("/api/watcher/start")
 async def start_watcher():
     """启动文件夹监视器"""
     watcher = get_watcher()
     await watcher.start()
+    _persist_watcher_enabled(True)
     return {"message": "监视器已启动"}
 
 @app.post("/api/watcher/stop")
@@ -5503,6 +5531,7 @@ async def stop_watcher():
     """停止文件夹监视器"""
     watcher = get_watcher()
     watcher.stop()
+    _persist_watcher_enabled(False)
     return {"message": "监视器已停止"}
 
 @app.get("/api/watcher/status")
