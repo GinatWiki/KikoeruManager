@@ -162,6 +162,8 @@
 - `resource_budget.database_write` 是当前数据库写入资源维度；旧 `sqlite_write` 只能作为读取旧配置的兼容 key，保存后不能再写回旧 key。
 - `resource_budget.library_index_write` 是库存索引追赶 / 重建写入资源维度，和普通 `database_write` 分开；索引后台追赶不能把业务写入全部挤死。
 - `resource_budget.bonus_probe_database_write` 是 DLsite 特典探测缓存 / 状态回写资源维度，不要并入普通 `database_write` 或删掉。
+- `rename.api_rename_follow_template` 默认 `true`，控制 ASMR 入库、元数据修复、AI 标题汉化重命名项目文件夹时是否遵循 `rename.template`；`false` 退化为「RJ号+标题」。三条链路共用 `rename_service.build_ai_title_folder_name()`，不要各自再造命名逻辑。
+- `watcher.enabled` 与监视器运行态双向同步：`/api/watcher/start|stop` 会写回配置，`POST /api/config` 带 `watcher.enabled` 时会立即启停运行中的监视器；不要改成只写一边。
 - 不要提交真实密码、Token、代理、私服地址、群晖账号、本地数据库、缓存、`.env`。
 - 默认运行态 / 敏感产物：`.env`、`data/`、`backend/data/`、本地数据库、缓存目录、`.codex-backups/`。
 - `/api/config` 返回 SMTP 密码必须脱敏为 `********`；保存时前端传回 `********` 或省略 `password`，后端必须保留真实密码。
