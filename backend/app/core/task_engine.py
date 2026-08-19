@@ -7117,7 +7117,7 @@ class TaskEngine:
         items = []
         db = next(_get_db())
         try:
-            for rjcode in rjcodes:
+            for rj_index, rjcode in enumerate(rjcodes):
                 row = db.execute(
                     _sql_text("SELECT work_name FROM work_metadata WHERE rjcode = :rjcode"),
                     {"rjcode": rjcode}
@@ -7127,49 +7127,85 @@ class TaskEngine:
                 folder_name = raw_rj_keys[0] if raw_rj_keys else ""
                 if folder_name and (not work_name or re.match(r"^RJ\d+$", work_name, re.IGNORECASE)):
                     work_name = folder_name
-                # work_name 仍只有 RJ 号时，用真实目录名（索引路径 basename）作为标题，避免 AI 拿到空标题
-                if not work_name or re.match(r"^RJ\d+$", work_name, re.IGNORECASE):
-                    dir_name = os.path.basename(str(clean_path).rstrip("/\\")) if clean_path else ""
-                    if dir_name:
-                        work_name = dir_name
 
-                rename_data = {}
-                # 项目文件夹可能已被之前重命名导致路径失效，先动态解析真实路径
-                if library_id and clean_path and not os.path.isdir(clean_path):
+                # 每个 RJ 独立解析自己的项目目录：第一个 RJ 用任务携带的路径，
+                # 其余 RJ 通过库存索引 / 同级目录按 RJ 号匹配，
+                # 避免批量任务把扫描和重命名全部打到第一个文件夹上
+                rj_path = clean_path if rj_index == 0 else ""
+                rj_library_id = library_id
+                if rj_index > 0 and rj_library_id:
                     try:
                         mgr0 = get_library_manager()
                         hits0 = mgr0.find_rj_in_ready_index(
                             rjcode,
-                            library_ids=[library_id],
+                            library_ids=[rj_library_id],
                             include_subtitle_state=False,
                             per_rj_limit=5,
                         )
                         for hit0 in list(hits0.get(rjcode) or []):
                             p0 = str(hit0.get("path") or "").strip()
                             if p0 and os.path.isdir(p0):
-                                clean_path = p0
-                                library_id = str(hit0.get("library_id") or library_id)
+                                rj_path = p0
+                                rj_library_id = str(hit0.get("library_id") or rj_library_id)
                                 break
-                        if not os.path.isdir(clean_path):
-                            parent0 = os.path.dirname(str(clean_path).rstrip("/\\")) if clean_path else ""
+                    except Exception:
+                        pass
+                    if not rj_path and clean_path:
+                        parent0 = os.path.dirname(str(clean_path).rstrip("/\\"))
+                        if parent0 and os.path.isdir(parent0):
+                            try:
+                                for n0 in os.listdir(parent0):
+                                    full0 = os.path.join(parent0, n0)
+                                    if os.path.isdir(full0) and _clean_rj(n0) == rjcode:
+                                        rj_path = full0
+                                        break
+                            except Exception:
+                                pass
+
+                # work_name 仍只有 RJ 号时，用真实目录名（索引路径 basename）作为标题，避免 AI 拿到空标题
+                if not work_name or re.match(r"^RJ\d+$", work_name, re.IGNORECASE):
+                    dir_name = os.path.basename(str(rj_path or clean_path).rstrip("/\\")) if (rj_path or clean_path) else ""
+                    if dir_name:
+                        work_name = dir_name
+
+                rename_data = {}
+                # 项目文件夹可能已被之前重命名导致路径失效，先动态解析真实路径
+                if rj_library_id and rj_path and not os.path.isdir(rj_path):
+                    try:
+                        mgr0 = get_library_manager()
+                        hits0 = mgr0.find_rj_in_ready_index(
+                            rjcode,
+                            library_ids=[rj_library_id],
+                            include_subtitle_state=False,
+                            per_rj_limit=5,
+                        )
+                        for hit0 in list(hits0.get(rjcode) or []):
+                            p0 = str(hit0.get("path") or "").strip()
+                            if p0 and os.path.isdir(p0):
+                                rj_path = p0
+                                rj_library_id = str(hit0.get("library_id") or rj_library_id)
+                                break
+                        if not os.path.isdir(rj_path):
+                            parent0 = os.path.dirname(str(rj_path).rstrip("/\\")) if rj_path else ""
                             if parent0 and os.path.isdir(parent0):
                                 for n0 in os.listdir(parent0):
                                     full0 = os.path.join(parent0, n0)
                                     if os.path.isdir(full0) and _clean_rj(n0) == rjcode:
-                                        clean_path = full0
+                                        rj_path = full0
                                         break
                     except Exception:
                         pass
-                    if os.path.isdir(clean_path):
-                        task.task_metadata["path"] = clean_path
-                        logger.info("[AI标题] 项目路径已解析: %s", clean_path)
+                    if os.path.isdir(rj_path):
+                        if rj_index == 0:
+                            task.task_metadata["path"] = rj_path
+                        logger.info("[AI标题] 项目路径已解析: %s", rj_path)
 
-                if library_id and clean_path:
+                if rj_library_id and rj_path:
                     try:
                         mgr = get_library_manager()
                         scan_data = await mgr.folder_contents(
-                            library_id=library_id,
-                            path=clean_path,
+                            library_id=rj_library_id,
+                            path=rj_path,
                             recursive=True,
                             prefer_index=True,
                             include_dirs=True,
@@ -7191,7 +7227,7 @@ class TaskEngine:
                                 base_to_entries[base].append({"name": name, "path": sitem.get("path", ""), "ext": ext})
                         if file_names:
                             work_name = work_name + "\n--- 文件树名称 ---\n" + "\n".join(sorted(file_names))
-                        rename_data = {"library_id": library_id, "path": clean_path, "base_to_entries": base_to_entries}
+                        rename_data = {"library_id": rj_library_id, "path": rj_path, "base_to_entries": base_to_entries}
                     except Exception as exc:
                         logger.warning("[AI标题] 扫描文件树失败: %s", exc)
                         append_progress_log(f"扫描文件树失败: {exc}", None, "error")
