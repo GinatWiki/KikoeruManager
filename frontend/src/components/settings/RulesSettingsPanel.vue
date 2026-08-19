@@ -41,6 +41,7 @@
             <input v-model="config.rename.date_format" class="field-input" type="text" placeholder="%y%m%d">
           </SettingsFieldCard>
           <SettingsToggleRow v-model="config.rename.use_japanese_metadata" title="使用日语元数据" subtitle="让 maker、CV、tags 等优先取日语元数据。" />
+          <SettingsToggleRow v-model="config.rename.api_rename_follow_template" title="API 重命名遵循模板" subtitle="ASMR 入库、元数据修复、AI 标题汉化重命名项目文件夹时套用上方模板；关闭则退化为 RJ号+标题。" />
           <SettingsToggleRow v-model="config.rename.exclude_square_brackets" title="移除方括号内容" subtitle="重命名前先剔除方括号片段。" />
           <SettingsToggleRow v-model="config.rename.illegal_char_to_full_width" title="非法字符转全角" subtitle="降低 Windows 文件名报错概率。" />
           <SettingsToggleRow v-model="config.rename.flatten_single_subfolder" title="自动扁平化单层文件夹" subtitle="过滤之后顺手把单层嵌套压平。" />

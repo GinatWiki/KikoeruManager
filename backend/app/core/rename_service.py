@@ -21,6 +21,39 @@ def normalize_template_maker_name(raw_value: str) -> str:
     return _TEMPLATE_FIELD_SPACE_RE.sub(" ", str(raw_value or "")).strip()
 
 
+def build_ai_title_folder_name(rjcode: str, title: str, metadata: Optional[dict] = None) -> str:
+    """生成 AI 标题汉化后的项目文件夹名。
+
+    开启 rename.api_rename_follow_template 时按用户配置的重命名模板渲染
+    （work_name 用传入的汉化标题，其余变量取 metadata，通常来自 work_metadata），
+    保证项目文件夹格式与正常重命名链路一致；
+    未开启或模板渲染结果为空时回退为「RJ号 + 标题」，保证 RJ 标识不丢失。
+    """
+    clean = re.sub(r'[<>:"/\\|?*]', '', str(title or '')).strip()
+    if not clean:
+        return ''
+    try:
+        cfg = get_config()
+        if getattr(cfg.rename, 'api_rename_follow_template', False):
+            service = RenameService()
+            meta = dict(metadata or {})
+            meta['rjcode'] = str(rjcode or '').strip()
+            meta['work_name'] = clean
+            rendered = service._sanitize_filename(service._compile_name(meta)).strip(' .')
+            # 元数据缺失时模板可能渲染出空段（如 [][RJ..][标题]），清掉空括号段保持格式整洁
+            rendered = re.sub(r'\[\s*\]|【\s*】|\(\s*\)|（\s*）', '', rendered)
+            rendered = re.sub(r'\s{2,}', ' ', rendered).strip(' .')
+            if rendered:
+                return rendered
+            logger.warning("[AI标题] 模板渲染文件夹名为空，回退 RJ号+标题: rjcode=%s", rjcode)
+    except Exception:
+        logger.warning("[AI标题] 按模板生成文件夹名失败，回退 RJ号+标题: rjcode=%s", rjcode, exc_info=True)
+    match = re.search(r"RJ(\d{4,})", str(rjcode or ''), re.IGNORECASE)
+    if match and not re.search(r"RJ\d{4,}", clean, re.IGNORECASE):
+        return f"RJ{match.group(1)} {clean}"
+    return clean
+
+
 class RenameService:
     """重命名服务"""
 

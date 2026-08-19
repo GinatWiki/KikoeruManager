@@ -3986,16 +3986,15 @@ def reveal_ai_title_translation_secret(payload: AITitleTranslationSecretRevealRe
     return {"value": _read_ai_title_translation_api_key_from_disk()}
 
 
-def _ai_title_folder_name(rjcode_value: str, folder_title: str) -> str:
-    """AI 标题汉化后的项目文件夹名：保留 RJ 号前缀，避免汉化后丢失 RJ 标识。
+def _ai_title_folder_name(rjcode_value: str, folder_title: str, metadata: Optional[dict] = None) -> str:
+    """AI 标题汉化后的项目文件夹名。
 
-    标题里已经带 RJ 号时不再重复拼接。
+    开启 rename.api_rename_follow_template 时按重命名模板渲染（格式与正常重命名链路一致）；
+    未开启或渲染失败时回退「RJ号 + 标题」，标题里已经带 RJ 号时不再重复拼接。
     """
-    title = str(folder_title or "").strip()
-    match = re.search(r"RJ(\d{4,})", str(rjcode_value or ""), re.IGNORECASE)
-    if match and title and not re.search(r"RJ\d{4,}", title, re.IGNORECASE):
-        return f"RJ{match.group(1)} {title}"
-    return title
+    from ..core.rename_service import build_ai_title_folder_name
+
+    return build_ai_title_folder_name(rjcode_value, folder_title, metadata)
 
 
 
@@ -4204,18 +4203,31 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
                                     rj = r.get("rjcode", "")
                                     fdb = next(_get_db())
                                     frow = fdb.execute(
-                                        _sql_text("SELECT ai_title, work_name FROM work_metadata WHERE rjcode = :rjcode"),
+                                        _sql_text(
+                                            "SELECT ai_title, work_name, maker_id, maker_name, original_maker_name, "
+                                            "translator_name, release_date, tags, cvs FROM work_metadata WHERE rjcode = :rjcode"
+                                        ),
                                         {"rjcode": rj}
                                     ).fetchone()
                                     fdb.close()
                                     folder_title = None
+                                    folder_meta = None
                                     if frow:
                                         folder_title = frow[0] or frow[1]
+                                        folder_meta = {
+                                            "maker_id": frow[2] or "",
+                                            "maker_name": frow[3] or "",
+                                            "original_maker_name": frow[4] or "",
+                                            "translator_name": frow[5] or "",
+                                            "release_date": frow[6] or "",
+                                            "tags": frow[7] if isinstance(frow[7], list) else [],
+                                            "cvs": frow[8] if isinstance(frow[8], list) else [],
+                                        }
                                     logger.info("[AI标题] 文件夹标题查询 rj=%s folder_title=%s", rj, folder_title)
                                     if folder_title:
-                                        folder_title_clean = re.sub(r'[<>:"/\|?*]', '', folder_title).strip()
+                                        folder_title_clean = re.sub(r'[<>:"/\\|?*]', '', folder_title).strip()
                                         if folder_title_clean:
-                                            folder_title_clean = _ai_title_folder_name(rj, folder_title_clean)
+                                            folder_title_clean = _ai_title_folder_name(rj, folder_title_clean, folder_meta)
                                             folder_src = str(folder_path_val).rstrip("/\\")
                                             if folder_src:
                                                 from ..core.library_manager import get_library_manager as _get_rn_mgr
@@ -4601,17 +4613,30 @@ async def ai_title_translation_file_rename(request: AITitleTranslationFileRename
         from ..models.database import get_db
         db = next(get_db())
         row = db.execute(
-            text("SELECT ai_title, work_name FROM work_metadata WHERE rjcode = :rjcode"),
+            text(
+                "SELECT ai_title, work_name, maker_id, maker_name, original_maker_name, "
+                "translator_name, release_date, tags, cvs FROM work_metadata WHERE rjcode = :rjcode"
+            ),
             {"rjcode": rjcode}
         ).fetchone()
         db.close()
         folder_title = None
+        folder_meta = None
         if row:
             folder_title = row[0] or row[1]  # ai_title > work_name
+            folder_meta = {
+                "maker_id": row[2] or "",
+                "maker_name": row[3] or "",
+                "original_maker_name": row[4] or "",
+                "translator_name": row[5] or "",
+                "release_date": row[6] or "",
+                "tags": row[7] if isinstance(row[7], list) else [],
+                "cvs": row[8] if isinstance(row[8], list) else [],
+            }
         if folder_title:
             folder_title_clean = re.sub(r'[<>:"/\\|?*]', '', folder_title).strip()
             if folder_title_clean:
-                folder_title_clean = _ai_title_folder_name(rjcode, folder_title_clean)
+                folder_title_clean = _ai_title_folder_name(rjcode, folder_title_clean, folder_meta)
                 try:
                     folder_path = os.path.dirname(path.rstrip("/\\"))
                     folder_name = os.path.basename(path.rstrip("/\\"))

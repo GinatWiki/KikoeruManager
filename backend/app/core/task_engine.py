@@ -7350,13 +7350,26 @@ class TaskEngine:
                         try:
                             fdb = next(_get_db())
                             frow = fdb.execute(
-                                _sql_text("SELECT ai_title, work_name FROM work_metadata WHERE rjcode = :rjcode"),
+                                _sql_text(
+                                    "SELECT ai_title, work_name, maker_id, maker_name, original_maker_name, "
+                                    "translator_name, release_date, tags, cvs FROM work_metadata WHERE rjcode = :rjcode"
+                                ),
                                 {"rjcode": rj}
                             ).fetchone()
                             fdb.close()
                             folder_title = None
+                            folder_meta = None
                             if frow:
                                 folder_title = frow[0] or frow[1]
+                                folder_meta = {
+                                    "maker_id": frow[2] or "",
+                                    "maker_name": frow[3] or "",
+                                    "original_maker_name": frow[4] or "",
+                                    "translator_name": frow[5] or "",
+                                    "release_date": frow[6] or "",
+                                    "tags": frow[7] if isinstance(frow[7], list) else [],
+                                    "cvs": frow[8] if isinstance(frow[8], list) else [],
+                                }
                             # work_metadata 可能没有该 RJ 记录或 ai_title 为空，回退到本次 AI 翻译结果
                             if not folder_title:
                                 folder_title = translated
@@ -7371,10 +7384,10 @@ class TaskEngine:
                                     logger.warning("[AI标题] 文件夹重命名跳过，标题疑似 JSON 残骸: %s", folder_title_clean[:80])
                                     folder_title_clean = ""
                                 if folder_title_clean:
-                                    # 保留 RJ 号前缀，避免汉化后项目文件夹丢失 RJ 标识
-                                    rj_match = re.search(r"RJ(\d{4,})", str(rj or ""), re.IGNORECASE)
-                                    if rj_match and not re.search(r"RJ\d{4,}", folder_title_clean, re.IGNORECASE):
-                                        folder_title_clean = f"RJ{rj_match.group(1)} {folder_title_clean}"
+                                    # 遵循重命名模板生成文件夹名，未开启时回退 RJ号+标题
+                                    from .rename_service import build_ai_title_folder_name
+                                    folder_title_clean = build_ai_title_folder_name(rj, folder_title_clean, folder_meta)
+                                if folder_title_clean:
                                     folder_src = str(folder_path_val).rstrip("/\\")
                                     if folder_src:
                                         rn_mgr2 = get_library_manager()
