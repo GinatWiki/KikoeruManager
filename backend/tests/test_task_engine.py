@@ -10,9 +10,36 @@ from unittest.mock import AsyncMock, Mock, patch
 from datetime import datetime, timedelta
 
 from app.config import settings as settings_module
+from app.core import task_engine as task_engine_module
 from app.core.task_engine import TaskEngine, Task, TaskType, TaskStatus
 from app.models import database as database_module
-from app.models.database import ConflictWork, DeferredArchiveJob, ProcessedArchive, Task as TaskRecord, TaskCenterItem
+from app.models.database import (
+    ConflictWork,
+    DeferredArchiveJob,
+    ProcessedArchive,
+    Task as TaskRecord,
+    TaskCenterItem,
+    WaitingRetryTask,
+)
+
+
+def test_get_task_engine_configures_processing_and_download_slots_separately(monkeypatch):
+    """处理任务和下载任务使用各自的顶层并发上限。"""
+    engine = Mock()
+    monkeypatch.setattr(task_engine_module, "_task_engine", engine)
+    monkeypatch.setattr(
+        settings_module,
+        "get_config",
+        lambda: SimpleNamespace(
+            processing=SimpleNamespace(max_workers=2),
+            asmr_sync=SimpleNamespace(max_concurrent_downloads=5),
+        ),
+    )
+
+    assert task_engine_module.get_task_engine() is engine
+    engine.set_max_concurrent.assert_called_once_with(2)
+    engine.set_max_concurrent_downloads.assert_called_once_with(5)
+
 
 class TestTaskEngine:
     """测试任务引擎"""
@@ -195,6 +222,290 @@ class TestTaskEngine:
         assert due_task.status == TaskStatus.PENDING
         queued = await asyncio.wait_for(engine.queue.get(), timeout=1)
         assert queued.id == due_task.id
+
+    @pytest.mark.asyncio
+    async def test_retry_task_loaded_from_database_keeps_waiting_record_until_success(
+        self,
+        engine,
+        db_session,
+        monkeypatch,
+    ):
+        waiting_id = "waiting-retry-task-id"
+        db_session.add(
+            WaitingRetryTask(
+                id=waiting_id,
+                rjcode="RJ01455100",
+                subtitle_folder="",
+                work_title="限定特典",
+                retry_reason="源站暂时不可用",
+                retry_count=1,
+                max_retry_count=10,
+                retry_after=datetime.now() - timedelta(minutes=1),
+                task_metadata={
+                    "selected_resources": [{"relative_path": "bonus.png"}],
+                    "source_action": "auto_retry_failed_resources",
+                },
+            )
+        )
+
+        db_session.commit()
+        monkeypatch.setattr(database_module, "SessionLocal", lambda: db_session)
+
+        retry_result = engine.retry_task(waiting_id)
+
+        queued = await asyncio.wait_for(engine.queue.get(), timeout=1)
+        assert retry_result == {"task_id": waiting_id, "superseded_task_id": ""}
+        assert queued.id == waiting_id
+        assert queued.task_metadata["waiting_retry_record_id"] == waiting_id
+        assert db_session.query(WaitingRetryTask).filter_by(id=waiting_id).one()
+
+    @pytest.mark.asyncio
+    async def test_download_starts_when_processing_lane_is_full(self):
+        engine = TaskEngine(max_concurrent=1, max_concurrent_downloads=1)
+        active_processing_task = Task(
+            task_type=TaskType.AUTO_PROCESS,
+            source_path="/test/RJ00000001.zip",
+            status=TaskStatus.PROCESSING,
+        )
+        blocked_processing_task = Task(
+            task_type=TaskType.AUTO_PROCESS,
+            source_path="/test/RJ00000002.zip",
+        )
+        download_task = Task(
+            task_type=TaskType.BAIDU_NETDISK_DOWNLOAD,
+            source_path="pan.baidu.com",
+        )
+        engine.tasks[active_processing_task.id] = active_processing_task
+        engine.processing.add(active_processing_task.id)
+        started = asyncio.Event()
+
+        async def process_task(task):
+            started.set()
+            with task._set_state_silent():
+                task.status = TaskStatus.COMPLETED
+            engine.processing.discard(task.id)
+
+        engine._process_task = process_task
+        engine.tasks[blocked_processing_task.id] = blocked_processing_task
+        engine.tasks[download_task.id] = download_task
+        await engine.queue.put(blocked_processing_task)
+        await engine.queue.put(download_task)
+        worker = asyncio.create_task(engine._worker())
+        try:
+            await asyncio.wait_for(started.wait(), timeout=1)
+        finally:
+            engine._shutdown = True
+            worker.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await worker
+
+        assert download_task.status == TaskStatus.COMPLETED
+        assert blocked_processing_task.status == TaskStatus.PENDING
+
+    @pytest.mark.asyncio
+    async def test_processing_starts_when_download_lane_is_full(self):
+        engine = TaskEngine(max_concurrent=1, max_concurrent_downloads=1)
+        active_download = Task(
+            task_type=TaskType.HTTP_DOWNLOAD,
+            source_path="https://example.com/file.zip",
+            status=TaskStatus.PROCESSING,
+        )
+        blocked_download = Task(
+            task_type=TaskType.BAIDU_NETDISK_DOWNLOAD,
+            source_path="pan.baidu.com",
+        )
+        processing_task = Task(
+            task_type=TaskType.AUTO_PROCESS,
+            source_path="/test/RJ00000003.zip",
+        )
+        engine.tasks[active_download.id] = active_download
+        engine.processing.add(active_download.id)
+        started = asyncio.Event()
+
+        async def process_task(task):
+            started.set()
+            with task._set_state_silent():
+                task.status = TaskStatus.COMPLETED
+            engine.processing.discard(task.id)
+
+        engine._process_task = process_task
+        engine.tasks[blocked_download.id] = blocked_download
+        engine.tasks[processing_task.id] = processing_task
+        await engine.queue.put(blocked_download)
+        await engine.queue.put(processing_task)
+        worker = asyncio.create_task(engine._worker())
+        try:
+            await asyncio.wait_for(started.wait(), timeout=1)
+        finally:
+            engine._shutdown = True
+            worker.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await worker
+
+        assert processing_task.status == TaskStatus.COMPLETED
+        assert blocked_download.status == TaskStatus.PENDING
+
+    def test_global_event_hook_ignores_unregistered_temporary_task(self, engine, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            engine,
+            "_write_task_runtime_to_redis",
+            lambda task, reason="progress": calls.append(("redis", task.id, reason)),
+        )
+        monkeypatch.setattr(
+            engine,
+            "enqueue_task_center_item_snapshot",
+            lambda task: calls.append(("snapshot", task.id)),
+        )
+        monkeypatch.setattr(
+            "app.core.task_center_event_service.broadcast_task_center_changed",
+            lambda task, reason="progress": calls.append(("broadcast", task.id, reason)),
+        )
+        temporary_task = Task(
+            task_type=TaskType.METADATA,
+            source_path="/tmp/RJ00000001",
+        )
+
+        temporary_task.update_progress(50, "临时元数据读取")
+        assert calls == []
+
+        engine.tasks[temporary_task.id] = temporary_task
+        temporary_task.update_progress(60, "正式任务进度")
+        assert [call[0] for call in calls] == ["redis", "snapshot", "broadcast"]
+
+    @pytest.mark.asyncio
+    async def test_retry_task_recovers_database_record_after_memory_task_failed(
+        self,
+        engine,
+        db_session,
+        monkeypatch,
+    ):
+        waiting_id = "failed-memory-waiting-id"
+        failed_task = Task(
+            task_type=TaskType.ASMR_SYNC_DOWNLOAD,
+            source_path="",
+            task_id=waiting_id,
+            status=TaskStatus.FAILED,
+            rjcode="RJ01455100",
+        )
+        engine.tasks[waiting_id] = failed_task
+        db_session.add(
+            WaitingRetryTask(
+                id=waiting_id,
+                rjcode="RJ01455100",
+                subtitle_folder="",
+                work_title="限定特典",
+                retry_reason="源站暂时不可用",
+                retry_count=1,
+                max_retry_count=10,
+                retry_after=datetime.now() - timedelta(minutes=1),
+                task_metadata={"selected_resources": [{"relative_path": "bonus.png"}]},
+            )
+        )
+        db_session.commit()
+        monkeypatch.setattr(database_module, "SessionLocal", lambda: db_session)
+
+        retry_result = engine.retry_task(waiting_id)
+
+        queued = await asyncio.wait_for(engine.queue.get(), timeout=1)
+        assert retry_result == {"task_id": waiting_id, "superseded_task_id": ""}
+        assert queued.id == waiting_id
+        assert queued is not failed_task
+        assert queued.status == TaskStatus.PENDING
+        assert engine.tasks[waiting_id] is queued
+
+    def test_save_waiting_retry_task_reuses_engine_task_id(
+        self,
+        engine,
+        db_session,
+        monkeypatch,
+    ):
+        task = Task(
+            task_type=TaskType.ASMR_SYNC_DOWNLOAD,
+            source_path="",
+            task_id="asmr-retry-task-id",
+            status=TaskStatus.WAITING_RETRY,
+            rjcode="RJ01455100",
+            metadata={"selected_resources": [{"relative_path": "bonus.png"}]},
+        )
+        monkeypatch.setattr(database_module, "SessionLocal", lambda: db_session)
+        monkeypatch.setattr(
+            settings_module,
+            "get_config",
+            lambda: SimpleNamespace(asmr_sync=SimpleNamespace(max_retry_count=10)),
+        )
+
+        engine._save_waiting_retry_task(
+            task,
+            "",
+            "限定特典",
+            "源站暂时不可用",
+            datetime.now() + timedelta(minutes=5),
+        )
+
+        row = db_session.query(WaitingRetryTask).filter_by(rjcode="RJ01455100").one()
+        assert row.id == task.id
+        assert row.task_metadata["origin_task_id"] == task.id
+        assert row.task_metadata["waiting_retry_record_id"] == task.id
+
+    @pytest.mark.asyncio
+    async def test_retry_legacy_waiting_record_links_and_hides_original_task(
+        self,
+        engine,
+        db_session,
+        monkeypatch,
+    ):
+        original_id = "original-failed-task-id"
+        waiting_id = "legacy-waiting-record-id"
+        session_id = "legacy-download-session-id"
+        original_task = Task(
+            task_type=TaskType.ASMR_SYNC_DOWNLOAD,
+            source_path="",
+            task_id=original_id,
+            status=TaskStatus.FAILED,
+            rjcode="RJ01455100",
+        )
+        engine.tasks[original_id] = original_task
+        db_session.add(
+            database_module.ASMRDownloadSession(
+                id=session_id,
+                rjcode="RJ01455100",
+                task_id=original_id,
+            )
+        )
+        db_session.add(
+            WaitingRetryTask(
+                id=waiting_id,
+                rjcode="RJ01455100",
+                subtitle_folder="",
+                work_title="限定特典",
+                retry_reason="下载失败",
+                retry_count=1,
+                max_retry_count=10,
+                retry_after=datetime.now() - timedelta(minutes=1),
+                task_metadata={
+                    "session_id": session_id,
+                    "selected_resources": [{"relative_path": "_096.png"}],
+                },
+            )
+        )
+        db_session.commit()
+        monkeypatch.setattr(database_module, "SessionLocal", lambda: db_session)
+
+        retry_result = engine.retry_task(waiting_id)
+
+        queued = await asyncio.wait_for(engine.queue.get(), timeout=1)
+        assert retry_result == {
+            "task_id": waiting_id,
+            "superseded_task_id": original_id,
+        }
+        assert queued.task_metadata["retry_failed_task_id"] == original_id
+        assert queued.task_metadata["retry_from_task_id"] == original_id
+        assert original_task.task_metadata["superseded_by_task_id"] == waiting_id
+        assert original_task.task_metadata["hidden_in_task_lists"] is True
+        persisted = db_session.query(WaitingRetryTask).filter_by(id=waiting_id).one()
+        assert persisted.task_metadata["origin_task_id"] == original_id
+        assert persisted.task_metadata["retry_failed_task_id"] == original_id
     
     @pytest.mark.asyncio
     async def test_submit_task(self, engine, sample_task):

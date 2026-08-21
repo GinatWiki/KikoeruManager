@@ -2681,7 +2681,10 @@ class ExtractService:
         try:
             # 记录成功使用的密码
             self._set_extract_meta(task, extract_stage="extracted")
-            logger.info(f"外层压缩包解压成功，使用密码: {success_password or '无密码'}")
+            logger.info(
+                "外层压缩包解压成功，密码状态: %s",
+                self._password_log_state(success_password),
+            )
 
             payload_summary = await self._summarize_extracted_payload(output_path)
             if payload_summary["file_count"] <= 0 or payload_summary["total_bytes"] <= 0:
@@ -2727,11 +2730,16 @@ class ExtractService:
                 task.task_metadata.pop("nested_archive_failure_count", None)
                 self._set_extract_meta(task, extract_stage="nested_scan")
                 task.update_progress(95, "检查嵌套压缩包")
+                inherited_nested_passwords = self._build_nested_inherited_passwords(
+                    success_password,
+                    password_candidates,
+                )
                 nested_count = await self._extract_nested_archives(
                     output_path,
                     task,
                     max_depth=self.config.extract.max_nested_depth,
                     parent_password=success_password,  # 传递成功使用的密码给嵌套压缩包
+                    parent_passwords=inherited_nested_passwords,
                     parent_encoding=getattr(archive_info, 'detected_encoding', None),  # 传递外层编码供嵌套 ZIP 使用
                 )
                 if nested_count > 0:
@@ -3127,7 +3135,17 @@ class ExtractService:
             )
         return "non_subtitle"
 
-    async def _extract_nested_archives(self, directory: str, task: Task, max_depth: int = 5, current_depth: int = 0, processed_paths: Optional[set] = None, parent_password: Optional[str] = None, parent_encoding: Optional[str] = None) -> int:
+    async def _extract_nested_archives(
+        self,
+        directory: str,
+        task: Task,
+        max_depth: int = 5,
+        current_depth: int = 0,
+        processed_paths: Optional[set] = None,
+        parent_password: Optional[str] = None,
+        parent_encoding: Optional[str] = None,
+        parent_passwords: Optional[List[str]] = None,
+    ) -> int:
         """
         递归解压目录中的嵌套压缩包
 
@@ -3143,6 +3161,7 @@ class ExtractService:
             current_depth: 当前递归深度
             processed_paths: 已处理的文件路径集合（防止循环）
             parent_password: 外层压缩包使用的密码（优先尝试）
+            parent_passwords: 外层压缩包收集到的有序密码候选
 
         Returns:
             解压的嵌套压缩包数量
@@ -3250,7 +3269,8 @@ class ExtractService:
 
                     logger.info(
                         f"发现嵌套压缩包: {filename} "
-                        f"(深度: {current_depth + 1}, 父密码: {parent_password or '无'})"
+                        f"(深度: {current_depth + 1}, "
+                        f"父密码状态: {self._password_log_state(parent_password)})"
                     )
 
                     # 小型压缩包（< NESTED_SUBTITLE_SIZE_THRESHOLD）的处理：
@@ -3472,6 +3492,7 @@ class ExtractService:
                     nested_output_dir,
                     parent_password,
                     task=task,
+                    inherited_passwords=parent_passwords,
                 )
 
                 if not success:
@@ -3485,7 +3506,7 @@ class ExtractService:
 
                 logger.info(
                     f"成功解压嵌套压缩包: {filename} "
-                    f"(使用密码: {nested_success_password or '无密码'})"
+                    f"(密码状态: {self._password_log_state(nested_success_password)})"
                 )
 
                 # 删除原始的嵌套压缩包文件（含分卷）
@@ -3506,11 +3527,15 @@ class ExtractService:
                 sub_count = await self._extract_nested_archives(
                     nested_output_dir,
                     task,
-                    max_depth,
-                    current_depth + 1,
-                    processed_paths,
-                    nested_success_password,
-                    nested_encoding,
+                    max_depth=max_depth,
+                    current_depth=current_depth + 1,
+                    processed_paths=processed_paths,
+                    parent_password=nested_success_password,
+                    parent_encoding=nested_encoding,
+                    parent_passwords=self._build_nested_inherited_passwords(
+                        nested_success_password,
+                        [{"password": password} for password in (parent_passwords or [])],
+                    ),
                 )
                 # 若解压目录为纯容器（无直接文件），折叠到父目录以节省磁盘空间
                 await self._collapse_wrapper_dir(nested_output_dir, root_dir)
@@ -3631,7 +3656,11 @@ class ExtractService:
             file_list = await self._list_archive_contents(archive_path, password)
             if file_list is not None:
                 source = "父密码" if password == parent_password else ("无密码" if password == "" else "通用密码")
-                logger.info(f"成功读取嵌套压缩包内容，使用: {source} ({password or '无密码'})")
+                logger.info(
+                    "成功读取嵌套压缩包内容，来源: %s，密码状态: %s",
+                    source,
+                    self._password_log_state(password),
+                )
                 return ArchiveInfo(archive_path, file_list, password)
 
         return None
@@ -3680,16 +3709,28 @@ class ExtractService:
                 cmd.append('-p')  # 空密码
 
             try:
-                logger.info(f"尝试解压嵌套压缩包使用: {source} ({password or '无密码'})")
+                logger.info(
+                    "尝试解压嵌套压缩包，来源: %s，密码状态: %s",
+                    source,
+                    self._password_log_state(password),
+                )
                 result = await self._run_7z_command(cmd, capture_stdout=False)
 
                 if result.returncode == 0:
-                    logger.info(f"嵌套压缩包解压成功，使用: {source} ({password or '无密码'})")
+                    logger.info(
+                        "嵌套压缩包解压成功，来源: %s，密码状态: %s",
+                        source,
+                        self._password_log_state(password),
+                    )
                     # 更新archive_info中的密码，用于传递给下一层
                     archive_info.password = password
                     return True, password
                 else:
-                    logger.warning(f"密码 {source} ({password or '无密码'}) 解压失败")
+                    logger.warning(
+                        "嵌套压缩包密码尝试失败，来源: %s，密码状态: %s",
+                        source,
+                        self._password_log_state(password),
+                    )
 
             except Exception as e:
                 logger.warning(f"嵌套压缩包解压尝试失败: {e}")
@@ -3789,10 +3830,11 @@ class ExtractService:
         output_path: str,
         parent_password: Optional[str] = None,
         task: Optional[Task] = None,
+        inherited_passwords: Optional[List[str]] = None,
     ) -> tuple[bool, Optional[str]]:
         """直接尝试解压嵌套压缩包，一次性收集所有密码候选，跳过多余的 list 步骤。
 
-        密码优先级：父密码 > 无密码 > 手动指定密码 > 密码库查询结果 > 配置密码列表
+        密码优先级：父密码 > 无密码 > 外层特定候选 > 手动指定密码 > 密码库查询结果 > 配置密码列表
         返回 (是否成功, 成功使用的密码)
         """
         archive_name = os.path.basename(archive_path)
@@ -3824,6 +3866,8 @@ class ExtractService:
             if parent_password:
                 add(parent_password)
             add("")  # 无密码
+            for inherited_password in inherited_passwords or []:
+                add(inherited_password)
 
             # 问题作品手动重试时，指定密码必须继续传递到递归内层包。
             # 外层包可能未加密，或内层包使用的密码与外层不同；只依赖 parent_password
@@ -5980,6 +6024,29 @@ class ExtractService:
             logger.info("从文件名嗅探到 %s 个候选密码: %s", len(passwords), os.path.basename(archive_path))
         return passwords
 
+    @staticmethod
+    def _build_nested_inherited_passwords(
+        success_password: Optional[str],
+        password_candidates: Optional[List[Dict[str, Optional[str]]]],
+    ) -> List[str]:
+        """保留外层特定候选，供未加密外壳中的加密内包继续尝试。"""
+        passwords: List[str] = []
+        seen: set[str] = set()
+
+        def add(raw_password: Optional[str]) -> None:
+            password = normalize_password_value(raw_password)
+            if password and password not in seen:
+                seen.add(password)
+                passwords.append(password)
+
+        add(success_password)
+        for candidate in password_candidates or []:
+            if isinstance(candidate, dict):
+                if str(candidate.get("source") or "").strip() == "密码库-通用":
+                    continue
+                add(candidate.get("password"))
+        return passwords
+
     async def _get_password_candidates_for_archive(self, archive_path: str) -> List[Dict[str, Optional[str]]]:
         """从密码库查找适合该压缩包的密码候选，并保留关联的 RJ 信息"""
         from ..models.database import PasswordEntry, get_db
@@ -6521,7 +6588,7 @@ class ExtractService:
                     seen.add(pwd)
                     passwords.append(pwd)
         if passwords:
-            logger.debug(f"从路径提取RJ号生成密码: {passwords}")
+            logger.debug("从路径提取 RJ 号生成 %d 个密码候选", len(passwords))
         return passwords
 
     @classmethod
@@ -6673,7 +6740,11 @@ class ExtractService:
                 source = "默认"
             else:
                 source = "无"
-            logger.info(f"成功读取压缩包内容，使用密码来源: {source} ({password or '无密码'})")
+            logger.info(
+                "成功读取压缩包内容，密码来源: %s，密码状态: %s",
+                source,
+                self._password_log_state(password),
+            )
             # 注意：这里返回的 password 只是能读取内容的密码，不一定能解压
             # 真正能解压的密码会在 _try_extract 中更新
             archive_info = ArchiveInfo(
@@ -8492,14 +8563,18 @@ class ExtractService:
                             password_entry_id_map,
                             password_rjcode_map,
                         )
-                        logger.info(f"解压成功，使用{password_source}密码: {password or '无密码'}")
+                        logger.info(
+                            "解压成功，密码来源: %s，密码状态: %s",
+                            password_source,
+                            self._password_log_state(password),
+                        )
                         return "success"
                     if zip_reason in {"cancelled", "garbled_filename", "extract_incomplete"}:
                         return zip_reason
                     logger.info(
-                        "ZIP 中文密码兼容后端未确认密码可用，继续按密码失败处理: source=%s password=%s reason=%s",
+                        "ZIP 中文密码兼容后端未确认密码可用，继续按密码失败处理: source=%s password_state=%s reason=%s",
                         password_source,
-                        password or '无密码',
+                        self._password_log_state(password),
                         zip_reason,
                     )
                     return None
@@ -8831,7 +8906,11 @@ class ExtractService:
                         password_entry_id_map,
                         password_rjcode_map,
                     )
-                    logger.info(f"解压成功，使用{password_source}密码: {password or '无密码'}")
+                    logger.info(
+                        "解压成功，密码来源: %s，密码状态: %s",
+                        password_source,
+                        self._password_log_state(password),
+                    )
                     return True, password, ""
 
                 stderr_text = (result.stderr or b"").decode('utf-8', errors='ignore')
