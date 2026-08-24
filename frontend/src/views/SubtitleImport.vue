@@ -134,7 +134,7 @@
                   v-model="manualArchivePath"
                   type="text"
                   class="subtitle-form-input"
-                  placeholder="例如 D:\Subtitles\RJ123456_字幕包.zip"
+                  placeholder="压缩包路径，或字幕文件夹路径（自动扫描目录内压缩包）"
                   @keyup.enter="previewManualArchive"
                 />
                 <button
@@ -240,9 +240,74 @@
           </div>
         </aside>
 
+        <!-- 右侧：目录扫描结果（输入文件夹且内含多个压缩包时展示） -->
+        <section
+          v-if="manualDirectoryArchives.length"
+          class="subtitle-detail-pane"
+          :key="`manual-directory-${manualDirectorySource}`"
+        >
+          <div class="subtitle-detail-header">
+            <div class="subtitle-detail-bg-glyph" aria-hidden="true">
+              <FolderOpen :size="220" :stroke-width="1.4" />
+            </div>
+            <div class="subtitle-detail-header-inner">
+              <div class="subtitle-detail-title-block">
+                <h2 class="subtitle-detail-title">目录扫描结果</h2>
+                <p class="subtitle-detail-subtitle">
+                  <span class="subtitle-detail-dot is-warning"></span>
+                  {{ manualDirectorySource || '-' }}
+                </p>
+              </div>
+              <div class="subtitle-detail-actions">
+                <span class="lib-chip lib-chip-warning">
+                  {{ manualDirectoryArchives.length }} 个压缩包
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div class="subtitle-detail-body no-scrollbar">
+            <div class="subtitle-detail-alert is-warning">
+              <AlertTriangle class="w-5 h-5 flex-shrink-0 mt-0.5 text-amber-500" />
+              <p>目录内发现 {{ manualDirectoryArchives.length }} 个压缩包，请选择要补配的压缩包。</p>
+            </div>
+
+            <article class="subtitle-info-card">
+              <div class="subtitle-info-card-header">
+                <h3 class="subtitle-info-card-title">压缩包列表</h3>
+                <span class="lib-chip lib-chip-info ml-auto">{{ manualDirectoryArchives.length }} 项</span>
+              </div>
+              <div class="subtitle-info-card-body">
+                <div class="subtitle-candidate-list">
+                  <button
+                    v-for="archive in manualDirectoryArchives"
+                    :key="archive.path"
+                    type="button"
+                    class="subtitle-candidate-card"
+                    :disabled="manualArchiveLoading"
+                    @click="selectManualDirectoryArchive(archive)"
+                  >
+                    <span class="subtitle-candidate-radio is-checked">
+                      <span class="subtitle-candidate-radio-dot"></span>
+                    </span>
+                    <div class="subtitle-candidate-body">
+                      <h4 class="subtitle-candidate-name">{{ archive.name }}</h4>
+                      <div class="subtitle-candidate-chips">
+                        <span class="lib-chip lib-chip-info">{{ formatArchiveSize(archive.size) }}</span>
+                        <span class="lib-chip lib-chip-info">{{ archive.mtime || '-' }}</span>
+                      </div>
+                      <div class="subtitle-candidate-path mono">{{ archive.path }}</div>
+                    </div>
+                  </button>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
         <!-- 右侧：手动扫描预检结果 -->
         <section
-          v-if="manualArchivePreview"
+          v-else-if="manualArchivePreview"
           class="subtitle-detail-pane"
           :key="`${manualArchivePreview.source_path || 'manual-archive'}`"
         >
@@ -1235,8 +1300,12 @@ const {
   manualCandidateSelection,
   selectedManualCandidate,
   canExecuteManualArchiveImport,
+  manualDirectoryArchives,
+  manualDirectorySource,
 
+  formatArchiveSize,
   clearManualArchivePreview,
+  selectManualDirectoryArchive,
   previewManualArchive,
   executeManualArchiveImport
 } = useSubtitleImportArchiveManual({

@@ -90,6 +90,11 @@ class LinkedSubtitleImportService:
     ARCHIVE_PRECHECK_TIMEOUT_SECONDS = float(
         os.getenv("KIKOERUMANAGER_LINKED_SUBTITLE_PRECHECK_TIMEOUT_SECONDS", "300") or 300
     )
+    # 手动扫描目录展开：识别的压缩包扩展名（与 extract_service 常用集合保持一致）
+    MANUAL_ARCHIVE_SCAN_EXTENSIONS = frozenset(
+        {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".z01", ".z"}
+    )
+    MANUAL_ARCHIVE_SCAN_MAX_DEPTH = 2
     _FOLDER_SUMMARY_CACHE_SCHEMA_VERSION = "v1"
     _FOLDER_SUMMARY_CACHE_L1_MAX_SIZE = 512
     _FOLDER_SUMMARY_CACHE_L1_TTL_SECONDS = 30
@@ -515,21 +520,93 @@ class LinkedSubtitleImportService:
         safe_name = re.sub(r'[<>:"|?*]', "", Path(str(archive_path or "")).stem.strip()) or "linked_subtitle"
         return tempfile.mkdtemp(prefix=f"{safe_name}_stage_", dir=temp_root)
 
+    def _scan_directory_for_archives(self, folder_path: str) -> List[Dict[str, Any]]:
+        """手动扫描入口：扫描目录内的压缩包文件。
+
+        - 优先返回根目录下的压缩包；根目录没有时向下最多探
+          MANUAL_ARCHIVE_SCAN_MAX_DEPTH 层（应对 RJ 目录内再套一层的情况）。
+        - 只返回"最浅一层"的结果，避免把整个子树都列出来。
+        - 返回 [{name, path, size, mtime}]，按文件名排序。
+        """
+        root = Path(str(folder_path or "").strip())
+        try:
+            if not root.is_dir():
+                raise ValueError("指定路径不是文件夹")
+        except OSError as exc:
+            raise ValueError(f"无法访问指定目录: {exc}") from exc
+
+        extensions = self.MANUAL_ARCHIVE_SCAN_EXTENSIONS
+        results: List[Dict[str, Any]] = []
+
+        def _scan_level(directory: Path) -> List[Dict[str, Any]]:
+            found: List[Dict[str, Any]] = []
+            try:
+                entries = sorted(directory.iterdir(), key=lambda item: item.name.lower())
+            except OSError as exc:
+                raise ValueError(f"扫描目录失败: {exc}") from exc
+            for entry in entries:
+                try:
+                    if entry.is_dir():
+                        continue
+                    if entry.suffix.lower() not in extensions:
+                        continue
+                    stat = entry.stat()
+                    found.append(
+                        {
+                            "name": entry.name,
+                            "path": str(entry),
+                            "size": int(stat.st_size),
+                            "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                        }
+                    )
+                except OSError:
+                    logger.debug("[字幕补配] 手动扫描跳过不可访问的条目: %s", entry, exc_info=True)
+            return found
+
+        try:
+            results = _scan_level(root)
+            depth = 1
+            while not results and depth < self.MANUAL_ARCHIVE_SCAN_MAX_DEPTH:
+                sub_dirs: List[Path] = []
+                try:
+                    sub_dirs = [entry for entry in sorted(root.iterdir(), key=lambda item: item.name.lower()) if entry.is_dir()]
+                except OSError:
+                    break
+                if not sub_dirs:
+                    break
+                for sub_dir in sub_dirs:
+                    results = _scan_level(sub_dir)
+                    if results:
+                        break
+                depth += 1
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"扫描目录失败: {exc}") from exc
+
+        return results
+
     async def _wait_for_archive_file(
         self,
         archive_path: str,
         *,
         timeout_seconds: float = 60.0,
         poll_interval_seconds: float = 1.0,
+        allow_directory: bool = False,
     ) -> str:
         normalized_path = str(archive_path or "").strip()
         if not normalized_path:
             raise ValueError("压缩包路径不能为空")
         if os.path.isfile(normalized_path):
             return normalized_path
-        # 目录路径立即报错：等待逻辑只针对"尚未下载完成的压缩包文件"，
-        # 对目录干等 60 秒只会让用户以为功能卡死
+        # 目录路径：等待逻辑只针对"尚未下载完成的压缩包文件"，
+        # 对目录干等 60 秒只会让用户以为功能卡死。
+        # - 自动预检单流程（allow_directory=False）：立即报错，保持原有行为
+        # - 手动扫描入口（allow_directory=True）：返回目录路径，由上层
+        #   preview_archive_import 展开扫描目录内的压缩包
         if os.path.isdir(normalized_path):
+            if allow_directory:
+                return normalized_path
             raise ValueError("指定路径是文件夹，请填入字幕压缩包文件（.zip/.7z 等）的完整路径")
 
         deadline = datetime.now().timestamp() + max(1.0, timeout_seconds)
@@ -2559,8 +2636,41 @@ class LinkedSubtitleImportService:
         hint_password: Optional[str] = None,
         task: Optional[Task] = None,
         precheck_timeout: Optional[float] = None,
+        allow_directory: bool = False,
     ) -> Dict[str, Any]:
-        archive_path = await self._wait_for_archive_file(archive_path)
+        archive_path = await self._wait_for_archive_file(archive_path, allow_directory=allow_directory)
+
+        # 手动扫描入口：输入是文件夹时展开扫描目录内的压缩包。
+        # 仅 allow_directory=True（手动入口）生效，自动预检单流程仍严格要求压缩包文件。
+        directory_scan_source = ""
+        if allow_directory and os.path.isdir(archive_path):
+            directory_scan_source = str(archive_path)
+            archives = self._scan_directory_for_archives(archive_path)
+            if not archives:
+                raise ValueError("指定目录内未找到压缩包文件（.zip/.7z 等），请确认目录内容")
+            if len(archives) > 1:
+                # 多个压缩包：返回目录扫描结果，由前端列出供用户选择
+                return {
+                    "is_directory_scan": True,
+                    "source_path": directory_scan_source,
+                    "source_label": directory_scan_source,
+                    "directory_archive_count": len(archives),
+                    "directory_archives": archives,
+                    "reason": f"目录内发现 {len(archives)} 个压缩包，请选择要补配的压缩包",
+                    "subtitle_count": 0,
+                    "candidates": [],
+                    "candidate_count": 0,
+                    "ready_candidate_count": 0,
+                    "can_execute": False,
+                    "can_auto_import": False,
+                }
+            logger.info(
+                "[字幕补配] 手动扫描目录内仅 1 个压缩包，自动解析: directory=%s archive=%s",
+                directory_scan_source,
+                archives[0]["path"],
+            )
+            archive_path = archives[0]["path"]
+
         archive_path = str(archive_path or "").strip()
         if not archive_path:
             raise ValueError("压缩包路径不能为空")
@@ -2569,7 +2679,7 @@ class LinkedSubtitleImportService:
         if not os.path.isfile(archive_path):
             raise ValueError("指定路径不是压缩包文件")
 
-        return await self._run_archive_preview_inflight(
+        preview = await self._run_archive_preview_inflight(
             archive_path,
             preferred_library_id=preferred_library_id,
             source_rjcode_hint=source_rjcode_hint,
@@ -2577,6 +2687,10 @@ class LinkedSubtitleImportService:
             task=task,
             precheck_timeout=precheck_timeout,
         )
+        # 单压缩包目录被自动解析时，把解析信息带回前端（source_label 已是文件路径）
+        if directory_scan_source and isinstance(preview, dict):
+            preview.setdefault("directory_resolved_from", directory_scan_source)
+        return preview
 
     async def _run_archive_preview_inflight(
         self,
@@ -3062,10 +3176,31 @@ class LinkedSubtitleImportService:
         subtitle_filter_rules: Optional[List[Dict[str, Any]]] = None,
         import_reason: str = "手动压缩包字幕补配导入",
         source_mode: str = "linked_translation_archive_import",
+        allow_directory: bool = False,
     ) -> Dict[str, Any]:
+        # 手动入口兜底：直接对目录执行导入时，仅支持目录内恰好 1 个压缩包的场景；
+        # 多个压缩包时要求先预检并选择具体文件（正常前端流程不会走到这里）
+        if allow_directory and os.path.isdir(str(archive_path or "").strip()):
+            archives = self._scan_directory_for_archives(archive_path)
+            if len(archives) == 1:
+                logger.info(
+                    "[字幕补配] 手动导入目录内仅 1 个压缩包，自动解析: directory=%s archive=%s",
+                    archive_path,
+                    archives[0]["path"],
+                )
+                archive_path = archives[0]["path"]
+            else:
+                raise ValueError(
+                    "目录内有多个压缩包（或没有压缩包），请先预检并选择具体的压缩包文件"
+                )
+
         preview = dict(prepared_preview or {})
         if not preview:
-            preview = await self.preview_archive_import(archive_path, preferred_library_id=preferred_library_id)
+            preview = await self.preview_archive_import(
+                archive_path,
+                preferred_library_id=preferred_library_id,
+                allow_directory=allow_directory,
+            )
         if not (preview.get("source_subtitle_dir") or preview.get("staged_subtitle_dir")):
             preview = await self._stage_archive_subtitles_for_preview(archive_path, preview)
         if int(preview.get("subtitle_count") or 0) <= 0:
