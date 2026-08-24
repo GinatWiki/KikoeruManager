@@ -66,7 +66,7 @@ function asmrOnePayload() {
       variant_key: props.variant?.group_key || 'original',
       variant_label: props.variant?.group_short_label || '原作',
       title: hit ? `在 asmr.one 打开 ${targetRj}` : `查看 asmr.one 作品页 ${targetRj}`,
-      url: `https://asmr.one/works/${targetRj}`,
+      url: `https://asmr.one/work/${targetRj}`,
     }] : [],
   }
 }
@@ -91,7 +91,7 @@ function fallbackSearchResult(source) {
     })
     url = `https://bbs.south-plus.net/search.php?${params.toString()}`
   } else {
-    url = `https://asmr.one/works/${rjcode}`
+    url = `https://asmr.one/work/${rjcode}`
   }
   return {
     source,

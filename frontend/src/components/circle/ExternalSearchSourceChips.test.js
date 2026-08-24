@@ -56,7 +56,7 @@ describe('ExternalSearchSourceChips', () => {
     await asmrChip.trigger('click')
     const payload = wrapper.emitted('open')?.[0]?.[0]
     expect(payload).toMatchObject({ source: 'asmr_one', status: 'hit' })
-    expect(payload.results[0].url).toBe('https://asmr.one/works/RJ01576822')
+    expect(payload.results[0].url).toBe('https://asmr.one/work/RJ01576822')
   })
 
   it('asmr.one 未命中时仍可跳转 canonical 作品页', async () => {
@@ -77,7 +77,7 @@ describe('ExternalSearchSourceChips', () => {
     expect(asmrChip.classes()).toContain('is-miss')
     await asmrChip.trigger('click')
     const payload = wrapper.emitted('open')?.[0]?.[0]
-    expect(payload.results[0].url).toBe('https://asmr.one/works/RJ01576821')
+    expect(payload.results[0].url).toBe('https://asmr.one/work/RJ01576821')
   })
 
   it('版本行模式：每个版本按自己的 RJ 展示独立三来源检索状态', async () => {
@@ -152,7 +152,7 @@ describe('ExternalSearchSourceChips', () => {
     const asmrChip = buttons[2]
     expect(asmrChip.classes()).toContain('is-miss')
     await asmrChip.trigger('click')
-    expect(wrapper.emitted('open')?.[2]?.[0]?.results?.[0]?.url).toBe('https://asmr.one/works/RJ01596605')
+    expect(wrapper.emitted('open')?.[2]?.[0]?.results?.[0]?.url).toBe('https://asmr.one/work/RJ01596605')
   })
 
   it('版本行模式：旧合并载荷按本行 RJ 过滤结果', async () => {
