@@ -7168,6 +7168,16 @@ class TaskEngine:
                     if dir_name:
                         work_name = dir_name
 
+                # work_name 可能带「RJ号 + 标题」前缀（从文件夹名继承），发送前剥离同号
+                # RJ 前缀，避免 AI 把 RJ 号翻译带回标题、模板 {rjcode}+{work_name} 渲染出重复 RJ
+                try:
+                    from .rename_service import strip_leading_rjcode
+                    stripped_work_name = strip_leading_rjcode(work_name, rjcode)
+                    if stripped_work_name:
+                        work_name = stripped_work_name
+                except Exception:
+                    logger.debug("[AI标题] 剥离 work_name RJ 前缀失败: rj=%s", rjcode, exc_info=True)
+
                 rename_data = {}
                 # 项目文件夹可能已被之前重命名导致路径失效，先动态解析真实路径
                 if rj_library_id and rj_path and not os.path.isdir(rj_path):

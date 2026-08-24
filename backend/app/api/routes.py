@@ -4058,6 +4058,15 @@ async def ai_title_translation_batch(request: AITitleTranslationBatchRequest):
         import re as _re
         if folder_name and (not work_name or _re.match(r"^RJ\d+$", work_name, _re.IGNORECASE)):
             work_name = folder_name
+        # work_name 可能带「RJ号 + 标题」前缀（从文件夹名继承），发送前剥离同号 RJ 前缀，
+        # 避免 AI 把 RJ 号翻译带回标题、模板 {rjcode}+{work_name} 渲染出重复 RJ
+        try:
+            from ..core.rename_service import strip_leading_rjcode
+            stripped_work_name = strip_leading_rjcode(work_name, rjcode)
+            if stripped_work_name:
+                work_name = stripped_work_name
+        except Exception:
+            logger.debug("[AI标题] 剥离 work_name RJ 前缀失败: rj=%s", rjcode, exc_info=True)
         # 如果提供了 library_id 和 path，扫描文件树并将文件名合并到 work_name
         rename_data = {}
         if request.library_id and request.path:
@@ -5448,6 +5457,17 @@ async def update_configuration(request: Request):
                     logger.info("配置保存：watcher.enabled=False，监视器已同步停止")
             except Exception:
                 logger.warning("配置保存后同步监视器运行态失败", exc_info=True)
+
+        # 库存定义变更（如每库存「监视此库存」开关）后重启库存索引 watcher，
+        # 否则开关要等到下次重启进程才生效
+        if isinstance(storage_payload, dict) and isinstance(storage_payload.get("libraries"), list):
+            try:
+                from ..core.library_index import restart_library_index_watcher_driver
+
+                await asyncio.to_thread(restart_library_index_watcher_driver)
+                logger.info("配置保存：库存定义已变更，库存索引 watcher 已重启")
+            except Exception:
+                logger.warning("配置保存后重启库存索引 watcher 失败", exc_info=True)
 
         return {"message": "配置已保存", "config": config_data}
     except Exception as e:

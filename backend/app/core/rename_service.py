@@ -15,10 +15,35 @@ logger = logging.getLogger(__name__)
 
 _TEMPLATE_FIELD_SPACE_RE = re.compile(r"[\s\u00a0\u2000-\u200b\u202f\u205f\u3000\u2423]+")
 
+# 标题开头冗余 RJ 号前缀：允许前面有包裹性括号、后面跟分隔符（空格/下划线/连字符/点/中点）
+_LEADING_RJ_PREFIX_RE = re.compile(
+    r"^[\s\[\(（【]*((?i:RJ)\d{4,})[\]\)）】]*[\s_\-.·•]*"
+)
+
 
 def normalize_template_maker_name(raw_value: str) -> str:
     """只规整空白；社团名里的标点和方括号必须原样保留。"""
     return _TEMPLATE_FIELD_SPACE_RE.sub(" ", str(raw_value or "")).strip()
+
+
+def strip_leading_rjcode(title: str, rjcode: str) -> str:
+    """去掉标题开头冗余的 RJ 号前缀（与当前作品同号时才剥离）。
+
+    部分库存的 work_name / 文件夹名是「RJ号 + 标题」或「[RJ号] 标题」格式，
+    直接当 work_name 喂给 AI 翻译会把 RJ 号原样带回译名，模板里已有 {rjcode}
+    时会渲染成「[RJ..][RJ.. 标题]」。开头是其它 RJ 号（合集标题）时不动。
+    剥完只剩空串时返回空串，由调用方决定回退。
+    """
+    text = str(title or "").strip()
+    code = str(rjcode or "").strip().upper()
+    if not text or not code:
+        return text
+    m = _LEADING_RJ_PREFIX_RE.match(text)
+    if not m:
+        return text
+    if m.group(1).upper() != code:
+        return text
+    return text[m.end():].strip()
 
 
 def build_ai_title_folder_name(rjcode: str, title: str, metadata: Optional[dict] = None) -> str:
@@ -32,6 +57,8 @@ def build_ai_title_folder_name(rjcode: str, title: str, metadata: Optional[dict]
     clean = re.sub(r'[<>:"/\\|?*]', '', str(title or '')).strip()
     if not clean:
         return ''
+    # 标题开头带同号 RJ 前缀时先剥离，避免模板 {rjcode}+{work_name} 渲染出 [RJ..][RJ.. 标题]
+    clean = strip_leading_rjcode(clean, rjcode)
     try:
         cfg = get_config()
         if getattr(cfg.rename, 'api_rename_follow_template', False):
@@ -50,7 +77,7 @@ def build_ai_title_folder_name(rjcode: str, title: str, metadata: Optional[dict]
         logger.warning("[AI标题] 按模板生成文件夹名失败，回退 RJ号+标题: rjcode=%s", rjcode, exc_info=True)
     match = re.search(r"RJ(\d{4,})", str(rjcode or ''), re.IGNORECASE)
     if match and not re.search(r"RJ\d{4,}", clean, re.IGNORECASE):
-        return f"RJ{match.group(1)} {clean}"
+        return f"RJ{match.group(1)} {clean}".strip()
     return clean
 
 
