@@ -22,6 +22,13 @@ from .file_processor import get_file_processor
 
 logger = logging.getLogger(__name__)
 
+# 疑似分卷成员的文件名形态：孤儿分卷判断的前置过滤，
+# 避免对输入目录里每个普通文件都触发一次 listdir
+_ORPHAN_VOLUME_NAME_RE = re.compile(
+    r'\.(?:z\d{2}|r\d{2}|7z\.\d{3}|zip\.\d{3}|part\d+)(?:\.(?:rar|zip|7z|exe))?$',
+    re.IGNORECASE,
+)
+
 
 class ArchiveHandler(FileSystemEventHandler):
     """文件系统事件处理器
@@ -444,33 +451,59 @@ class FolderWatcher:
                 logger.error(f"定期扫描失败: {e}")
 
     async def _scan_folder(self):
-        """扫描文件夹中的现有文件"""
+        """扫描文件夹中的现有文件。
+
+        os.walk 和魔数识别全部在工作线程里跑：输入目录文件多时（含挂进库存
+        工作台后的大量下载残留），同步 walk + 逐文件读魔数 + 逐分卷候选 listdir
+        会把事件循环卡住数秒，表现为监视器启用后系统卡死。
+        """
         watch_path = self.config.storage.input_path
 
         if not self.handler:
             return
 
-        for root, dirs, files in os.walk(watch_path):
+        archive_candidates, orphan_candidates = await asyncio.to_thread(
+            self._collect_scan_candidates_sync, watch_path
+        )
+
+        engine = get_task_engine()
+        for file_path in archive_candidates:
+            if await get_deferred_archive_service().is_source_claimed(file_path):
+                continue
+            existing = any(
+                t.source_path == file_path and t.status.value in ["pending", "processing"]
+                for t in engine.get_all_tasks()
+            )
+
+            if not existing and file_path not in self.pending_files and file_path not in self._processed_files:
+                self._on_archive_detected(file_path)
+
+        for file_path in orphan_candidates:
+            # 首卷已归档的迟到尾卷：周期扫描兜底入队归档
+            await self._enqueue_orphan_volume(file_path)
+
+    def _collect_scan_candidates_sync(self, watch_path: str) -> tuple[list[str], list[str]]:
+        """在工作线程里完成目录遍历和压缩包识别，返回 (压缩包候选, 疑似孤儿分卷候选)。"""
+        archive_candidates: list[str] = []
+        orphan_candidates: list[str] = []
+        excluded = self._get_excluded_paths()
+        for root, _dirs, files in os.walk(watch_path):
             for file in files:
                 file_path = os.path.join(root, file)
 
-                if file_path in self._get_excluded_paths():
+                if file_path in excluded:
                     continue
 
                 if self.handler._is_archive(file_path):
-                    if await get_deferred_archive_service().is_source_claimed(file_path):
-                        continue
-                    engine = get_task_engine()
-                    existing = any(
-                        t.source_path == file_path and t.status.value in ["pending", "processing"]
-                        for t in engine.get_all_tasks()
-                    )
+                    archive_candidates.append(file_path)
+                    continue
 
-                    if not existing and file_path not in self.pending_files and file_path not in self._processed_files:
-                        self._on_archive_detected(file_path)
-                elif self.handler._orphan_volume_paths(file_path):
-                    # 首卷已归档的迟到尾卷：周期扫描兜底入队归档
-                    await self._enqueue_orphan_volume(file_path)
+                # 只有文件名长得像分卷成员才做孤儿分卷判断，
+                # 避免对目录里每个普通文件都触发一次 listdir；
+                # 再校验首卷确实缺失，避免把还在等主卷的分卷误归档
+                if _ORPHAN_VOLUME_NAME_RE.search(file) and self.handler._orphan_volume_paths(file_path):
+                    orphan_candidates.append(file_path)
+        return archive_candidates, orphan_candidates
 
 
 # 全局监视器实例
