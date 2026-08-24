@@ -480,6 +480,8 @@ class LibraryDefinition:
     enabled: bool = True
     writable: bool = True
     is_move_target: bool = False
+    exclude_dedup: bool = False
+    watch: bool = False
     description: str = ""
     tags: list[str] = field(default_factory=list)
     synology_profile_id: str = ""
@@ -544,6 +546,8 @@ def load_library_config() -> dict[str, Any]:
                 enabled=item.get("enabled", True),
                 writable=item.get("writable", True),
                 is_move_target=item.get("is_move_target", False),
+                exclude_dedup=item.get("exclude_dedup", False),
+                watch=item.get("watch", False),
                 description=item.get("description") or "",
                 tags=item.get("tags") or [],
                 synology_profile_id=synology_profile_id,
@@ -2085,6 +2089,8 @@ class LibraryManager:
                     "description": library.description,
                     "writable": library.writable,
                     "is_move_target": library.is_move_target,
+                    "exclude_dedup": library.exclude_dedup,
+                    "watch": library.watch,
                     "health": health,
                 }
             )
@@ -2140,6 +2146,8 @@ class LibraryManager:
             enabled=payload.get("enabled", True),
             writable=payload.get("writable", True),
             is_move_target=payload.get("is_move_target", False),
+            exclude_dedup=payload.get("exclude_dedup", False),
+            watch=payload.get("watch", False),
             description=payload.get("description") or "",
             tags=payload.get("tags") or [],
             synology_profile_id=synology_profile_id,

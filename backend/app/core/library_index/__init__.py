@@ -46,6 +46,7 @@ from .types import (
 )
 from .watcher_driver import (
     get_library_index_watcher_driver,
+    restart_library_index_watcher_driver,
     start_library_index_watcher_driver,
     stop_library_index_watcher_driver,
 )
@@ -67,6 +68,7 @@ __all__ = [
     'get_library_index_mutation_service',
     'get_library_index_watcher_driver',
     'get_snapshot_store',
+    'restart_library_index_watcher_driver',
     'start_library_index_mutation_service',
     'start_library_index_watcher_driver',
     'stop_library_index_mutation_service',

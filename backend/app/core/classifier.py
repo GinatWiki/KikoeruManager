@@ -80,8 +80,25 @@ class SmartClassifier:
 
         manager = get_library_manager()
 
+        # 库存可显式排除本地查重（如把 /input 挂进库存工作台只做网页管理），
+        # 排除后这些库存不再参与解压前查重，避免下载目录里的压缩包 /
+        # 同名 RJ 目录把新导入任务误判成重复作品卡进问题作品
+        dedup_library_ids = None
         try:
-            direct_hits = manager.find_rj_in_ready_index([normalized_rj])
+            dedup_library_ids = [
+                str(item.get("id") or "")
+                for item in manager.list_libraries()
+                if not bool(item.get("exclude_dedup", False))
+            ]
+        except Exception:
+            logger.warning("[预检] 解析查重库存范围失败，回退全库查重 rj=%s", normalized_rj, exc_info=True)
+            dedup_library_ids = None
+        if dedup_library_ids is not None and not dedup_library_ids:
+            logger.info("[预检] 所有库存均已排除本地查重，跳过查重: rj=%s", normalized_rj)
+            return False
+
+        try:
+            direct_hits = manager.find_rj_in_ready_index([normalized_rj], library_ids=dedup_library_ids)
         except Exception:
             logger.warning("[预检] ready 库存索引查重失败 rj=%s", normalized_rj, exc_info=True)
             direct_hits = {}
@@ -127,7 +144,7 @@ class SmartClassifier:
         ]
 
         try:
-            linked_hits = manager.find_rj_in_ready_index(related_rjcodes)
+            linked_hits = manager.find_rj_in_ready_index(related_rjcodes, library_ids=dedup_library_ids)
         except Exception:
             logger.warning("[预检] ready 库存索引关联查重失败 rj=%s related=%s", normalized_rj, related_rjcodes, exc_info=True)
             linked_hits = {}

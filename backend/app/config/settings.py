@@ -52,6 +52,8 @@ class LibraryConfigItem(BaseModel):
     enabled: bool = True
     writable: bool = True
     is_move_target: bool = False  # 一键移库目标库存（全库只能开启一个）
+    exclude_dedup: bool = False  # 本地查重排除：开启后解压前查重不再检查此库存
+    watch: bool = False  # 监视此库存：开启后库存索引 watcher 才实时监视该库存，默认不监视
     description: str = ""
     tags: list[str] = Field(default_factory=list)
     synology_profile_id: str = ""

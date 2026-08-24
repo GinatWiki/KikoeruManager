@@ -23,6 +23,8 @@
           <span>{{ library.enabled ? '启用中' : '已停用' }}</span>
           <span v-if="library.isRemote">{{ library.profileName || '未绑定模板' }}</span>
           <span v-if="library.is_move_target" class="library-target-pill">一键移库目标</span>
+          <span v-if="library.exclude_dedup" class="library-target-pill">查重排除</span>
+          <span v-if="library.watch" class="library-target-pill">监视中</span>
         </div>
       </button>
 
@@ -127,12 +129,24 @@
             subtitle="远程上传、落盘和分类会使用这个权限。"
             @update:model-value="emitLibraryFlag(selectedLibrary.id, 'writable', $event)"
           />
+          <SettingsToggleRow
+            :model-value="Boolean(selectedLibrary.exclude_dedup)"
+            title="本地查重排除"
+            subtitle="开启后解压前查重不再检查此库存。把 /input 等下载目录挂进库存工作台时建议开启，避免目录里的压缩包把自己误判成重复作品。"
+            @update:model-value="emitLibraryFlag(selectedLibrary.id, 'exclude_dedup', $event)"
+          />
           <template v-if="selectedLibrary.type !== 'synology_filestation'">
             <SettingsToggleRow
               :model-value="Boolean(selectedLibrary.is_move_target)"
               title="一键移库目标库存"
               subtitle="开启后，一键移库会把暂存库内容移动到该库存；全库只能开启一个。"
               @update:model-value="emitLibraryFlag(selectedLibrary.id, 'is_move_target', $event)"
+            />
+            <SettingsToggleRow
+              :model-value="Boolean(selectedLibrary.watch)"
+              title="监视此库存"
+              subtitle="开启后库存索引才实时监视该库存的文件变动；默认不监视，避免大目录事件风暴拖垮系统。未监视库存的索引变更靠手动重建或业务写入补齐。"
+              @update:model-value="emitLibraryFlag(selectedLibrary.id, 'watch', $event)"
             />
           </template>
         </div>

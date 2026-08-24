@@ -141,8 +141,15 @@ class LibraryIndexWatcherDriver:
         manager = get_library_manager()
         observers: list[Observer] = []
         try:
+            skipped_unwatched = 0
             for item in manager.list_libraries():
                 if str(item.get("type") or "") != "local":
+                    continue
+                # 只有显式开启「监视此库存」的库存才挂实时 observer；默认不监视，
+                # 避免把所有大目录（含挂进库存工作台的 /input 下载目录）全部纳入
+                # 事件监听，文件量大时事件风暴会拖垮系统
+                if not bool(item.get("watch", False)):
+                    skipped_unwatched += 1
                     continue
                 library_id = str(item.get("id") or "")
                 root_path = os.path.abspath(str(item.get("root_path") or item.get("path") or ""))
@@ -158,6 +165,11 @@ class LibraryIndexWatcherDriver:
                 )
                 observers.append(observer)
                 observer.start()
+            if skipped_unwatched:
+                logger.info(
+                    "[索引 watcher] %s 个本地库存未开启「监视此库存」，默认不挂实时 observer",
+                    skipped_unwatched,
+                )
         except Exception as exc:
             self._stop_observers(observers)
             if not _is_inotify_capacity_error(exc):
@@ -184,10 +196,11 @@ class LibraryIndexWatcherDriver:
         )
         self._thread.start()
         logger.info(
-            "[索引 watcher] 已启动 mode=%s local_libraries=%s observed_libraries=%s",
+            "[索引 watcher] 已启动 mode=%s local_libraries=%s observed_libraries=%s roots=%s",
             self._watcher_mode,
             len(self._observers),
             len(self._roots),
+            sorted(self._roots.keys()),
         )
 
     @staticmethod
@@ -640,3 +653,12 @@ def stop_library_index_watcher_driver() -> None:
     driver = _watcher_driver
     if driver is not None:
         driver.stop()
+
+
+def restart_library_index_watcher_driver() -> None:
+    """库存配置（如每库存「监视此库存」开关）变更后重启 watcher 立即生效。"""
+    with _driver_start_lock:
+        driver = _watcher_driver
+        if driver is not None:
+            driver.stop()
+    start_library_index_watcher_driver()
