@@ -1,6 +1,6 @@
 import { ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { subtitleImportApi } from '../api'
+import { subtitleImportApi, configApi } from '../api'
 
 export function useSubtitleImportFolder({
   getSubtitleWorkbenchFilterOptions,
@@ -12,6 +12,20 @@ export function useSubtitleImportFolder({
   const folderImporting = ref(false)
   const folderPreview = ref(null)
   const folderCandidateSelection = ref('')
+
+  // 默认使用设置中的 ASMR 字幕目录（storage.asmr_subtitle_path）作为初始路径，
+  // 用户仍可手动修改；加载失败时静默降级为空输入框
+  void (async () => {
+    try {
+      const config = await configApi.get()
+      const defaultPath = String(config?.storage?.asmr_subtitle_path || '').trim()
+      if (defaultPath && !folderPath.value) {
+        folderPath.value = defaultPath
+      }
+    } catch (error) {
+      console.debug('[subtitle-import] 加载默认字幕目录失败', error)
+    }
+  })()
 
   const selectedFolderCandidate = computed(() => {
     return (folderPreview.value?.candidates || []).find(candidate => candidateKey(candidate) === folderCandidateSelection.value) || null

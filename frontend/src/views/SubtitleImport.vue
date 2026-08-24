@@ -121,6 +121,44 @@
             <p class="subtitle-list-hint">
               {{ clearablePendingCount ? `可清理记录 ${clearablePendingCount} 条` : '当前列表没有可清理记录' }}
             </p>
+            <p class="subtitle-list-hint">
+              预检单由自动处理流程生成：开启「关联翻译字幕导入」后，监视目录里的字幕压缩包会在处理时自动预检；ASMR 同步发现的嵌套小包也会自动进入。手头的压缩包可在下方手动扫描。
+            </p>
+          </div>
+          <!-- 手动扫描压缩包 -->
+          <div class="subtitle-form-body subtitle-manual-scan">
+            <div class="subtitle-form-field">
+              <label class="subtitle-form-label">手动扫描压缩包</label>
+              <div class="subtitle-form-input-wrap">
+                <input
+                  v-model="manualArchivePath"
+                  type="text"
+                  class="subtitle-form-input"
+                  placeholder="例如 D:\Subtitles\RJ123456_字幕包.zip"
+                  @keyup.enter="previewManualArchive"
+                />
+                <button
+                  v-if="manualArchivePath"
+                  type="button"
+                  class="subtitle-form-clear"
+                  @click="manualArchivePath = ''"
+                  aria-label="清空输入"
+                >
+                  <X :size="13" :stroke-width="2.6" />
+                </button>
+              </div>
+            </div>
+            <div class="subtitle-form-actions">
+              <button
+                type="button"
+                class="subtitle-action-btn is-slate"
+                :disabled="manualArchiveLoading || !manualArchivePath.trim()"
+                @click="previewManualArchive"
+              >
+                <Eye class="w-3.5 h-3.5" :class="{ 'animate-pulse': manualArchiveLoading }" />
+                {{ manualArchiveLoading ? '预检中…' : '扫描并预检' }}
+              </button>
+            </div>
           </div>
           <div class="subtitle-list-scroll no-scrollbar">
             <AppLoadingAnimation
@@ -133,7 +171,7 @@
             />
             <AppEmptyState
               v-else-if="pendingLoadedOnce && !pendingItems.length"
-              description="没有待处理的预检单"
+              description="没有待处理的预检单；手头的字幕压缩包可在上方手动扫描"
               size="sm"
               class="my-auto"
             />
@@ -202,8 +240,200 @@
           </div>
         </aside>
 
+        <!-- 右侧：手动扫描预检结果 -->
+        <section
+          v-if="manualArchivePreview"
+          class="subtitle-detail-pane"
+          :key="`${manualArchivePreview.source_path || 'manual-archive'}`"
+        >
+          <div class="subtitle-detail-header">
+            <div class="subtitle-detail-bg-glyph" aria-hidden="true">
+              <Archive :size="220" :stroke-width="1.4" />
+            </div>
+            <div class="subtitle-detail-header-inner">
+              <div class="subtitle-detail-title-block">
+                <h2 class="subtitle-detail-title">
+                  {{ getDisplayRJCode(manualArchivePreview.target_rjcode) || '预检结果' }}
+                </h2>
+                <p class="subtitle-detail-subtitle">
+                  <span
+                    class="subtitle-detail-dot"
+                    :class="canExecuteManualArchiveImport ? 'is-info' : 'is-warning'"
+                  ></span>
+                  {{ manualArchivePreview.source_label || manualArchivePath || '-' }}
+                </p>
+              </div>
+              <div class="subtitle-detail-actions">
+                <button
+                  type="button"
+                  class="subtitle-action-btn is-slate"
+                  :disabled="manualArchiveLoading"
+                  @click="previewManualArchive"
+                >
+                  <RotateCw class="w-3.5 h-3.5" :class="{ 'animate-spin': manualArchiveLoading }" />
+                  重新检查
+                </button>
+                <span
+                  class="lib-chip"
+                  :class="canExecuteManualArchiveImport ? 'lib-chip-success' : 'lib-chip-warning'"
+                >
+                  {{ canExecuteManualArchiveImport ? '可以补配' : '不可执行' }}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div class="subtitle-detail-body no-scrollbar">
+            <div
+              class="subtitle-detail-alert"
+              :class="canExecuteManualArchiveImport ? 'is-info' : 'is-warning'"
+            >
+              <CheckCircle2
+                v-if="canExecuteManualArchiveImport"
+                class="w-5 h-5 flex-shrink-0 mt-0.5 text-emerald-500"
+              />
+              <AlertTriangle v-else class="w-5 h-5 flex-shrink-0 mt-0.5 text-amber-500" />
+              <p>
+                {{ manualArchivePreview.reason || (canExecuteManualArchiveImport ? '目标原作已定位，可以继续导入。' : '当前这份压缩包暂时无法执行补配。') }}
+              </p>
+            </div>
+
+            <article class="subtitle-info-card">
+              <div class="subtitle-info-card-header">
+                <Hash class="w-4 h-4 text-slate-400" />
+                <h3>预检概览</h3>
+              </div>
+              <div class="subtitle-info-card-body">
+                <div class="subtitle-meta-grid">
+                  <div class="subtitle-meta-item">
+                    <span class="subtitle-meta-label">来源 RJ</span>
+                    <p class="subtitle-meta-value mono">{{ getDisplayRJCode(manualArchivePreview.source_rjcode) || '-' }}</p>
+                  </div>
+                  <div class="subtitle-meta-item">
+                    <span class="subtitle-meta-label">目标 RJ</span>
+                    <p class="subtitle-meta-value mono is-strong">{{ getDisplayRJCode(manualArchivePreview.target_rjcode) || '-' }}</p>
+                  </div>
+                  <div class="subtitle-meta-item">
+                    <span class="subtitle-meta-label">字幕数</span>
+                    <p class="subtitle-meta-value">{{ manualArchivePreview.subtitle_count ?? 0 }}</p>
+                  </div>
+                  <div class="subtitle-meta-item is-wide">
+                    <span class="subtitle-meta-label">来源文件</span>
+                    <p class="subtitle-meta-value-muted truncate">{{ manualArchivePreview.source_label || '-' }}</p>
+                  </div>
+                </div>
+              </div>
+            </article>
+
+            <article v-if="manualArchivePreview.subtitle_entries?.length" class="subtitle-info-card">
+              <div class="subtitle-info-card-header">
+                <FileText class="w-4 h-4 text-slate-400" />
+                <h3>字幕候选文件树</h3>
+                <span class="lib-chip lib-chip-info ml-auto">
+                  {{ manualArchivePreview.subtitle_entries.length }} 项
+                </span>
+              </div>
+              <div class="subtitle-info-card-body">
+                <div class="subtitle-tree">
+                  <div
+                    v-for="node in buildSubtitleEntryTreeRows(manualArchivePreview.subtitle_entries)"
+                    :key="node.key"
+                    class="subtitle-tree-row"
+                    :style="{ paddingLeft: `${node.depth * 16 + 10}px` }"
+                  >
+                    <span class="subtitle-tree-bullet">{{ node.isDir ? '▸' : '└' }}</span>
+                    <span
+                      class="subtitle-tree-name"
+                      :class="node.isDir ? 'is-dir' : 'is-file'"
+                    >
+                      {{ node.name }}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </article>
+
+            <article class="subtitle-info-card">
+              <div class="subtitle-info-card-header">
+                <FolderTree class="w-4 h-4 text-slate-400" />
+                <h3>目标目录候选</h3>
+                <span class="lib-chip lib-chip-info ml-auto">
+                  {{ manualArchivePreview.candidate_count ?? 0 }} 个
+                </span>
+              </div>
+              <div class="subtitle-info-card-body">
+                <AppEmptyState
+                  v-if="!manualArchivePreview.candidates?.length"
+                  description="没有可用的目标目录候选"
+                  size="sm"
+                />
+                <div v-else class="subtitle-candidate-list">
+                  <button
+                    v-for="candidate in manualArchivePreview.candidates"
+                    :key="candidateKey(candidate)"
+                    type="button"
+                    class="subtitle-candidate-card"
+                    :class="{ 'is-selected': manualCandidateSelection === candidateKey(candidate) }"
+                    @click="manualCandidateSelection = candidateKey(candidate)"
+                  >
+                    <span
+                      class="subtitle-candidate-radio"
+                      :class="{ 'is-checked': manualCandidateSelection === candidateKey(candidate) }"
+                    >
+                      <span
+                        v-if="manualCandidateSelection === candidateKey(candidate)"
+                        class="subtitle-candidate-radio-dot"
+                      ></span>
+                    </span>
+                    <div class="subtitle-candidate-body">
+                      <h4 class="subtitle-candidate-name">{{ candidate.folder_name || candidate.folder_path }}</h4>
+                      <div class="subtitle-candidate-chips">
+                        <span class="lib-chip lib-chip-info">{{ candidate.library_name }}</span>
+                        <span
+                          class="lib-chip"
+                          :class="candidate.library_type === 'synology_filestation' ? 'lib-chip-warning' : 'lib-chip-success'"
+                        >
+                          {{ candidate.library_type === 'synology_filestation' ? '远程' : '本地' }}
+                        </span>
+                        <span class="lib-chip lib-chip-info">音频 {{ candidate.audio_count ?? 0 }}</span>
+                        <span class="lib-chip lib-chip-info">字幕 {{ candidate.existing_subtitle_count ?? 0 }}</span>
+                        <span class="lib-chip lib-chip-info">{{ formatSize(candidate.total_size) }}</span>
+                      </div>
+                      <div class="subtitle-candidate-path mono">{{ candidate.folder_path }}</div>
+                    </div>
+                  </button>
+                </div>
+              </div>
+            </article>
+
+            <!-- 提交栏 -->
+            <div class="subtitle-detail-footer">
+              <StatefulButton
+                type="button"
+                class="subtitle-action-btn subtitle-stateful-action is-primary lg"
+                unstyled
+                :success-hold="900"
+                :disabled="!canExecuteManualArchiveImport || manualArchiveImporting"
+                @click="executeManualArchiveImport"
+              >
+                <template #prefix="{ loading, success, error }">
+                  <Loader2
+                    v-if="loading || manualArchiveImporting"
+                    class="subtitle-stateful-spinner w-4 h-4"
+                    :stroke-width="2.3"
+                  />
+                  <CheckCircle2 v-else-if="success" class="w-4 h-4" :stroke-width="2.3" />
+                  <AlertTriangle v-else-if="error" class="w-4 h-4" :stroke-width="2.3" />
+                  <Sparkles v-else class="w-4 h-4" />
+                </template>
+                {{ manualArchiveImporting ? '导入中…' : '导入并加入工作台' }}
+              </StatefulButton>
+            </div>
+          </div>
+        </section>
+
         <!-- 右侧：详情 -->
-        <section v-if="activePendingItem" class="subtitle-detail-pane" :key="activePendingItem.id">
+        <section v-else-if="activePendingItem" class="subtitle-detail-pane" :key="activePendingItem.id">
           <div class="subtitle-detail-header">
             <div class="subtitle-detail-bg-glyph" aria-hidden="true">
               <Captions :size="220" :stroke-width="1.4" />
@@ -456,7 +686,7 @@
               <h3 class="subtitle-list-title">手动字幕来源</h3>
               <span class="lib-chip lib-chip-warning">手动</span>
             </div>
-            <p class="subtitle-list-hint">输入字幕目录后做一次预检，再补进库存</p>
+            <p class="subtitle-list-hint">已默认填入设置中的 ASMR 字幕目录，可修改后预检</p>
           </div>
           <div class="subtitle-form-body">
             <div class="subtitle-form-field">
@@ -730,6 +960,7 @@ import SubtitleImportWorkbench from '../components/subtitle-import/SubtitleImpor
 import { useBackgroundWorkbenchManager } from '../composables/useBackgroundWorkbenchManager'
 
 import { useSubtitleImportArchive } from '../composables/useSubtitleImportArchive'
+import { useSubtitleImportArchiveManual } from '../composables/useSubtitleImportArchiveManual'
 import { useSubtitleImportFolder } from '../composables/useSubtitleImportFolder'
 import { useSubtitleImportWorkbench } from '../composables/useSubtitleImportWorkbench'
 import AppEmptyState from '../components/common/AppEmptyState.vue'
@@ -991,6 +1222,24 @@ const {
   previewFolderImport,
   executeFolderImport
 } = useSubtitleImportFolder({
+  getSubtitleWorkbenchFilterOptions,
+  openImportedTask,
+  candidateKey
+})
+
+const {
+  manualArchivePath,
+  manualArchiveLoading,
+  manualArchiveImporting,
+  manualArchivePreview,
+  manualCandidateSelection,
+  selectedManualCandidate,
+  canExecuteManualArchiveImport,
+
+  clearManualArchivePreview,
+  previewManualArchive,
+  executeManualArchiveImport
+} = useSubtitleImportArchiveManual({
   getSubtitleWorkbenchFilterOptions,
   openImportedTask,
   candidateKey
@@ -1998,6 +2247,13 @@ button:disabled { cursor: not-allowed; }
   flex-direction: column;
   gap: 14px;
   padding: 14px;
+}
+/* 压缩包补配左栏内的手动扫描表单：固定高度，不挤压预检单列表滚动区 */
+.subtitle-manual-scan {
+  flex: 0 0 auto;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--subtitle-border);
 }
 .subtitle-form-field {
   display: flex;

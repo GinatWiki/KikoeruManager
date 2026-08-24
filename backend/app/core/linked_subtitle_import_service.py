@@ -479,6 +479,36 @@ class LinkedSubtitleImportService:
                 return str(subtitle_dir), str(source_path)
         return str(source_path), str(source_path)
 
+    def _extract_rjcode_from_folder_tree(self, folder_path: str, max_depth: int = 2) -> str:
+        """路径字符串本身提取不到 RJ 时，向下扫描子目录名/文件名兜底。
+
+        覆盖场景：用户填的是字幕包的父目录（或中间层目录），
+        RJ 号只出现在下层子目录名或字幕文件名上。
+        只读目录条目名，不做递归全量遍历，max_depth 层内即止。
+        """
+        try:
+            root = Path(folder_path)
+            if not root.is_dir():
+                return ""
+            current_level = [root]
+            for _depth in range(max(1, max_depth)):
+                next_level: List[Path] = []
+                for directory in current_level:
+                    try:
+                        entries = list(directory.iterdir())
+                    except OSError:
+                        continue
+                    for entry in entries:
+                        rjcode = self._extract_rjcode(entry.name)
+                        if rjcode:
+                            return rjcode
+                        if entry.is_dir():
+                            next_level.append(entry)
+                current_level = next_level
+        except Exception:
+            logger.debug("[字幕补配] 扫描子目录提取 RJ 号失败: %s", folder_path, exc_info=True)
+        return ""
+
     def _create_archive_stage_dir(self, archive_path: str) -> str:
         temp_root = os.path.join(self.extract_service.config.storage.temp_path, "linked_subtitle_import")
         os.makedirs(temp_root, exist_ok=True)
@@ -2397,7 +2427,7 @@ class LinkedSubtitleImportService:
 
         stage_reason = ""
         if not source_rjcode:
-            stage_reason = "无法识别来源作品 RJ 号"
+            stage_reason = "无法识别来源作品 RJ 号（已检查来源路径及其子目录、文件名，请确认目录名包含 RJ 号，如 RJ123456）"
         elif dlsite_linkage_uncertain:
             stage_reason = uncertain_dlsite_translation.get("reason") or self.DLSITE_LINKAGE_UNCERTAIN_REASON
         elif treat_as_new_work:
@@ -2746,6 +2776,15 @@ class LinkedSubtitleImportService:
 
         source_dir, source_root = self._resolve_subtitle_source_folder(folder_path)
         source_rjcode = self._extract_rjcode(source_rjcode_hint) or self._extract_rjcode_from_paths(folder_path, source_root, source_dir)
+        if not source_rjcode:
+            # 路径本身不含 RJ：向下扫描两层子目录名/文件名兜底（RJ 在内层文件夹上的场景）
+            source_rjcode = self._extract_rjcode_from_folder_tree(folder_path)
+            if source_rjcode:
+                logger.info(
+                    "[字幕补配] 从子目录/文件名兜底提取到来源 RJ: folder=%s rj=%s",
+                    folder_path,
+                    source_rjcode,
+                )
         subtitle_files = self._scan_source_subtitles(source_dir, source_root=source_root)
 
         preview = await self._build_common_preview(
