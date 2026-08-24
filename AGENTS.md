@@ -163,6 +163,7 @@
 - `resource_budget.library_index_write` 是库存索引追赶 / 重建写入资源维度，和普通 `database_write` 分开；索引后台追赶不能把业务写入全部挤死。
 - `resource_budget.bonus_probe_database_write` 是 DLsite 特典探测缓存 / 状态回写资源维度，不要并入普通 `database_write` 或删掉。
 - `rename.api_rename_follow_template` 默认 `true`，控制 ASMR 入库、元数据修复、AI 标题汉化重命名项目文件夹时是否遵循 `rename.template`；`false` 退化为「RJ号+标题」。三条链路共用 `rename_service.build_ai_title_folder_name()`，不要各自再造命名逻辑。
+- AI 标题汉化的 work_name / 译名若开头带同号 RJ 前缀（`RJ号 标题` / `[RJ号] 标题`），必须先经 `rename_service.strip_leading_rjcode()` 剥离：发送 prompt 前剥一次（task_engine 与 routes 批量端点），`build_ai_title_folder_name()` 内部再兜底剥一次，否则模板 `{rjcode}+{work_name}` 会渲染成 `[RJ..][RJ.. 标题]`。异号 RJ 前缀（合集标题）不要剥。
 - `watcher.enabled` 与监视器运行态双向同步：`/api/watcher/start|stop` 会写回配置，`POST /api/config` 带 `watcher.enabled` 时会立即启停运行中的监视器；不要改成只写一边。
 - 不要提交真实密码、Token、代理、私服地址、群晖账号、本地数据库、缓存、`.env`。
 - 默认运行态 / 敏感产物：`.env`、`data/`、`backend/data/`、本地数据库、缓存目录、`.codex-backups/`。
@@ -445,6 +446,9 @@
 - syncing 时 `total_entries` 是已扫描数；ready 后才是总数。
 - 远程 Synology 扫描用 `SYNO.FileStation.Search`，降级遍历必须限流，不能把 `walk()` 当主路径。
 - 前端 `LibraryIndexBadge.vue` 轮询 1.2s；后端每 0.5s 状态上报，别单边改频率。
+- `libraries[].watch` 默认 `false`：库存索引 watcher（`LibraryIndexWatcherDriver.start()`）只给显式开启「监视此库存」的本地库存挂实时 observer；配置保存带 `storage.libraries` 会重启索引 watcher 立即生效。不要恢复成“启动时给所有本地库存无条件挂 observer”，大目录事件风暴会把系统拖死。
+- `libraries[].exclude_dedup` 默认 `false`：开启后该库存不参与解压前本地查重（`classifier._check_library_index_before_extract` 按非排除库存过滤 `find_rj_in_ready_index` 范围，全部排除时跳过查重）。把 `/input` 等下载目录挂进库存工作台只做网页管理的场景必须开启，否则下载目录里的压缩包 / 同名 RJ 目录会把新导入任务误判成重复作品卡进问题作品，源压缩包也永远不会归档。
+- 输入目录的周期扫描（`watcher.py` 的 `_scan_folder`）必须把 `os.walk` + 魔数识别 + 孤儿分卷判断放在工作线程里跑，孤儿分卷候选要先按文件名形态预过滤再 `listdir`；不要退回事件循环上的同步整树遍历。
 
 ### 数据库维护 / 全文搜索
 
