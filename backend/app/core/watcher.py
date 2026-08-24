@@ -205,8 +205,16 @@ class FolderWatcher:
         self._processed_files.add(file_path)
 
     def _is_file_processed(self, file_path: str) -> bool:
-        """检查文件是否已处理"""
-        return file_path in self._processed_files or file_path in self.pending_files
+        """检查文件是否已处理。
+
+        只认已处理集合，不能把 pending_files 算进来：检测入口
+        （_on_archive_detected / _scan_folder）会先把文件放进 pending_files
+        再调 process_file，如果这里把 pending 视为"已处理"，
+        process_file 第一步就会把自己刚加入的文件跳过，任务永远创建不出来，
+        且文件永远进不了 processed 集合，周期扫描每轮都会重复检测。
+        pending 期间的防重复由入口处的 pending 查重负责。
+        """
+        return file_path in self._processed_files
 
     def pause_watching(self):
         """暂停文件监听（在重命名等操作前调用）"""
