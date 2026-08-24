@@ -1670,7 +1670,16 @@ class ConflictResolutionService:
             return
         manager = get_library_manager()
         if library_id:
-            await manager.delete(library_id, target_path, confirmed=True)
+            # 源文件可能早已被外部删除（旧记录残留、手动清理等），此时不能让
+            # FileNotFoundError 冒出去阻断 conflict 的 SKIP 状态流转（否则该条
+            # 记录既无法跳过也无法关闭）。目标不存在即视为"已删除成功"。
+            if not os.path.lexists(target_path):
+                logger.info("[ConflictSkip] 来源路径已不存在，视为删除成功: %s", target_path)
+                return
+            try:
+                await manager.delete(library_id, target_path, confirmed=True)
+            except FileNotFoundError:
+                logger.info("[ConflictSkip] 删除时来源已被移除，视为删除成功: %s", target_path)
             return
         if not os.path.exists(target_path):
             return
