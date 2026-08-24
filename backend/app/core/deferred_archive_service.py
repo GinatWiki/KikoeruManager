@@ -81,6 +81,10 @@ class DeferredArchiveService:
         self._active_abort_reason = ""
         self._active_copy_running = False
         self._active_interrupt = threading.Event()
+        # 饥饿兜底：只要内存里残留一个 pending/processing 任务，_has_foreground_work
+        # 就永远为 True，归档会被无限期搁置（用户反馈"所有下载处理完都不归档"的根因）。
+        # 作业等待超过阈值后，即使前台仍显示忙碌也允许低优先级执行。
+        self._starving = False
 
     @staticmethod
     def _processing_config() -> Any:
@@ -101,6 +105,10 @@ class DeferredArchiveService:
     def _max_retry_count(self) -> int:
         cfg = self._processing_config()
         return max(1, int(getattr(cfg, "archive_max_retry_count", 5) or 5))
+
+    def _starvation_seconds(self) -> float:
+        cfg = self._processing_config()
+        return max(60.0, float(getattr(cfg, "archive_starvation_seconds", 900) or 900))
 
     def _set_active_job(self, job_id: str) -> None:
         with self._control_lock:
@@ -507,6 +515,29 @@ class DeferredArchiveService:
             await asyncio.to_thread(self._release_owned_jobs_sync)
         self._worker_task = None
 
+    def _oldest_pending_age_seconds_sync(self) -> float:
+        """最老可执行归档作业已等待的秒数；没有待执行作业时返回 0。
+
+        时间差在数据库内计算：available_at 是带时区列，Python 侧与本地
+        naive datetime 直接相减会因 offset-aware/naive 不匹配抛错。
+        """
+        db = SessionLocal()
+        try:
+            statuses = ", ".join(f"'{s}'" for s in sorted(_READY_STATUSES))
+            age = db.execute(
+                text(
+                    f"SELECT EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - MIN(available_at))) "
+                    f"FROM {DeferredArchiveJob.__tablename__} "
+                    f"WHERE cancel_requested = false AND status IN ({statuses})"
+                )
+            ).scalar()
+            return max(0.0, float(age or 0.0))
+        except Exception:
+            logger.debug("[延后归档] 查询最老作业等待时长失败", exc_info=True)
+            return 0.0
+        finally:
+            db.close()
+
     def _has_foreground_work(self) -> bool:
         try:
             from .task_engine import TaskStatus, get_task_engine
@@ -523,22 +554,40 @@ class DeferredArchiveService:
     async def _worker(self) -> None:
         while not self._shutdown:
             try:
+                starving_bypass = False
                 if self._has_foreground_work():
-                    self._idle_since = None
-                    await asyncio.sleep(self._poll_interval_seconds())
-                    continue
+                    # 饥饿兜底：前台长期被占用（如残留 pending 任务）时，
+                    # 等待超过阈值的归档作业不再无限让路，改为低优先级继续执行。
+                    oldest_age = await asyncio.to_thread(self._oldest_pending_age_seconds_sync)
+                    threshold = self._starvation_seconds()
+                    if oldest_age < threshold:
+                        self._idle_since = None
+                        await asyncio.sleep(self._poll_interval_seconds())
+                        continue
+                    logger.warning(
+                        "[延后归档] 前台任务持续占用，最老归档作业已等待 %.0f 秒（阈值 %.0f 秒），启用饥饿兜底低优先级执行",
+                        oldest_age,
+                        threshold,
+                    )
+                    starving_bypass = True
                 now = time.monotonic()
                 if self._idle_since is None:
                     self._idle_since = now
                 remaining = self._idle_delay_seconds() - (now - self._idle_since)
-                if remaining > 0:
+                if remaining > 0 and not starving_bypass:
                     await asyncio.sleep(min(self._poll_interval_seconds(), remaining))
                     continue
+                self._starving = starving_bypass
                 claim = await asyncio.to_thread(self._claim_next_job_sync)
                 if claim is None:
+                    self._starving = False
                     await asyncio.sleep(self._poll_interval_seconds())
                     continue
-                await self._execute_claimed_job(claim)
+                try:
+                    await self._execute_claimed_job(claim)
+                finally:
+                    self._starving = False
+                    self._idle_since = None
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -732,7 +781,9 @@ class DeferredArchiveService:
         active_reason = self._active_abort_reason_for(job_id)
         if active_reason:
             return active_reason
-        if self._has_foreground_work():
+        # 饥饿兜底执行期间不因前台忙碌让路：否则刚认领就会被 _YieldToForeground
+        # 打断，作业在 pending 与 processing 之间震荡，永远无法完成。
+        if not self._starving and self._has_foreground_work():
             return "foreground"
         if check_database:
             return self._control_reason_sync(job_id, epoch)

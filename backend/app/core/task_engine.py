@@ -1323,6 +1323,12 @@ class TaskEngine:
                 task_type = self._coerce_task_type(row.type)
                 if task_type is None:
                     continue
+                restored_status = self._coerce_task_status(row.status)
+                # 恢复的任务没有活跃协程，绝不能以 PENDING/PROCESSING 进内存：
+                # 既不会被重新执行，还会让延后归档的空闲判定永远为"前台忙"，饿死归档。
+                if restored_status in {TaskStatus.PENDING, TaskStatus.PROCESSING}:
+                    restored_status = TaskStatus.WAITING_MANUAL
+                    metadata["stale_status_recovered"] = True
                 task = Task(
                     task_type=task_type,
                     source_path=row.source_path or metadata.get("folder_path") or "",
@@ -1330,7 +1336,7 @@ class TaskEngine:
                     auto_classify=bool(metadata.get("auto_classify", False)),
                     metadata=metadata,
                     task_id=row.id,
-                    status=self._coerce_task_status(row.status),
+                    status=restored_status,
                     rjcode=metadata.get("rjcode") or metadata.get("target_rjcode") or "",
                 )
                 with task._set_state_silent():
