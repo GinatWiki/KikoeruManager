@@ -527,6 +527,10 @@ class LinkedSubtitleImportService:
             raise ValueError("压缩包路径不能为空")
         if os.path.isfile(normalized_path):
             return normalized_path
+        # 目录路径立即报错：等待逻辑只针对"尚未下载完成的压缩包文件"，
+        # 对目录干等 60 秒只会让用户以为功能卡死
+        if os.path.isdir(normalized_path):
+            raise ValueError("指定路径是文件夹，请填入字幕压缩包文件（.zip/.7z 等）的完整路径")
 
         deadline = datetime.now().timestamp() + max(1.0, timeout_seconds)
         while datetime.now().timestamp() < deadline:
@@ -2059,67 +2063,96 @@ class LinkedSubtitleImportService:
         self,
         target_rjcode: str,
         preferred_library_id: Optional[str] = None,
+        fallback_rjcodes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        if not target_rjcode:
+        if not target_rjcode and not fallback_rjcodes:
             return {
                 "candidates": [],
                 "search_status": "not_found",
                 "search_reason": "",
             }
+        # 主目标（原作）优先；兜底 RJ（如翻译版本目录）在原作未命中时补充候选——
+        # 用户库存里可能只入了翻译版（简中/繁中），字幕应能并入该版本目录。
+        primary_code = str(target_rjcode or "").strip().upper()
+        search_codes: List[str] = []
+        if primary_code:
+            search_codes.append(primary_code)
+        for raw in list(fallback_rjcodes or []):
+            code = str(raw or "").strip().upper()
+            if code and code != primary_code and code not in search_codes:
+                search_codes.append(code)
         try:
-            index_hits = self.library_manager.find_rj_in_ready_index([target_rjcode])
+            index_hits = self.library_manager.find_rj_in_ready_index(search_codes)
         except Exception:
-            logger.warning("[字幕补配] ready 库存索引目标目录查询失败: rj=%s", target_rjcode, exc_info=True)
+            logger.warning("[字幕补配] ready 库存索引目标目录查询失败: rj=%s", search_codes, exc_info=True)
             index_hits = {}
 
         candidates: List[Dict[str, Any]] = []
         seen_paths: set[Tuple[str, str]] = set()
-        for hit in list(index_hits.get(str(target_rjcode or "").strip().upper()) or []):
-            library_id = str(hit.get("library_id") or "").strip()
-            folder_path = str(hit.get("path") or "").strip()
-            if preferred_library_id and library_id != str(preferred_library_id).strip():
-                # 优先库不是硬过滤，先排序即可；这里不跳过，避免用户选错库时看不到真实命中。
-                pass
-            dedupe_key = (library_id, folder_path)
-            if not library_id or not folder_path or dedupe_key in seen_paths:
-                continue
-            seen_paths.add(dedupe_key)
-            subtitle_count = int(hit.get("subtitle_file_count") or 0)
-            candidates.append({
-                "library_id": library_id,
-                "library_name": str(hit.get("library_name") or library_id),
-                "library_type": str(hit.get("library_type") or ""),
-                "folder_path": folder_path,
-                "folder_name": str(hit.get("name") or os.path.basename(folder_path.rstrip("/\\")) or target_rjcode),
-                "audio_count": 0,
-                "existing_subtitle_count": subtitle_count,
-                "has_existing_subtitles": bool(hit.get("local_subtitle_present")) or subtitle_count > 0,
-                "has_audio": True,
-                "total_files": int(hit.get("file_count") or 0),
-                "total_size": int(hit.get("size") or 0),
-                "subtitle_dir": str(hit.get("subtitle_dir") or ""),
-                "file_samples": [],
-                "ready_for_import": not (bool(hit.get("local_subtitle_present")) or subtitle_count > 0),
-            })
 
-        candidates = self._prefer_deepest_target_rj_candidates(candidates, target_rjcode)
+        def _collect(code: str, is_primary: bool) -> None:
+            for hit in list(index_hits.get(str(code or "").strip().upper()) or []):
+                library_id = str(hit.get("library_id") or "").strip()
+                folder_path = str(hit.get("path") or "").strip()
+                dedupe_key = (library_id, folder_path)
+                if not library_id or not folder_path or dedupe_key in seen_paths:
+                    continue
+                seen_paths.add(dedupe_key)
+                subtitle_count = int(hit.get("subtitle_file_count") or 0)
+                candidates.append({
+                    "library_id": library_id,
+                    "library_name": str(hit.get("library_name") or library_id),
+                    "library_type": str(hit.get("library_type") or ""),
+                    "folder_path": folder_path,
+                    "folder_name": str(hit.get("name") or os.path.basename(folder_path.rstrip("/\\")) or code),
+                    "audio_count": 0,
+                    "existing_subtitle_count": subtitle_count,
+                    "has_existing_subtitles": bool(hit.get("local_subtitle_present")) or subtitle_count > 0,
+                    "has_audio": True,
+                    "total_files": int(hit.get("file_count") or 0),
+                    "total_size": int(hit.get("size") or 0),
+                    "subtitle_dir": str(hit.get("subtitle_dir") or ""),
+                    "file_samples": [],
+                    "ready_for_import": not (bool(hit.get("local_subtitle_present")) or subtitle_count > 0),
+                    "matched_rjcode": code,
+                    "is_primary_target": is_primary,
+                })
+
+        _collect(primary_code, True)
+        for code in search_codes[1:]:
+            _collect(code, False)
+
+        candidates = self._prefer_deepest_target_rj_candidates(candidates, primary_code or (search_codes[0] if search_codes else ""))
         candidates.sort(
             key=lambda item: (
                 0 if str(item.get("library_id") or "") == str(preferred_library_id or "") else 1,
+                0 if item.get("is_primary_target") else 1,
                 1 if item.get("has_existing_subtitles") else 0,
                 item.get("library_name") or "",
                 item.get("folder_path") or "",
             )
         )
         search_status = "matched" if candidates else "not_found"
-        search_reason = "" if candidates else "ready 库存索引未命中原作目录"
-        logger.info(
-            "[字幕补配] ready 库存索引目标目录搜索摘要: rj=%s status=%s candidate_count=%s preferred_library=%s",
-            target_rjcode,
-            search_status,
-            len(candidates),
-            preferred_library_id or "",
-        )
+        if candidates:
+            matched_codes = sorted({str(item.get("matched_rjcode") or "") for item in candidates if item.get("matched_rjcode")})
+            search_reason = ""
+            logger.info(
+                "[字幕补配] ready 库存索引目标目录搜索摘要: rj=%s status=%s candidate_count=%s matched_rj=%s preferred_library=%s",
+                search_codes,
+                search_status,
+                len(candidates),
+                ",".join(matched_codes),
+                preferred_library_id or "",
+            )
+        else:
+            search_reason = "ready 库存索引未命中原作/版本目录"
+            logger.info(
+                "[字幕补配] ready 库存索引目标目录搜索摘要: rj=%s status=%s candidate_count=%s preferred_library=%s",
+                search_codes,
+                search_status,
+                len(candidates),
+                preferred_library_id or "",
+            )
         return {
             "candidates": candidates,
             "search_status": search_status,
@@ -2370,7 +2403,9 @@ class LinkedSubtitleImportService:
         candidate_bundle = await self.search_target_candidates(
             target_rjcode,
             preferred_library_id=preferred_library_id,
-        ) if target_rjcode and is_linked_subtitle_source else []
+            # 原作目录未命中时兜底搜翻译版目录：库存可能只入了简中/繁中版
+            fallback_rjcodes=[source_rjcode] if source_rjcode and source_rjcode != target_rjcode else None,
+        ) if (target_rjcode or source_rjcode) and is_linked_subtitle_source else []
         if isinstance(candidate_bundle, dict):
             candidates = list(candidate_bundle.get("candidates") or [])
             candidate_search_status = str(candidate_bundle.get("search_status") or "")
@@ -3511,6 +3546,11 @@ class LinkedSubtitleImportService:
         candidate_bundle = await self.search_target_candidates(
             target_rjcode,
             preferred_library_id=effective_preferred_library_id,
+            fallback_rjcodes=[
+                code for code in [
+                    str(next_preview.get("source_rjcode") or "").strip(),
+                ] if code and code != target_rjcode
+            ] or None,
         )
         candidates = list(candidate_bundle.get("candidates") or []) if isinstance(candidate_bundle, dict) else list(candidate_bundle or [])
         candidate_search_status = str(candidate_bundle.get("search_status") or "") if isinstance(candidate_bundle, dict) else ""

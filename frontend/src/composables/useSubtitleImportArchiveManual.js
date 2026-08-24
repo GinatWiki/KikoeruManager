@@ -1,6 +1,6 @@
 import { ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { subtitleImportApi } from '../api'
+import { subtitleImportApi, configApi } from '../api'
 
 /**
  * 压缩包补配 - 手动扫描入口。
@@ -18,6 +18,20 @@ export function useSubtitleImportArchiveManual({
   const manualArchiveImporting = ref(false)
   const manualArchivePreview = ref(null)
   const manualCandidateSelection = ref('')
+
+  // 与文件夹补配一致：默认填入设置中的 ASMR 字幕目录（storage.asmr_subtitle_path），
+  // 用户仍可手动改成具体压缩包路径；加载失败时静默降级为空输入框
+  void (async () => {
+    try {
+      const config = await configApi.get()
+      const defaultPath = String(config?.storage?.asmr_subtitle_path || '').trim()
+      if (defaultPath && !manualArchivePath.value) {
+        manualArchivePath.value = defaultPath
+      }
+    } catch (error) {
+      console.debug('[subtitle-import] 加载默认字幕目录失败', error)
+    }
+  })()
 
   const selectedManualCandidate = computed(() => {
     return (manualArchivePreview.value?.candidates || []).find(
