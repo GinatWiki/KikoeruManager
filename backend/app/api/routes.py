@@ -8606,8 +8606,11 @@ async def resolve_conflict(conflict_id: str, action: dict):
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc))
     except FileNotFoundError as exc:
+        # 源文件缺失不应作为错误弹窗打断用户（service 层已做"视为删除成功"兜底，
+        # 此处仅防御其他动作路径的意外 ENOENT）。回滚后返回提示，用户重试即可。
         db.rollback()
-        raise HTTPException(status_code=404, detail=str(exc))
+        logger.warning(f"处理冲突时来源文件已不存在（防御分支）: {exc}")
+        raise HTTPException(status_code=409, detail=f"来源文件已不存在，请重试操作: {exc}")
     except Exception as e:
         db.rollback()
         logger.error(f"处理冲突失败: {e}", exc_info=True)
@@ -8887,6 +8890,108 @@ async def get_processed_archives(
         }
     finally:
         db.close()
+
+# ==================== 延后归档队列 ====================
+
+_DEFERRED_ARCHIVE_STATUSES = {"pending", "processing", "waiting_retry", "completed", "failed", "cancelled"}
+
+
+def _deferred_archive_job_view(job, service) -> dict:
+    """延后归档作业的前端视图载荷：_job_payload 基础上补充时间与取消标记。"""
+    view = dict(service._job_payload(job))
+    for field in ("available_at", "created_at", "updated_at", "completed_at"):
+        value = getattr(job, field, None)
+        view[field] = value.isoformat() if value else None
+    view["cancel_requested"] = bool(getattr(job, "cancel_requested", False))
+    return view
+
+
+@app.get("/api/deferred-archive-jobs")
+async def get_deferred_archive_jobs(
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """延后归档队列列表：各状态作业、预计可执行时间（available_at）与失败原因。
+
+    Args:
+        status: 可选，逗号分隔的状态过滤（pending/processing/waiting_retry/completed/failed/cancelled）
+    """
+    from ..core.deferred_archive_service import get_deferred_archive_service
+    from ..models.database import DeferredArchiveJob, get_db
+
+    service = get_deferred_archive_service()
+    db = next(get_db())
+    try:
+        query = db.query(DeferredArchiveJob)
+        if status:
+            requested = {s.strip() for s in str(status or "").split(",") if s.strip()}
+            requested &= _DEFERRED_ARCHIVE_STATUSES
+            if requested:
+                query = query.filter(DeferredArchiveJob.status.in_(sorted(requested)))
+        total = query.count()
+        safe_limit = max(1, min(int(limit or 50), 500))
+        safe_offset = max(0, int(offset or 0))
+        jobs = (
+            query.order_by(DeferredArchiveJob.created_at.desc())
+            .offset(safe_offset)
+            .limit(safe_limit)
+            .all()
+        )
+        pending_count = (
+            db.query(DeferredArchiveJob)
+            .filter(DeferredArchiveJob.status.in_(["pending", "waiting_retry"]))
+            .count()
+        )
+        return {
+            "jobs": [_deferred_archive_job_view(job, service) for job in jobs],
+            "total": total,
+            "pending_count": pending_count,
+            "offset": safe_offset,
+            "limit": safe_limit,
+        }
+    finally:
+        db.close()
+
+
+@app.post("/api/deferred-archive-jobs/{job_id}/cancel")
+async def cancel_deferred_archive_job(job_id: str):
+    """请求取消延后归档作业（已发布成员的作业不可取消）"""
+    from ..core.deferred_archive_service import get_deferred_archive_service
+    from ..models.database import DeferredArchiveJob, get_db
+
+    service = get_deferred_archive_service()
+    ok = await asyncio.to_thread(service.request_cancel_sync, job_id)
+    if not ok:
+        raise HTTPException(status_code=409, detail="作业不存在、已完成/已取消，或已发布成员无法取消")
+    db = next(get_db())
+    try:
+        job = db.query(DeferredArchiveJob).filter(DeferredArchiveJob.id == str(job_id)).first()
+        if job:
+            service._broadcast(dict(service._job_payload(job)), str(job.status or ""), "queue_cancelled")
+    finally:
+        db.close()
+    return {"message": "已请求取消"}
+
+
+@app.post("/api/deferred-archive-jobs/{job_id}/retry")
+async def retry_deferred_archive_job(job_id: str):
+    """人工恢复失败的延后归档作业，重新入队等待空闲执行"""
+    from ..core.deferred_archive_service import get_deferred_archive_service
+    from ..models.database import DeferredArchiveJob, get_db
+
+    service = get_deferred_archive_service()
+    ok = await asyncio.to_thread(service.retry_failed_sync, job_id)
+    if not ok:
+        raise HTTPException(status_code=409, detail="作业不存在或当前状态不是 failed")
+    db = next(get_db())
+    try:
+        job = db.query(DeferredArchiveJob).filter(DeferredArchiveJob.id == str(job_id)).first()
+        if job:
+            service._broadcast(dict(service._job_payload(job)), str(job.status or ""), "queue_retried")
+    finally:
+        db.close()
+    return {"message": "已重新入队"}
 
 @app.post("/api/processed-archives/{archive_id}/reprocess")
 async def reprocess_archive(archive_id: str):

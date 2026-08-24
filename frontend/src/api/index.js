@@ -759,6 +759,23 @@ export const processedArchiveApi = {
   }
 }
 
+export const deferredArchiveApi = {
+  list: async (params = {}) => {
+    const response = await apiClient.get('/deferred-archive-jobs', { params })
+    return response.data
+  },
+
+  cancel: async (jobId) => {
+    const response = await apiClient.post(`/deferred-archive-jobs/${jobId}/cancel`)
+    return response.data
+  },
+
+  retry: async (jobId) => {
+    const response = await apiClient.post(`/deferred-archive-jobs/${jobId}/retry`)
+    return response.data
+  }
+}
+
 function mutationRequestConfig (options = {}) {
   const idempotencyKey = String(options.idempotencyKey || '').trim() || (
     typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'

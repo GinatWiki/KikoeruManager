@@ -26,7 +26,10 @@
         @action="handleTaskCenterAction"
       />
 
-      <DashboardArchive
+      <div class="flex min-h-0 flex-col gap-3">
+        <DashboardDeferredQueue />
+
+        <DashboardArchive
         :archives="displayedArchives"
         :filtered-archives="filteredArchives"
         :tabs="archiveDomainTabs"
@@ -48,6 +51,7 @@
         @update:search-query="onArchiveSearchInput"
         @update:domain-filter="(v) => (archiveDomainFilter = v)"
       />
+      </div>
     </main>
   </div>
 </template>
@@ -76,6 +80,7 @@ import DashboardHero from '../components/dashboard/DashboardHero.vue'
 import DashboardCommandStrip from '../components/dashboard/DashboardCommandStrip.vue'
 import DashboardActiveTasks from '../components/dashboard/DashboardActiveTasks.vue'
 import DashboardArchive from '../components/dashboard/DashboardArchive.vue'
+import DashboardDeferredQueue from '../components/dashboard/DashboardDeferredQueue.vue'
 import { normalizeTaskCenterRealtimePayloads, patchTaskCenterItemListBatch } from '../composables/taskCenterEventUtils'
 import { showSystemConfirm } from '../composables/useSystemPrompt'
 import { useRealtimeEvents } from '../composables/useRealtimeEvents'
