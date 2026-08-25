@@ -65,32 +65,10 @@
           <span>补配入口</span>
           <strong>先确认来源，再把字幕送进库存原作目录</strong>
         </div>
-        <div class="subtitle-segmented" role="tablist">
-          <button
-            type="button"
-            role="tab"
-            class="subtitle-segmented-item"
-            :class="{ 'is-active': activeTab === 'archive' }"
-            @click="activeTab = 'archive'"
-          >
-            <Archive :size="13" :stroke-width="2.2" />
-            压缩包补配
-          </button>
-          <button
-            type="button"
-            role="tab"
-            class="subtitle-segmented-item"
-            :class="{ 'is-active': activeTab === 'folder' }"
-            @click="activeTab = 'folder'"
-          >
-            <FolderOpen :size="13" :stroke-width="2.2" />
-            字幕文件夹补配
-          </button>
-        </div>
       </div>
 
-      <!-- ==================== 压缩包补配 ==================== -->
-      <div v-if="activeTab === 'archive'" class="subtitle-main">
+      <!-- ==================== 字幕补配（统一入口：压缩包 / 字幕文件夹 / 散装字幕） ==================== -->
+      <div class="subtitle-main">
         <!-- 左侧：预检单列表 -->
         <aside class="subtitle-list-pane">
           <div class="subtitle-list-header">
@@ -122,19 +100,19 @@
               {{ clearablePendingCount ? `可清理记录 ${clearablePendingCount} 条` : '当前列表没有可清理记录' }}
             </p>
             <p class="subtitle-list-hint">
-              预检单由自动处理流程生成：开启「关联翻译字幕导入」后，监视目录里的字幕压缩包会在处理时自动预检；ASMR 同步发现的嵌套小包也会自动进入。手头的压缩包可在下方手动扫描。
+              预检单由自动处理流程生成：开启「关联翻译字幕导入」后，监视目录里的字幕压缩包会在处理时自动预检；ASMR 同步发现的嵌套小包也会自动进入。手头的字幕来源可在下方手动扫描。
             </p>
           </div>
-          <!-- 手动扫描压缩包 -->
+          <!-- 手动扫描（统一入口：压缩包 / 字幕文件夹 / 散装字幕目录） -->
           <div class="subtitle-form-body subtitle-manual-scan">
             <div class="subtitle-form-field">
-              <label class="subtitle-form-label">手动扫描压缩包</label>
+              <label class="subtitle-form-label">手动扫描字幕来源</label>
               <div class="subtitle-form-input-wrap">
                 <input
                   v-model="manualArchivePath"
                   type="text"
                   class="subtitle-form-input"
-                  placeholder="压缩包路径，或字幕文件夹路径（自动扫描目录内压缩包）"
+                  placeholder="压缩包或字幕文件夹路径（文件夹内散装字幕、压缩包均可识别）"
                   @keyup.enter="previewManualArchive"
                 />
                 <button
@@ -171,7 +149,7 @@
             />
             <AppEmptyState
               v-else-if="pendingLoadedOnce && !pendingItems.length"
-              description="没有待处理的预检单；手头的字幕压缩包可在上方手动扫描"
+              description="没有待处理的预检单；手头的字幕来源可在上方手动扫描"
               size="sm"
               class="my-auto"
             />
@@ -741,250 +719,6 @@
           </div>
         </section>
       </div>
-
-      <!-- ==================== 字幕文件夹补配 ==================== -->
-      <div v-if="activeTab === 'folder'" class="subtitle-main">
-        <!-- 左侧：手动表单 -->
-        <aside class="subtitle-list-pane">
-          <div class="subtitle-list-header">
-            <div class="subtitle-list-header-row">
-              <h3 class="subtitle-list-title">手动字幕来源</h3>
-              <span class="lib-chip lib-chip-warning">手动</span>
-            </div>
-            <p class="subtitle-list-hint">已默认填入设置中的 ASMR 字幕目录，可修改后预检</p>
-          </div>
-          <div class="subtitle-form-body">
-            <div class="subtitle-form-field">
-              <label class="subtitle-form-label">字幕文件夹路径</label>
-              <div class="subtitle-form-input-wrap">
-                <input
-                  v-model="folderPath"
-                  type="text"
-                  class="subtitle-form-input"
-                  placeholder="例如 D:\Temp\RJ123456"
-                  @keyup.enter="previewFolderImport"
-                />
-                <button
-                  v-if="folderPath"
-                  type="button"
-                  class="subtitle-form-clear"
-                  @click="folderPath = ''"
-                  aria-label="清空输入"
-                >
-                  <X :size="13" :stroke-width="2.6" />
-                </button>
-              </div>
-            </div>
-            <div class="subtitle-form-actions">
-              <button
-                type="button"
-                class="subtitle-action-btn is-slate"
-                :disabled="folderPreviewLoading"
-                @click="previewFolderImport"
-              >
-                <Eye class="w-3.5 h-3.5" :class="{ 'animate-pulse': folderPreviewLoading }" />
-                {{ folderPreviewLoading ? '预检中…' : '预检' }}
-              </button>
-              <StatefulButton
-                type="button"
-                class="subtitle-action-btn subtitle-stateful-action is-primary"
-                unstyled
-                :success-hold="900"
-                :disabled="!canExecuteFolderImport || folderImporting"
-                @click="executeFolderImport"
-              >
-                <template #prefix="{ loading, success, error }">
-                  <Loader2
-                    v-if="loading || folderImporting"
-                    class="subtitle-stateful-spinner w-3.5 h-3.5"
-                    :stroke-width="2.3"
-                  />
-                  <CheckCircle2 v-else-if="success" class="w-3.5 h-3.5" :stroke-width="2.3" />
-                  <AlertTriangle v-else-if="error" class="w-3.5 h-3.5" :stroke-width="2.3" />
-                  <Sparkles v-else class="w-3.5 h-3.5" />
-                </template>
-                {{ folderImporting ? '导入中…' : '导入' }}
-              </StatefulButton>
-            </div>
-            <div class="subtitle-form-hint-card">
-              <Info class="w-4 h-4 flex-shrink-0 mt-0.5 text-slate-400" />
-              <p>手头有字幕目录时，直接补进原作目录，再回库存页做筛选、配对和应用。</p>
-            </div>
-          </div>
-        </aside>
-
-        <!-- 右侧：预检结果 -->
-        <section
-          v-if="folderPreview"
-          class="subtitle-detail-pane"
-          :key="`${folderPreview.source_path || folderPreview.source_label || 'fp'}`"
-        >
-          <div class="subtitle-detail-header">
-            <div class="subtitle-detail-bg-glyph" aria-hidden="true">
-              <FolderOpen :size="220" :stroke-width="1.4" />
-            </div>
-            <div class="subtitle-detail-header-inner">
-              <div class="subtitle-detail-title-block">
-                <h2 class="subtitle-detail-title">
-                  {{ getDisplayRJCode(folderPreview.target_rjcode) || '预检结果' }}
-                </h2>
-                <p class="subtitle-detail-subtitle">
-                  <span
-                    class="subtitle-detail-dot"
-                    :class="canExecuteFolderImport ? 'is-info' : 'is-warning'"
-                  ></span>
-                  {{ folderPreview.source_label || folderPath || '-' }}
-                </p>
-              </div>
-              <div class="subtitle-detail-actions">
-                <button
-                  v-if="canRetryFolderPreview"
-                  type="button"
-                  class="subtitle-action-btn is-slate"
-                  :disabled="folderPreviewLoading"
-                  @click="previewFolderImport"
-                >
-                  <RotateCw class="w-3.5 h-3.5" :class="{ 'animate-spin': folderPreviewLoading }" />
-                  重新检查
-                </button>
-                <span
-                  class="lib-chip"
-                  :class="canExecuteFolderImport ? 'lib-chip-success' : 'lib-chip-warning'"
-                >
-                  {{ canExecuteFolderImport ? '可以补配' : '不可执行' }}
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <div class="subtitle-detail-body no-scrollbar">
-            <div
-              class="subtitle-detail-alert"
-              :class="canExecuteFolderImport ? 'is-info' : 'is-warning'"
-            >
-              <CheckCircle2
-                v-if="canExecuteFolderImport"
-                class="w-5 h-5 flex-shrink-0 mt-0.5 text-emerald-500"
-              />
-              <AlertTriangle v-else class="w-5 h-5 flex-shrink-0 mt-0.5 text-amber-500" />
-              <p>
-                {{ folderPreview.reason || (canExecuteFolderImport ? '目标原作已定位，可以继续导入。' : '当前这份字幕文件夹暂时无法执行。') }}
-              </p>
-            </div>
-
-            <article class="subtitle-info-card">
-              <div class="subtitle-info-card-header">
-                <Hash class="w-4 h-4 text-slate-400" />
-                <h3>预检概览</h3>
-              </div>
-              <div class="subtitle-info-card-body">
-                <div class="subtitle-meta-grid">
-                  <div class="subtitle-meta-item">
-                    <span class="subtitle-meta-label">来源 RJ</span>
-                    <p class="subtitle-meta-value mono">{{ getDisplayRJCode(folderPreview.source_rjcode) || '-' }}</p>
-                  </div>
-                  <div class="subtitle-meta-item">
-                    <span class="subtitle-meta-label">目标 RJ</span>
-                    <p class="subtitle-meta-value mono is-strong">{{ getDisplayRJCode(folderPreview.target_rjcode) || '-' }}</p>
-                  </div>
-                  <div class="subtitle-meta-item">
-                    <span class="subtitle-meta-label">字幕数</span>
-                    <p class="subtitle-meta-value">{{ folderPreview.subtitle_count ?? 0 }}</p>
-                  </div>
-                  <div class="subtitle-meta-item is-wide">
-                    <span class="subtitle-meta-label">来源目录</span>
-                    <p class="subtitle-meta-value-muted truncate">{{ folderPreview.source_label || '-' }}</p>
-                  </div>
-                </div>
-              </div>
-            </article>
-
-            <article v-if="folderPreview.subtitle_entries?.length" class="subtitle-info-card">
-              <div class="subtitle-info-card-header">
-                <FileText class="w-4 h-4 text-slate-400" />
-                <h3>字幕候选文件树</h3>
-                <span class="lib-chip lib-chip-info ml-auto">
-                  {{ folderPreview.subtitle_entries.length }} 项
-                </span>
-              </div>
-              <div class="subtitle-info-card-body">
-                <div class="subtitle-tree">
-                  <div
-                    v-for="node in buildSubtitleEntryTreeRows(folderPreview.subtitle_entries)"
-                    :key="node.key"
-                    class="subtitle-tree-row"
-                    :style="{ paddingLeft: `${node.depth * 16 + 10}px` }"
-                  >
-                    <span class="subtitle-tree-bullet">{{ node.isDir ? '▸' : '└' }}</span>
-                    <span class="subtitle-tree-name" :class="node.isDir ? 'is-dir' : 'is-file'">
-                      {{ node.name }}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </article>
-
-            <article class="subtitle-info-card">
-              <div class="subtitle-info-card-header">
-                <FolderTree class="w-4 h-4 text-slate-400" />
-                <h3>目标目录候选</h3>
-                <span class="lib-chip lib-chip-info ml-auto">{{ folderPreview.candidate_count ?? 0 }} 个</span>
-              </div>
-              <div class="subtitle-info-card-body">
-                <AppEmptyState
-                  v-if="!folderPreview.candidates?.length"
-                  description="没有找到目标目录候选"
-                  size="sm"
-                />
-                <div v-else class="subtitle-candidate-list">
-                  <button
-                    v-for="candidate in folderPreview.candidates"
-                    :key="candidateKey(candidate)"
-                    type="button"
-                    class="subtitle-candidate-card"
-                    :class="{ 'is-selected': folderCandidateSelection === candidateKey(candidate) }"
-                    @click="folderCandidateSelection = candidateKey(candidate)"
-                  >
-                    <span
-                      class="subtitle-candidate-radio"
-                      :class="{ 'is-checked': folderCandidateSelection === candidateKey(candidate) }"
-                    >
-                      <span
-                        v-if="folderCandidateSelection === candidateKey(candidate)"
-                        class="subtitle-candidate-radio-dot"
-                      ></span>
-                    </span>
-                    <div class="subtitle-candidate-body">
-                      <h4 class="subtitle-candidate-name">{{ candidate.folder_name || candidate.folder_path }}</h4>
-                      <div class="subtitle-candidate-chips">
-                        <span class="lib-chip lib-chip-info">{{ candidate.library_name }}</span>
-                        <span
-                          class="lib-chip"
-                          :class="candidate.library_type === 'synology_filestation' ? 'lib-chip-warning' : 'lib-chip-success'"
-                        >
-                          {{ candidate.library_type === 'synology_filestation' ? '远程' : '本地' }}
-                        </span>
-                        <span class="lib-chip lib-chip-info">音频 {{ candidate.audio_count ?? 0 }}</span>
-                        <span class="lib-chip lib-chip-info">字幕 {{ candidate.existing_subtitle_count ?? 0 }}</span>
-                        <span class="lib-chip lib-chip-info">{{ formatSize(candidate.total_size) }}</span>
-                      </div>
-                      <div class="subtitle-candidate-path mono">{{ candidate.folder_path }}</div>
-                    </div>
-                  </button>
-                </div>
-              </div>
-            </article>
-          </div>
-        </section>
-
-        <section v-else class="subtitle-detail-pane subtitle-detail-placeholder">
-          <div class="subtitle-detail-placeholder-inner">
-            <FolderOpen class="w-10 h-10 mb-3 text-slate-300" stroke-width="1.4" />
-            <p class="text-sm font-medium text-slate-500">输入字幕文件夹路径后做一次预检</p>
-            <p class="text-xs text-slate-400 mt-1">预检通过后即可补进库存原作目录</p>
-          </div>
-        </section>
-      </div>
     </div>
 
     <Teleport to="body">
@@ -1026,7 +760,6 @@ import { useBackgroundWorkbenchManager } from '../composables/useBackgroundWorkb
 
 import { useSubtitleImportArchive } from '../composables/useSubtitleImportArchive'
 import { useSubtitleImportArchiveManual } from '../composables/useSubtitleImportArchiveManual'
-import { useSubtitleImportFolder } from '../composables/useSubtitleImportFolder'
 import { useSubtitleImportWorkbench } from '../composables/useSubtitleImportWorkbench'
 import AppEmptyState from '../components/common/AppEmptyState.vue'
 import AppPageHeader from '../components/common/AppPageHeader.vue'
@@ -1221,8 +954,6 @@ function getArchiveItemReason(item) {
   return item.preview?.reason || (item.can_execute ? '目标原作已定位，可以继续导入。' : '当前这条来源暂时无法执行。')
 }
 
-const activeTab = ref('archive')
-
 const {
   workbenchDialogVisible,
   workbenchBackgroundActive,
@@ -1274,23 +1005,6 @@ const {
   route
 })
 
-const {
-  folderPath,
-  folderPreviewLoading,
-  folderImporting,
-  folderPreview,
-  folderCandidateSelection,
-  selectedFolderCandidate,
-  canExecuteFolderImport,
-  canRetryFolderPreview,
-
-  previewFolderImport,
-  executeFolderImport
-} = useSubtitleImportFolder({
-  getSubtitleWorkbenchFilterOptions,
-  openImportedTask,
-  candidateKey
-})
 
 const {
   manualArchivePath,

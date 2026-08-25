@@ -11,6 +11,8 @@ import { subtitleImportApi, configApi } from '../api'
  * 支持输入文件夹路径：后端会扫描目录内的压缩包——
  * - 目录内只有 1 个压缩包：自动解析为该文件，直接走正常预检
  * - 目录内有多个压缩包：返回目录扫描结果，列出供用户选择后再预检
+ * - 目录内没有压缩包但含散装字幕：后端自动降级为文件夹补配
+ *   （preview.mode === 'subtitle_folder'），导入时改走 folder API
  */
 export function useSubtitleImportArchiveManual({
   getSubtitleWorkbenchFilterOptions,
@@ -95,7 +97,7 @@ export function useSubtitleImportArchiveManual({
   async function previewManualArchive() {
     const path = manualArchivePath.value.trim()
     if (!path) {
-      ElMessage.warning('请先输入字幕压缩包路径（支持填字幕文件夹路径，将自动扫描目录内压缩包）')
+      ElMessage.warning('请先输入字幕压缩包或字幕文件夹路径')
       return
     }
 
@@ -120,11 +122,20 @@ export function useSubtitleImportArchiveManual({
       // 单压缩包目录被后端自动解析：把输入框路径同步为解析后的文件路径，
       // 保证后续"导入"直接走文件路径而不需要再次解析目录
       const resolvedPath = String(preview?.source_path || '').trim()
-      if (resolvedPath && preview?.directory_resolved_from && resolvedPath !== path) {
+      if (
+        preview?.mode !== 'subtitle_folder' &&
+        resolvedPath &&
+        preview?.directory_resolved_from &&
+        resolvedPath !== path
+      ) {
         manualArchivePath.value = resolvedPath
       }
 
-      ElMessage.success('字幕压缩包预检完成')
+      ElMessage.success(
+        preview?.mode === 'subtitle_folder'
+          ? '字幕文件夹预检完成（目录内无压缩包，已按散装字幕处理）'
+          : '字幕压缩包预检完成'
+      )
     } catch (error) {
       manualArchivePreview.value = null
       manualDirectoryArchives.value = []
@@ -150,13 +161,18 @@ export function useSubtitleImportArchiveManual({
     }, 15 * 60 * 1000)
     try {
       const filterOptions = getSubtitleWorkbenchFilterOptions()
-      const data = await subtitleImportApi.importArchive(path, {
+      // 散装字幕目录（preview.mode === 'subtitle_folder'）走 folder 导入 API
+      const isFolderMode = manualArchivePreview.value?.mode === 'subtitle_folder'
+      const requestOptions = {
         targetLibraryId: candidate.library_id,
         targetFolderPath: candidate.folder_path,
         useFilterRules: filterOptions.useFilterRules,
         subtitleFilterRules: filterOptions.subtitleFilterRules
-      })
-      ElMessage.success(data.import_result?.awaiting_manual_match ? '字幕压缩包补配成功，已自动加入工作台' : '字幕压缩包补配成功')
+      }
+      const data = isFolderMode
+        ? await subtitleImportApi.importFolder(path, requestOptions)
+        : await subtitleImportApi.importArchive(path, requestOptions)
+      ElMessage.success(data.import_result?.awaiting_manual_match ? '字幕补配成功，已自动加入工作台' : '字幕补配成功')
       if (data.task?.id) {
         openImportedTask(data.task.id)
       }

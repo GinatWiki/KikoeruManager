@@ -320,7 +320,14 @@ class LinkedSubtitleImportService:
                 task_type=TaskType.EXTRACT,
                 source_path=archive_path,
                 auto_classify=False,
-                metadata={} if full_extract else {"subtitle_probe_mode": True},
+                # full_extract：走 extract 主流程完整解压链路（残缺后缀修复/
+                # 分卷/密码继承/递归展开），并要求"字幕源"嵌套小包也解开
+                # （expand_subtitle_archives），解出后按文件夹统一扫描字幕
+                metadata=(
+                    {"expand_subtitle_archives": True}
+                    if full_extract
+                    else {"subtitle_probe_mode": True}
+                ),
             )
             cancel_watcher: Optional[asyncio.Task] = None
             if task is not None:
@@ -2657,6 +2664,22 @@ class LinkedSubtitleImportService:
             directory_scan_source = str(archive_path)
             archives = self._scan_directory_for_archives(archive_path)
             if not archives:
+                # 入口统一：目录内没有压缩包时，若含散装字幕文件则自动降级为
+                # 文件夹补配预检（mode=subtitle_folder），与手动文件夹入口一致；
+                # 连字幕也没有才报错
+                if manual_entry:
+                    folder_preview = await self.preview_subtitle_folder_import(
+                        archive_path,
+                        preferred_library_id=preferred_library_id,
+                        source_rjcode_hint=source_rjcode_hint,
+                    )
+                    folder_preview["directory_fallback_from_archive_entry"] = True
+                    logger.info(
+                        "[字幕补配] 手动入口目录内无压缩包但含散装字幕，自动降级为文件夹补配: directory=%s subtitle_count=%s",
+                        directory_scan_source,
+                        folder_preview.get("subtitle_count"),
+                    )
+                    return folder_preview
                 raise ValueError(
                     "指定目录内未找到压缩包文件（.zip/.7z 等），请确认目录内容；"
                     "若目录内是散装字幕文件，请改用字幕文件夹补配入口"
@@ -3204,7 +3227,8 @@ class LinkedSubtitleImportService:
         manual_entry: bool = False,
     ) -> Dict[str, Any]:
         # 手动入口兜底：直接对目录执行导入时，仅支持目录内恰好 1 个压缩包的场景；
-        # 多个压缩包时要求先预检并选择具体文件（正常前端流程不会走到这里）
+        # 多个压缩包时要求先预检并选择具体文件（正常前端流程不会走到这里）；
+        # 目录内没有压缩包但含散装字幕时，自动降级为文件夹补配导入（入口统一）
         if allow_directory and os.path.isdir(str(archive_path or "").strip()):
             archives = self._scan_directory_for_archives(archive_path)
             if len(archives) == 1:
@@ -3214,6 +3238,25 @@ class LinkedSubtitleImportService:
                     archives[0]["path"],
                 )
                 archive_path = archives[0]["path"]
+            elif not archives:
+                if not manual_entry:
+                    raise ValueError(
+                        "目录内有多个压缩包（或没有压缩包），请先预检并选择具体的压缩包文件"
+                    )
+                logger.info(
+                    "[字幕补配] 手动导入目录内无压缩包，自动降级为文件夹补配导入: directory=%s",
+                    archive_path,
+                )
+                return await self.execute_subtitle_folder_import(
+                    str(archive_path),
+                    preferred_library_id=preferred_library_id,
+                    target_library_id=target_library_id,
+                    target_folder_path=target_folder_path,
+                    use_filter_rules=use_filter_rules,
+                    subtitle_filter_rules=subtitle_filter_rules,
+                    import_reason="手动字幕补配导入（目录无压缩包降级）",
+                    source_mode="subtitle_folder_import",
+                )
             else:
                 raise ValueError(
                     "目录内有多个压缩包（或没有压缩包），请先预检并选择具体的压缩包文件"

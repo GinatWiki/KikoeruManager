@@ -3165,6 +3165,10 @@ class ExtractService:
         scanned_files = 0
         scanned_dirs = 0
         subtitle_probe_mode = bool((task.task_metadata or {}).get("subtitle_probe_mode"))
+        # 字幕补配 full_extract 模式：嵌套"字幕源"小包也要解开（解出 .lrc 等再由
+        # service 层按文件夹统一扫描），否则 .ra/.zip 字幕小包会原样留在目录里
+        # 导致手动补配误报"未发现字幕"。
+        expand_subtitle_archives = bool((task.task_metadata or {}).get("expand_subtitle_archives"))
         archive_extensions = {'.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz'}
 
         # 阶段 0：残缺后缀修复 pass
@@ -3315,33 +3319,41 @@ class ExtractService:
                     if 0 < nested_archive_size < self.NESTED_SUBTITLE_SIZE_THRESHOLD:
                         # subtitle_probe_mode：专门用于字幕补配预检的临时解包，直接展开小包
                         if not subtitle_probe_mode:
-                            classification = await self._classify_nested_small_archive(
-                                file_path,
-                                filename,
-                                root,
-                                directory,
-                                parent_password,
-                            )
-                            if classification == "subtitle":
+                            # expand_subtitle_archives（字幕补配 full_extract 模式）：
+                            # 嵌套"字幕源"小包同样解开，交给上层按文件夹扫描
+                            if expand_subtitle_archives:
                                 logger.info(
-                                    "嵌套压缩包 %.1fMB < 阈值 %.0fMB，识别为字幕源，跳过常规解压: %s",
-                                    nested_archive_size / 1024 / 1024,
-                                    self.NESTED_SUBTITLE_SIZE_THRESHOLD / 1024 / 1024,
+                                    "嵌套字幕源小包按 expand_subtitle_archives 展开解压: %s",
                                     filename,
                                 )
-                                if task.task_metadata is None:
-                                    task.task_metadata = {}
-                                pending_subtitles = task.task_metadata.setdefault("nested_subtitle_archive_filenames", [])
-                                if filename not in pending_subtitles:
-                                    pending_subtitles.append(filename)
-                                processed_paths.add(file_real_path)
-                                continue  # 跳过常规嵌套解压
-                            logger.info(
-                                "嵌套压缩包 %.1fMB 但分类为非字幕（%s），走常规嵌套解压: %s",
-                                nested_archive_size / 1024 / 1024,
-                                classification,
-                                filename,
-                            )
+                            else:
+                                classification = await self._classify_nested_small_archive(
+                                    file_path,
+                                    filename,
+                                    root,
+                                    directory,
+                                    parent_password,
+                                )
+                                if classification == "subtitle":
+                                    logger.info(
+                                        "嵌套压缩包 %.1fMB < 阈值 %.0fMB，识别为字幕源，跳过常规解压: %s",
+                                        nested_archive_size / 1024 / 1024,
+                                        self.NESTED_SUBTITLE_SIZE_THRESHOLD / 1024 / 1024,
+                                        filename,
+                                    )
+                                    if task.task_metadata is None:
+                                        task.task_metadata = {}
+                                    pending_subtitles = task.task_metadata.setdefault("nested_subtitle_archive_filenames", [])
+                                    if filename not in pending_subtitles:
+                                        pending_subtitles.append(filename)
+                                    processed_paths.add(file_real_path)
+                                    continue  # 跳过常规嵌套解压
+                                logger.info(
+                                    "嵌套压缩包 %.1fMB 但分类为非字幕（%s），走常规嵌套解压: %s",
+                                    nested_archive_size / 1024 / 1024,
+                                    classification,
+                                    filename,
+                                )
                         else:
                             logger.info(
                                 "[字幕预检] 嵌套小包 %.1fMB，字幕预检模式直接展开: %s",
@@ -7937,6 +7949,9 @@ class ExtractService:
         manual_retry_passwords = self._get_manual_retry_passwords(task)
         manual_retry_password_only = bool((task.task_metadata or {}).get("manual_retry_password_only"))
         subtitle_probe_mode = bool((task.task_metadata or {}).get("subtitle_probe_mode"))
+        # 字幕补配 full_extract（expand_subtitle_archives）与 probe 模式同样
+        # 按"正确性优先"取向处理轻量探测/密码候选，避免误跳过完整解压
+        subtitle_full_extract_mode = bool((task.task_metadata or {}).get("expand_subtitle_archives"))
         # 兼容字段：保留首个候选给老下游 (password_source 判断 / 日志)，新路径走整张 list。
         manual_retry_password = manual_retry_passwords[0] if manual_retry_passwords else ""
         manual_retry_password_set = set(manual_retry_passwords)
@@ -8602,7 +8617,7 @@ class ExtractService:
                             )
                             return False, None, "archive_corrupt"
                         else:
-                            if listed_no_password_large_archive and not subtitle_probe_mode:
+                            if listed_no_password_large_archive and not (subtitle_probe_mode or subtitle_full_extract_mode):
                                 self._set_extract_meta(
                                     task,
                                     extract_failure_reason="light_probe_unknown",
@@ -8613,7 +8628,7 @@ class ExtractService:
                                     archive_size_bytes,
                                 )
                                 return False, None, "light_probe_unknown"
-                            if listed_no_password_large_archive and subtitle_probe_mode:
+                            if listed_no_password_large_archive and (subtitle_probe_mode or subtitle_full_extract_mode):
                                 logger.info(
                                     "字幕补配预检允许未加密大包在轻量探测不确定时继续完整解压: %s size=%s",
                                     os.path.basename(archive_info.path),
@@ -8674,7 +8689,7 @@ class ExtractService:
                         if not password:
                             has_password_candidates = any(bool(pwd) for pwd in unique_passwords)
                             if (
-                                not subtitle_probe_mode
+                                not (subtitle_probe_mode or subtitle_full_extract_mode)
                                 and (manual_retry_password_only or has_password_candidates)
                             ):
                                 logger.info(
@@ -8682,7 +8697,7 @@ class ExtractService:
                                     os.path.basename(archive_info.path),
                                 )
                                 continue
-                            if subtitle_probe_mode and has_password_candidates:
+                            if (subtitle_probe_mode or subtitle_full_extract_mode) and has_password_candidates:
                                 logger.info(
                                     "字幕补配预检优先对无密码候选做完整解压，避免错误密码候选阻断无密码作品: %s",
                                     os.path.basename(archive_info.path),
