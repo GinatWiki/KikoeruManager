@@ -382,6 +382,14 @@ class FileProcessor:
         logger.info(f"[FileProcessor] 创建了 {len(tasks)} 个任务")
         return tasks
 
+    def has_active_download_sidecar(self, file_path: str) -> bool:
+        """文件是否仍在下载中（存在活跃的 aria2 控制文件）。
+
+        watcher 在 is_archive 返回 False 时会走分卷标记路径，必须先排除
+        "下载中导致的暂时 False"，否则首卷会被永久标记已处理、永不建任务。
+        """
+        return self._has_active_aria2_sidecar(file_path)
+
     def is_archive(self, file_path: str) -> bool:
         """检测是否是压缩包文件
 

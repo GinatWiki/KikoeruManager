@@ -1760,7 +1760,12 @@ class TaskEngine:
         finally:
             db.close()
 
-    def _should_block_linked_translation_without_subtitles(self, preview: Dict[str, Any]) -> bool:
+    # 翻译作无字幕拦截的"完整作品"放行阈值：超过该体积的翻译压缩包视为
+    # 完整作品（正常解压入库），不再转入字幕补配问题列表；字幕补丁包
+    # 通常只有几 MB。可通过 auto_process.linked_translation_full_work_min_bytes 覆盖。
+    _LINKED_TRANSLATION_FULL_WORK_MIN_BYTES = 100 * 1024 * 1024
+
+    def _should_block_linked_translation_without_subtitles(self, preview: Dict[str, Any], source_path: str = "") -> bool:
         if not preview:
             return False
         if not bool(preview.get("is_translation_work")):
@@ -1786,6 +1791,33 @@ class TaskEngine:
         # 缺密码、嵌套包失败和超时都只是无法确认，不能冒充无字幕。
         if probe_status not in {"", "ok", "no_subtitles"}:
             return False
+        # 大体积且确认无字幕的包是完整翻译作品，不是字幕补丁：
+        # 放行到后续正常流程（查重 + 解压 + 入库），不进问题作品列表。
+        try:
+            from ..config.settings import get_config as _get_config
+
+            threshold = int(
+                getattr(
+                    getattr(_get_config(), "auto_process", None),
+                    "linked_translation_full_work_min_bytes",
+                    self._LINKED_TRANSLATION_FULL_WORK_MIN_BYTES,
+                )
+                or self._LINKED_TRANSLATION_FULL_WORK_MIN_BYTES
+            )
+        except Exception:
+            threshold = self._LINKED_TRANSLATION_FULL_WORK_MIN_BYTES
+        if source_path and os.path.isfile(source_path):
+            try:
+                if os.path.getsize(source_path) >= threshold:
+                    logger.info(
+                        "[预检] 翻译作无字幕但包体 %d bytes ≥ %d，判定为完整作品放行走正常入库: %s",
+                        os.path.getsize(source_path),
+                        threshold,
+                        os.path.basename(source_path),
+                    )
+                    return False
+            except OSError:
+                pass
         return True
 
     def _should_block_uncertain_dlsite_linkage(self, preview: Dict[str, Any]) -> bool:
@@ -2680,84 +2712,20 @@ class TaskEngine:
                                     "解压后按独立作品分别处理"
                                 )
                             elif getattr(config.auto_process, 'import_linked_translation_subtitles', False):
-                                from .linked_subtitle_import_service import get_linked_subtitle_import_service
-
-                                linked_import_service = get_linked_subtitle_import_service()
-                                try:
-                                    linked_result = await linked_import_service.queue_pending_archive_import(task, rjcode)
-                                except Exception as exc:
-                                    linked_result = {"handled": False, "reason": str(exc)}
-                                    logger.warning(f"[{rjcode}] 关联字幕自动导入预检失败，回退原问题队列逻辑: {exc}")
-
-                                if linked_result.get("handled"):
-                                    record = linked_result.get("record") or {}
-                                    preview = linked_result.get("preview") or {}
-                                    source_label = os.path.basename(task.source_path or "").strip() or rjcode or "字幕补配预检"
-                                    task.task_metadata = {
-                                        **(task.task_metadata or {}),
-                                        "linked_subtitle_import": record,
-                                        "linked_subtitle_preview": preview,
-                                        "source_mode": "linked_translation_archive_pending",
-                                        "task_domain": "subtitle_import",
-                                        "task_kind": "linked_translation_archive_pending",
-                                        "source_page": "subtitle-import",
-                                        "source_action": "linked_translation_archive_pending",
-                                        "source_label": source_label,
-                                        "business_key": str(record.get("id") or task.id),
-                                    }
-                                    task.output_path = ""
-                                    task.status = TaskStatus.COMPLETED
-                                    task.update_progress(100, "已加入字幕补配预检列表，请在字幕补配页继续处理")
-                                    task.completed_at = datetime.now()
-                                    logger.info(
-                                        f"[{rjcode}] 命中关联字幕补配预检分支，已挂入字幕补配页: "
-                                        f"target={preview.get('target_rjcode', '')} record={record.get('id', '')}"
-                                    )
-                                    await self._abort_precheck(precheck_task)
-                                    return
-
-                                preview = linked_result.get("preview") or {}
-                                existing_subtitle_problem = await linked_import_service.create_existing_subtitle_problem(
-                                    source_path=task.source_path,
-                                    preview=preview,
-                                    task_id=task.id,
-                                    queue_origin="auto_process",
+                                # v2.5.19 产品决策：自动解压流程不再路由到字幕补配。
+                                # 只有在字幕补配界面手动扫描出来的压缩包才进入补配工序；
+                                # watcher / 批量下载等自动检测到的压缩包一律走
+                                # 默认流程（查重 + 解压 + 入库）。
+                                # 手动入口不受影响：subtitle-import 页面走
+                                # preview_archive_import / execute_archive_import 独立 API。
+                                linked_result = {
+                                    "handled": False,
+                                    "reason": "auto_linked_subtitle_precheck_disabled",
+                                    "preview": {},
+                                }
+                                logger.info(
+                                    f"[{rjcode}] 自动流程不进入字幕补配预检，按默认解压入库处理"
                                 )
-                                if existing_subtitle_problem.get("handled"):
-                                    auto_skipped = bool(existing_subtitle_problem.get("auto_skipped"))
-                                    task.task_metadata = {
-                                        **(task.task_metadata or {}),
-                                        "linked_subtitle_preview": preview,
-                                        "linked_subtitle_problem": existing_subtitle_problem,
-                                        "source_mode": (
-                                            "linked_translation_archive_existing_subtitle_skipped"
-                                            if auto_skipped
-                                            else "linked_translation_archive_existing_subtitle_conflict"
-                                        ),
-                                    }
-                                    task.output_path = ""
-                                    task.status = TaskStatus.COMPLETED
-                                    task.update_progress(
-                                        100,
-                                        (
-                                            "原作已在 Kikoeru 端有字幕，库存未命中可操作目录，已自动跳过"
-                                            if auto_skipped
-                                            else "原作目录已有字幕，已加入问题作品列表"
-                                        ),
-                                    )
-                                    task.completed_at = datetime.now()
-                                    if auto_skipped:
-                                        logger.info(
-                                            f"[{rjcode}] 原作仅在 Kikoeru 端确认已有字幕，库存未命中目录，已自动跳过: "
-                                            f"target={preview.get('target_rjcode', '')}"
-                                        )
-                                    else:
-                                        logger.info(
-                                            f"[{rjcode}] 原作目录已有字幕，已转入问题作品列表: "
-                                            f"target={preview.get('target_rjcode', '')} conflict={existing_subtitle_problem.get('conflict_id', '')}"
-                                        )
-                                    await self._abort_precheck(precheck_task)
-                                    return
                             else:
                                 logger.info(f"[{rjcode}] 字幕补配预检已禁用，跳过")
 
@@ -2815,7 +2783,7 @@ class TaskEngine:
                                         )
                                     await self._abort_precheck(precheck_task)
                                     return
-                                if self._should_block_linked_translation_without_subtitles(preview):
+                                if self._should_block_linked_translation_without_subtitles(preview, source_path=task.source_path):
                                     _reason = (
                                         str(preview.get("reason") or "").strip()
                                         or "翻译作命中已收录原作，但来源压缩包未发现可补配字幕"

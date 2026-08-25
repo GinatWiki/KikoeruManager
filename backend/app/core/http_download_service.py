@@ -3025,6 +3025,11 @@ class HttpDownloadService:
                 if handle in folder_paths:
                     return folder_paths[handle]
                 parent = folder_parents.get(handle, "")
+                if not str(parent or "").strip():
+                    # Transfer 分享的根节点（parent 为空）在 web UI 中不显示为一层目录，
+                    # 不能计入相对路径，否则会把文件嵌套进"根节点名/文件名"双层目录。
+                    folder_paths[handle] = ""
+                    return ""
                 parent_path = folder_path(parent) if parent and parent in folder_names else ""
                 path = "/".join(part for part in (parent_path, folder_names[handle]) if part)
                 folder_paths[handle] = path

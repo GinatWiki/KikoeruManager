@@ -8,6 +8,7 @@ import os
 import asyncio
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional, Set
 from watchdog.observers import Observer
@@ -91,6 +92,12 @@ class ArchiveHandler(FileSystemEventHandler):
         首卷已被归档移走的迟到尾卷（.7z.002 等）不能只标记为已处理，
         否则会永久残留在输入目录；转交给延后归档队列单独归档。
         """
+        # 下载中的文件（aria2 伴生控制文件还在）此刻的"不是压缩包"只是暂时状态：
+        # 若在这里按分卷规则永久标记已处理，下载完成后的 on_modified 会被
+        # _processed_files 拦截，首卷（如 .7z.001）将永远不会再创建解压任务。
+        if self._file_processor.has_active_download_sidecar(file_path):
+            logger.debug("[Watcher] 文件仍在下载中，暂不标记分卷处理: %s", file_path)
+            return
         filename = os.path.basename(file_path).lower()
         if self.on_orphan_volume and self._orphan_volume_paths(file_path):
             self.on_orphan_volume(file_path)
@@ -329,6 +336,29 @@ class FolderWatcher:
     async def _enqueue_orphan_volume(self, file_path: str):
         """把首卷已归档的迟到尾卷入队延后归档，避免永久残留在输入目录。"""
         try:
+            # 延迟复核：入队瞬间可能正处于下载中（首卷尚未落盘、尾卷仍在增长），
+            # 直接冻结身份快照会导致延后归档永远过不了"源文件已变化"校验。
+            # 等一段时间后重新确认：文件已稳定、无 aria2 伴生、且首卷确实仍缺失。
+            await asyncio.sleep(self._orphan_recheck_delay_seconds())
+            if not os.path.isfile(file_path):
+                return
+            if self._file_processor.has_active_download_sidecar(file_path):
+                logger.info("[Watcher] 孤儿分卷复核时仍在下载，放弃入队: %s", file_path)
+                return
+            try:
+                mtime_age = max(0.0, time.time() - os.path.getmtime(file_path))
+            except OSError:
+                return
+            if mtime_age < self._orphan_stable_seconds():
+                logger.info(
+                    "[Watcher] 孤儿分卷复核时 %d 秒内仍有写入，放弃入队: %s",
+                    int(mtime_age),
+                    file_path,
+                )
+                return
+            if not self._orphan_volume_paths(file_path):
+                # 首卷已出现（或文件形态已变）：交给常规检测流程处理
+                return
             archive_service = get_deferred_archive_service()
             if await archive_service.is_source_claimed(file_path):
                 return
@@ -337,6 +367,18 @@ class FolderWatcher:
                 logger.info("迟到的非首卷分卷已单独入队归档: %s", file_path)
         except Exception:
             logger.warning("迟到的非首卷分卷入队归档失败: %s", file_path, exc_info=True)
+
+    def _orphan_recheck_delay_seconds(self) -> float:
+        try:
+            return max(30.0, float(get_config().processing.orphan_volume_recheck_delay_seconds))
+        except Exception:
+            return 180.0
+
+    def _orphan_stable_seconds(self) -> float:
+        try:
+            return max(10.0, float(get_config().processing.orphan_volume_stable_seconds))
+        except Exception:
+            return 120.0
 
     async def _process_file(self, file_path: str):
         """处理文件（使用 FileProcessor 统一流程）"""

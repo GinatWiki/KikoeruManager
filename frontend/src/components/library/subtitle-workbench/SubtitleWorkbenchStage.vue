@@ -7,6 +7,9 @@
       <aside
         class="relative min-w-0 overflow-visible rounded-[18px] border border-slate-200 bg-white transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
         :class="leftRailCollapsed ? 'grid content-start gap-2 px-2 py-2.5' : 'grid grid-rows-[auto_minmax(0,1fr)] gap-3 px-3 py-3'"
+        style="position: relative; z-index: 40; pointer-events: auto; isolation: isolate;"
+        @mouseenter="handleRailHover(true)"
+        @mouseleave="handleRailHover(false)"
       >
         <!-- 浮动收纳手柄 -->
         <button
@@ -195,6 +198,22 @@ const props = defineProps({
 })
 
 const leftRailCollapsed = ref(false)
+let railExpandHoverTimer = null
+
+// 折叠态下悬停左栏自动展开；移出时若尚未展开则取消定时器
+function handleRailHover(isEnter) {
+  if (!leftRailCollapsed.value) return
+  if (isEnter) {
+    if (railExpandHoverTimer) clearTimeout(railExpandHoverTimer)
+    railExpandHoverTimer = setTimeout(() => {
+      leftRailCollapsed.value = false
+      railExpandHoverTimer = null
+    }, 220)
+  } else if (railExpandHoverTimer) {
+    clearTimeout(railExpandHoverTimer)
+    railExpandHoverTimer = null
+  }
+}
 const isRightCollapsed = computed(() => Boolean(props.ctx?.contextDrawerCtx?.drawerCollapsed))
 const gridClass = computed(() => {
   if (leftRailCollapsed.value && isRightCollapsed.value) return 'grid-cols-[56px_minmax(0,1fr)_56px]'

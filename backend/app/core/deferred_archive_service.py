@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import socket
 import sys
 import threading
@@ -662,6 +663,16 @@ class DeferredArchiveService:
                     )
             except Exception as exc:
                 logger.warning("[延后归档] 执行前刷新分卷清单失败，按入队快照继续: %s", exc)
+            # 执行前重验孤儿前提：孤儿尾卷作业成立的前提是"首卷已被归档移走"。
+            # 若入队是下载中途的误判、首卷其实还在输入目录，正常解压流程会接管
+            # 整组分卷；此时本作业必须取消，否则身份校验（size/mtime/inode）会
+            # 因文件持续变化而无限重试失败。
+            if await asyncio.to_thread(self._detect_stale_orphan_sync, claim):
+                logger.info(
+                    "[延后归档] 检测到首卷仍存在于输入目录，取消孤儿尾卷作业 job=%s",
+                    job_id,
+                )
+                raise _ArchiveCancelled()
             for index, source in enumerate(claim["source_manifest"]):
                 self._raise_if_abort(self._copy_abort_reason(job_id, epoch, check_database=True))
                 await self._move_member(claim, index, source)
@@ -925,6 +936,55 @@ class DeferredArchiveService:
                 await asyncio.to_thread(self._move_member_sync, job_id, epoch, index, source)
             finally:
                 self._set_copy_running(False)
+
+    # 非首卷分卷文件名形态（与 watcher._orphan_volume_paths 保持一致）
+    _ORPHAN_VOLUME_TAIL_RE = re.compile(
+        r'^(?P<base>.+?)\.(?P<vext>7z|zip)\.(?P<num>\d{3})$|^(?P<base2>.+?)\.part(?P<pnum>\d+)\.(?P<pext>rar|zip|7z|exe)$',
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _first_volume_names(cls, filename: str) -> list[str]:
+        """返回该分卷文件对应的首卷候选文件名列表。"""
+        match = cls._ORPHAN_VOLUME_TAIL_RE.match(str(filename or "").strip())
+        if not match:
+            return []
+        if match.group("base"):
+            # 形如 XXX.7z.002 / XXX.zip.003 → 首卷为 XXX.7z.001 / XXX.zip.001
+            if int(match.group("num")) <= 1:
+                return []
+            return [f"{match.group('base')}.{match.group('vext')}.001"]
+        # 形如 XXX.part2.rar → 首卷为 XXX.part1.rar
+        if int(match.group("pnum")) <= 1:
+            return []
+        return [f"{match.group('base2')}.part1.{match.group('pext')}"]
+
+    @classmethod
+    def _detect_stale_orphan_sync(cls, claim: dict[str, Any]) -> bool:
+        """孤儿尾卷作业执行前重验：若任一成员的首卷仍存在于同目录，返回 True。
+
+        正常的整组归档作业（含首卷成员）不受影响——首卷本身在清单里，
+        不会走到"非首卷且首卷存在"的判定。
+        """
+        sources = list((claim or {}).get("source_manifest") or [])
+        if not sources:
+            return False
+        manifest_files = {str((item or {}).get("filename") or "") for item in sources}
+        for item in sources:
+            source_path = str((item or {}).get("source_path") or "")
+            filename = os.path.basename(source_path) or str((item or {}).get("filename") or "")
+            first_names = cls._first_volume_names(filename)
+            if not first_names:
+                continue
+            directory = os.path.dirname(source_path)
+            try:
+                siblings = {name.casefold() for name in os.listdir(directory)}
+            except OSError:
+                continue
+            for first_name in first_names:
+                if first_name.casefold() in siblings and (first_name not in manifest_files):
+                    return True
+        return False
 
     @staticmethod
     def _matches_source_identity(path: str, source: dict[str, Any]) -> bool:
