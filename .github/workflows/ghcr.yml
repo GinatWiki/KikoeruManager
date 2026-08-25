@@ -6,6 +6,12 @@ on:
     tags: [ 'v*.*.*' ]
   workflow_dispatch:
 
+# main 推送与 tag 推送会同时向 latest 标签推镜像，并发时 ghcr 报 unknown blob，
+# 这里按 workflow 串行排队
+concurrency:
+  group: ghcr-${{ github.workflow }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   packages: write
