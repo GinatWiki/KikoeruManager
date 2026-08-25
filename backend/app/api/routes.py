@@ -17998,6 +17998,7 @@ async def preview_linked_subtitle_archive_import(request: LinkedSubtitleArchiveP
             request.archive_path,
             preferred_library_id=request.preferred_library_id,
             allow_directory=True,
+            manual_entry=True,
         )
         return {"success": True, "preview": preview}
     except FileNotFoundError as e:
@@ -18023,6 +18024,7 @@ async def execute_linked_subtitle_archive_import(request: LinkedSubtitleArchiveI
             use_filter_rules=request.use_filter_rules,
             subtitle_filter_rules=request.subtitle_filter_rules,
             allow_directory=True,
+            manual_entry=True,
         )
         try:
             from ..core.activity_log_service import log_from_subtitle_import_result

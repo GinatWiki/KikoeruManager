@@ -304,18 +304,23 @@ class LinkedSubtitleImportService:
         archive_path: str,
         hint_password: Optional[str] = None,
         task: Optional[Task] = None,
+        full_extract: bool = False,
     ) -> tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
         extracted_dir = None
         stage_dir = ""
         try:
-            logger.info("[字幕补配预检] 开始临时解包扫描来源字幕: %s", archive_path)
+            logger.info(
+                "[字幕补配预检] 开始临时解包扫描来源字幕: %s (full_extract=%s)",
+                archive_path,
+                full_extract,
+            )
             if task is not None and task.is_cancelled():
                 return "", [], {"status": "cancelled", "reason": "任务已取消"}
             probe_task = Task(
                 task_type=TaskType.EXTRACT,
                 source_path=archive_path,
                 auto_classify=False,
-                metadata={"subtitle_probe_mode": True},
+                metadata={} if full_extract else {"subtitle_probe_mode": True},
             )
             cancel_watcher: Optional[asyncio.Task] = None
             if task is not None:
@@ -1504,7 +1509,11 @@ class LinkedSubtitleImportService:
                 source_subtitles=source_subtitles,
             )
 
-        stage_dir, source_subtitles, probe_result = await self._collect_archive_subtitles_to_stage(archive_path, hint_password=hint_password)
+        stage_dir, source_subtitles, probe_result = await self._collect_archive_subtitles_to_stage(
+            archive_path,
+            hint_password=hint_password,
+            full_extract=True,
+        )
         if not source_subtitles:
             if stage_dir:
                 self._cleanup_stage_dir(stage_dir)
@@ -2637,6 +2646,7 @@ class LinkedSubtitleImportService:
         task: Optional[Task] = None,
         precheck_timeout: Optional[float] = None,
         allow_directory: bool = False,
+        manual_entry: bool = False,
     ) -> Dict[str, Any]:
         archive_path = await self._wait_for_archive_file(archive_path, allow_directory=allow_directory)
 
@@ -2647,7 +2657,10 @@ class LinkedSubtitleImportService:
             directory_scan_source = str(archive_path)
             archives = self._scan_directory_for_archives(archive_path)
             if not archives:
-                raise ValueError("指定目录内未找到压缩包文件（.zip/.7z 等），请确认目录内容")
+                raise ValueError(
+                    "指定目录内未找到压缩包文件（.zip/.7z 等），请确认目录内容；"
+                    "若目录内是散装字幕文件，请改用字幕文件夹补配入口"
+                )
             if len(archives) > 1:
                 # 多个压缩包：返回目录扫描结果，由前端列出供用户选择
                 return {
@@ -2686,6 +2699,7 @@ class LinkedSubtitleImportService:
             hint_password=hint_password,
             task=task,
             precheck_timeout=precheck_timeout,
+            manual_entry=manual_entry,
         )
         # 单压缩包目录被自动解析时，把解析信息带回前端（source_label 已是文件路径）
         if directory_scan_source and isinstance(preview, dict):
@@ -2701,9 +2715,11 @@ class LinkedSubtitleImportService:
         hint_password: Optional[str] = None,
         task: Optional[Task] = None,
         precheck_timeout: Optional[float] = None,
+        manual_entry: bool = False,
     ) -> Dict[str, Any]:
         inflight, inflight_lock = self._get_archive_preview_inflight()
-        inflight_key = os.path.normcase(os.path.abspath(archive_path))
+        # 手动入口走完整解压链路，与自动预检单（probe 模式）结果不同，必须分开缓存
+        inflight_key = f"{'manual' if manual_entry else 'auto'}::{os.path.normcase(os.path.abspath(archive_path))}"
         async with inflight_lock:
             preview_task = inflight.get(inflight_key)
             if preview_task is None or preview_task.done():
@@ -2714,6 +2730,7 @@ class LinkedSubtitleImportService:
                         source_rjcode_hint=source_rjcode_hint,
                         hint_password=hint_password,
                         task=task,
+                        manual_entry=manual_entry,
                     )
                 )
                 inflight[inflight_key] = preview_task
@@ -2757,6 +2774,7 @@ class LinkedSubtitleImportService:
         source_rjcode_hint: Optional[str] = None,
         hint_password: Optional[str] = None,
         task: Optional[Task] = None,
+        manual_entry: bool = False,
     ) -> Dict[str, Any]:
         _subtitle_size_threshold = int(self.extract_service.NESTED_SUBTITLE_SIZE_THRESHOLD)
         try:
@@ -2784,10 +2802,14 @@ class LinkedSubtitleImportService:
         if 0 < _archive_size < _subtitle_size_threshold:
             # 小包（< 10MB）：先解压探查字幕，再查 DLsite 确认翻译作关系，
             # 本地字幕状态由 _build_common_preview 读取 ready 库存索引。
+            # 手动入口（manual_entry=True）走完整解压链路：嵌套压缩包按主流程
+            # 完整展开（含残缺后缀修复/分卷/密码继承），不再用 probe 选择性提取，
+            # 解出后按文件夹形式统一扫描字幕。
             stage_dir, source_subtitles, probe_result = await self._collect_archive_subtitles_to_stage(
                 archive_path,
                 hint_password=hint_password,
                 task=task,
+                full_extract=bool(manual_entry),
             )
             logger.info(
                 "[字幕补配预检] 小型压缩包先解压后判断路由: source=%s source_rj=%s"
@@ -2827,12 +2849,14 @@ class LinkedSubtitleImportService:
                         exc,
                     )
 
-            # Step 3：决定是否解包——翻译作品且原作缺字幕才解包
-            if is_translation_work and not prefetched_target_has_subtitle:
+            # Step 3：决定是否解包——翻译作品且原作缺字幕才解包；
+            # 手动入口始终完整解包（跳过"非翻译作品跳过解包"优化，正确性优先）
+            if manual_entry or (is_translation_work and not prefetched_target_has_subtitle):
                 stage_dir, source_subtitles, probe_result = await self._collect_archive_subtitles_to_stage(
                     archive_path,
                     hint_password=hint_password,
                     task=task,
+                    full_extract=bool(manual_entry),
                 )
             elif not is_translation_work:
                 logger.info(
@@ -3177,6 +3201,7 @@ class LinkedSubtitleImportService:
         import_reason: str = "手动压缩包字幕补配导入",
         source_mode: str = "linked_translation_archive_import",
         allow_directory: bool = False,
+        manual_entry: bool = False,
     ) -> Dict[str, Any]:
         # 手动入口兜底：直接对目录执行导入时，仅支持目录内恰好 1 个压缩包的场景；
         # 多个压缩包时要求先预检并选择具体文件（正常前端流程不会走到这里）
@@ -3200,6 +3225,7 @@ class LinkedSubtitleImportService:
                 archive_path,
                 preferred_library_id=preferred_library_id,
                 allow_directory=allow_directory,
+                manual_entry=manual_entry,
             )
         if not (preview.get("source_subtitle_dir") or preview.get("staged_subtitle_dir")):
             preview = await self._stage_archive_subtitles_for_preview(archive_path, preview)
@@ -3229,9 +3255,13 @@ class LinkedSubtitleImportService:
                         archive_path,
                         source_dir,
                     )
-                    temp_dir, source_subtitles, _probe_result = await self._collect_archive_subtitles_to_stage(archive_path)
+                    temp_dir, source_subtitles, _probe_result = await self._collect_archive_subtitles_to_stage(
+                        archive_path, full_extract=True
+                    )
             else:
-                temp_dir, source_subtitles, _probe_result = await self._collect_archive_subtitles_to_stage(archive_path)
+                temp_dir, source_subtitles, _probe_result = await self._collect_archive_subtitles_to_stage(
+                    archive_path, full_extract=True
+                )
             if self._should_direct_import_to_empty_candidate(preview, target_candidate):
                 import_result = await self._direct_import_source_subtitles_to_target(
                     source_subtitles=source_subtitles,
