@@ -2128,6 +2128,9 @@ button:disabled { cursor: not-allowed; }
 .subtitle-tree::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.4); border-radius: 4px; }
 
 /* 工作台弹窗壳由本页自定义，不再走 Element Plus dialog。 */
+/* 遮罩层背景完全透明且铺满全屏：必须放行模态以外的点击，
+   否则会形成一层看不见的"点击黑洞"，把底层页面（如左侧导航栏）
+   全部挡住——表现为工作台打开期间左侧栏位失效、关闭后恢复。 */
 .subtitle-import-workbench-overlay {
   position: fixed;
   inset: 0;
@@ -2138,6 +2141,7 @@ button:disabled { cursor: not-allowed; }
   background: transparent !important;
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
+  pointer-events: none;
 }
 
 .subtitle-import-workbench-modal {
@@ -2148,6 +2152,7 @@ button:disabled { cursor: not-allowed; }
   background: #ffffff;
   border: 1px solid var(--subtitle-border);
   box-shadow: none;
+  pointer-events: auto;
 }
 
 .subtitle-import-workbench-modal :deep(.subtitle-workbench-shell) {
