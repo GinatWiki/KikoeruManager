@@ -2522,6 +2522,26 @@ class ASMRResourceService:
         await asyncio.to_thread(shutil.move, str(current_path), str(target_path))
         return str(target_path)
 
+    async def _preserve_rename_download_root(self, folder_path: str, rjcode: str, metadata: Dict[str, Any]) -> str:
+        """preserve 模式入库命名：使用同步流程已获取的作品名。
+
+        下载缓存目录名是 ``{rjcode}_{taskid8}``（内部断点续传标识），
+        不能原样搬进库；这里改用 work_name 清洗后的名字作为作品目录名，
+        不走 API 命名模板，也不发起额外网络请求。
+        """
+        work_name = str(metadata.get("work_name") or metadata.get("work_title") or "").strip()
+        renamed_name = self._sanitize_folder_name(work_name, rjcode)
+        current_path = Path(folder_path)
+        if current_path.name == renamed_name:
+            return str(current_path)
+        target_path = current_path.parent / renamed_name
+        counter = 1
+        while target_path.exists() and target_path.resolve() != current_path.resolve():
+            target_path = current_path.parent / f"{renamed_name}({counter})"
+            counter += 1
+        await asyncio.to_thread(shutil.move, str(current_path), str(target_path))
+        return str(target_path)
+
     async def _finalize_circle_completion_download(
         self,
         task,
@@ -2590,10 +2610,19 @@ class ASMRResourceService:
         rename_step_enabled = bool(getattr(config.asmr_sync_step, "rename", True))
         if not rename_step_enabled:
             logger.info("[%s] 步骤[重命名]已禁用，跳过", rjcode)
-        elif postprocess_options.get("naming_mode") != "api":
-            logger.info("[%s] 保留原作品目录名（naming_mode=preserve）", rjcode)
-        if rename_step_enabled and postprocess_options.get("naming_mode") == "api":
+        elif postprocess_options.get("naming_mode") == "api":
             renamed_root = await self._api_rename_download_root(download_root, rjcode, final_metadata)
+        else:
+            # preserve 语义：用同步流程已获取的作品名做目录名，
+            # 不能把下载缓存目录名（{rjcode}_{taskid8}）原样搬进库。
+            renamed_root = await self._preserve_rename_download_root(download_root, rjcode, final_metadata)
+            if renamed_root != download_root:
+                task.task_metadata["download_root"] = renamed_root
+                logger.info(
+                    "[%s] 保留作品名入库（naming_mode=preserve）: %s",
+                    rjcode,
+                    os.path.basename(renamed_root),
+                )
         if getattr(config.rename, "flatten_single_subfolder", False) and not flatten_files:
             from .rename_service import RenameService
 
