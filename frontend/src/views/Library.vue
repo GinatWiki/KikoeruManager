@@ -631,6 +631,22 @@
 
       />
 
+      <el-alert
+
+        v-if="indexLagNotice"
+
+        :title="indexLagNotice"
+
+        type="warning"
+
+        :closable="false"
+
+        show-icon
+
+        style="margin-bottom: 14px"
+
+      />
+
       <div
         v-if="!isMobileViewport"
         ref="tableMarqueeRef"
@@ -5132,6 +5148,24 @@ const countedLibraries = computed(() => libraries.value.filter(item => {
 }).length)
 
 const currentStatsProgress = computed(() => Math.max(0, Math.min(100, Number(currentStats.value?.progress_percent || 0))))
+
+// 索引物化积压提示：accepted_seq 领先 materialized_seq 说明有变更已受理但尚未进入可读快照，
+// 此时浏览结果可能暂缺最新条目（后端本地库已在缺条目时自动回退磁盘扫描，此提示覆盖远程库与边缘场景）。
+const currentIndexLagCount = computed(() => {
+  if (libraryViewMode.value !== 'directory') return 0
+  const lib = currentLibrary.value
+  if (!lib || lib.type === 'synology_filestation') return 0
+  const view = libraryIndexStateStore.indexViewFor(selectedLibraryId.value) || libraryIndexStateStore.statusFor(selectedLibraryId.value)
+  if (!view) return 0
+  const accepted = Math.max(0, Number(view.accepted_seq || 0))
+  const materialized = Math.max(0, Number(view.materialized_seq || 0))
+  return accepted > materialized ? accepted - materialized : 0
+})
+
+const indexLagNotice = computed(() => {
+  const lag = currentIndexLagCount.value
+  return lag >= 10 ? `索引后台同步中（${lag} 项变更待处理），列表可能暂缺最新文件，稍后会自动补齐` : ''
+})
 
 const showCurrentStatsProgress = computed(() => ['pending', 'syncing'].includes(currentStats.value?.status) && currentStatsProgress.value > 0)
 

@@ -26,6 +26,24 @@ function normalizeScope (value) {
   return value === 'subtree' ? 'subtree' : 'exact'
 }
 
+// 墓碑兜底 TTL：防止异常路径下墓碑永不过期、持续隐藏行。
+// fallback 墓碑（releaseSeq=0，无法靠水位释放）给短 TTL；确认墓碑给长 TTL 作为安全网。
+const FALLBACK_TOMBSTONE_TTL_MS = 5 * 60 * 1000
+const CONFIRMED_TOMBSTONE_TTL_MS = 30 * 60 * 1000
+
+function tombstoneExpiresAt (tombstone) {
+  const releaseSeq = finiteRevision(tombstone?.releaseSeq) || 0
+  const ttl = releaseSeq > 0 ? CONFIRMED_TOMBSTONE_TTL_MS : FALLBACK_TOMBSTONE_TTL_MS
+  return Date.now() + ttl
+}
+
+function pruneExpiredTombstones (list) {
+  if (!Array.isArray(list) || !list.length) return list || []
+  const now = Date.now()
+  const next = list.filter(item => !item?.expiresAt || Number(item.expiresAt) > now)
+  return next.length === list.length ? list : next
+}
+
 function indexViewFromPayload (payload) {
   if (!payload || typeof payload !== 'object') return []
   if (Array.isArray(payload.index_views)) return payload.index_views.filter(Boolean)
@@ -120,7 +138,7 @@ export const useLibraryIndexStateStore = defineStore('library-index-state', {
   getters: {
     statusFor: state => libraryId => state.statusByLibrary[String(libraryId || '')] || null,
     indexViewFor: state => libraryId => state.viewByLibrary[String(libraryId || '')] || null,
-    tombstonesFor: state => libraryId => state.tombstonesByLibrary[String(libraryId || '')] || [],
+    tombstonesFor: state => libraryId => pruneExpiredTombstones(state.tombstonesByLibrary[String(libraryId || '')] || []),
   },
 
   actions: {
@@ -297,7 +315,7 @@ export const useLibraryIndexStateStore = defineStore('library-index-state', {
       const id = String(libraryId || '').trim()
       const path = normalizeLibraryIndexPath(tombstone?.path)
       if (!id || !path) return
-      const current = this.tombstonesByLibrary[id] || []
+      const current = pruneExpiredTombstones(this.tombstonesByLibrary[id] || [])
       const next = current.filter(item => !(
         item.operationId === tombstone.operationId &&
         item.path === path &&
@@ -310,6 +328,7 @@ export const useLibraryIndexStateStore = defineStore('library-index-state', {
         path,
         scope: normalizeScope(tombstone.scope),
         confirmed: tombstone.confirmed !== false,
+        expiresAt: tombstoneExpiresAt(tombstone),
       })
       this.tombstonesByLibrary = { ...this.tombstonesByLibrary, [id]: next }
     },
@@ -331,9 +350,10 @@ export const useLibraryIndexStateStore = defineStore('library-index-state', {
       const id = String(libraryId || '').trim()
       const materializedSeq = finiteRevision(status?.materialized_seq)
       if (!id || materializedSeq === null) return
-      const current = this.tombstonesByLibrary[id] || []
+      const current = pruneExpiredTombstones(this.tombstonesByLibrary[id] || [])
       const next = current.filter(item => !(
-        item.confirmed && Number(item.releaseSeq || 0) > 0 && materializedSeq >= Number(item.releaseSeq)
+        (item.confirmed && Number(item.releaseSeq || 0) > 0 && materializedSeq >= Number(item.releaseSeq)) ||
+        (item.expiresAt && Number(item.expiresAt) <= Date.now())
       ))
       if (next.length === current.length) return
       this.tombstonesByLibrary = { ...this.tombstonesByLibrary, [id]: next }
@@ -342,7 +362,7 @@ export const useLibraryIndexStateStore = defineStore('library-index-state', {
     isPathTombstoned (libraryId, path) {
       const id = String(libraryId || '').trim()
       const relativePath = this.relativePathFor(id, path)
-      return (this.tombstonesByLibrary[id] || []).some(item => (
+      return pruneExpiredTombstones(this.tombstonesByLibrary[id] || []).some(item => (
         libraryIndexPathMatches(path, item.path, item.scope) ||
         libraryIndexPathMatches(relativePath, item.path, item.scope)
       ))

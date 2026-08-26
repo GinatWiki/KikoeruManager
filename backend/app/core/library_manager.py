@@ -4335,14 +4335,26 @@ class LibraryManager:
                     entries,
                     return_stale_paths=True,
                 )
-                # ???? 0 ?????????????fallback ????????????/???????
-                if not entries:
-                    try:
-                        fs_entries = [n for n in os.listdir(current_path or parent_path) if not self._should_skip_entry(n)]
-                    except OSError:
-                        fs_entries = []
-                    if fs_entries:
-                        return None
+                # 完整性探测：磁盘直接子项多于索引快照 => 物化滞后或 watcher 漏事件。
+                # 记录诊断日志、入队子树 reconcile，并回退文件系统扫描保证本次显示完整。
+                # （对比的是目录子项总数而非当前页，分页浏览下同样成立）
+                fs_names: list[str] = []
+                try:
+                    fs_names = [
+                        n for n in os.listdir(current_path or parent_path)
+                        if not self._should_skip_entry(n)
+                    ]
+                except OSError:
+                    fs_names = []
+                index_total = max(0, int(payload.get("total") or len(entries)))
+                if len(fs_names) > index_total:
+                    self._report_incomplete_dir_and_reconcile(
+                        library,
+                        current_path or parent_path,
+                        index_total=index_total,
+                        fs_total=len(fs_names),
+                    )
+                    return None
             if force_refresh and library.type == "local":
                 refresh_paths = [
                     str(getattr(entry, "absolute_path", "") or "")
@@ -4410,6 +4422,56 @@ class LibraryManager:
                 exc_info=True,
             )
             return None
+
+    def _report_incomplete_dir_and_reconcile(
+        self,
+        library: LibraryDefinition,
+        dir_path: str,
+        *,
+        index_total: int,
+        fs_total: int,
+    ) -> None:
+        """浏览完整性探测命中：记诊断日志并入队子树 reconcile（带去重节流）。"""
+        watermark = ""
+        try:
+            from .library_index import get_library_index_service
+
+            status = get_library_index_service().get_status(library.id)
+            if status is not None:
+                watermark = (
+                    f" accepted={int(getattr(status, 'accepted_seq', 0) or 0)}"
+                    f" materialized={int(getattr(status, 'materialized_seq', 0) or 0)}"
+                )
+        except Exception:
+            logger.debug("读取库存索引水位失败: lib=%s", library.id, exc_info=True)
+        logger.warning(
+            "[索引完整性] 浏览目录磁盘条目多于索引快照，回退文件系统并入队 reconcile:"
+            " lib=%s path=%s index_total=%s fs_total=%s%s",
+            library.id,
+            dir_path,
+            index_total,
+            fs_total,
+            watermark,
+        )
+        cache = getattr(self, "_browse_completeness_reconcile_at", None)
+        if cache is None:
+            cache = {}
+            self._browse_completeness_reconcile_at = cache
+        now = time.monotonic()
+        key = (str(library.id), str(dir_path))
+        last = cache.get(key)
+        if last is not None and now - last < 60.0:
+            return
+        cache[key] = now
+        try:
+            self._record_index_reconcile_by_path(library, dir_path, source="browse_completeness")
+        except Exception:
+            logger.warning(
+                "[索引完整性] reconcile 入队失败: lib=%s path=%s",
+                library.id,
+                dir_path,
+                exc_info=True,
+            )
 
     def _record_index_reconcile_by_path(
         self,

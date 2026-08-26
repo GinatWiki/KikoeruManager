@@ -2454,7 +2454,8 @@ export const subtitleImportApi = {
   previewArchive: async (archivePath, options = {}) => {
     const response = await apiClient.post('/subtitle-import/archive/preview', {
       archive_path: archivePath,
-      preferred_library_id: options.preferredLibraryId || undefined
+      preferred_library_id: options.preferredLibraryId || undefined,
+      scan_only: options.scanOnly ?? false
     })
     return response.data
   },
@@ -2466,6 +2467,7 @@ export const subtitleImportApi = {
       preferred_library_id: options.preferredLibraryId || undefined,
       target_library_id: options.targetLibraryId || undefined,
       target_folder_path: options.targetFolderPath || undefined,
+      target_folders: Array.isArray(options.targetFolders) ? options.targetFolders : undefined,
       use_filter_rules: options.useFilterRules ?? false,
       subtitle_filter_rules: options.subtitleFilterRules || []
     }, {
@@ -2491,6 +2493,7 @@ export const subtitleImportApi = {
       preferred_library_id: options.preferredLibraryId || undefined,
       target_library_id: options.targetLibraryId || undefined,
       target_folder_path: options.targetFolderPath || undefined,
+      target_folders: Array.isArray(options.targetFolders) ? options.targetFolders : undefined,
       source_rjcode_hint: options.sourceRJCodeHint || undefined,
       use_filter_rules: options.useFilterRules ?? false,
       subtitle_filter_rules: options.subtitleFilterRules || []

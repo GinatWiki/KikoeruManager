@@ -103,7 +103,7 @@
               预检单由自动处理流程生成：开启「关联翻译字幕导入」后，监视目录里的字幕压缩包会在处理时自动预检；ASMR 同步发现的嵌套小包也会自动进入。手头的字幕来源可在下方手动扫描。
             </p>
           </div>
-          <!-- 手动扫描（统一入口：压缩包 / 字幕文件夹 / 散装字幕目录） -->
+          <!-- 手动扫描（统一入口：压缩包 / 字幕文件夹 / 散装字幕目录）；扫描与预检分离 -->
           <div class="subtitle-form-body subtitle-manual-scan">
             <div class="subtitle-form-field">
               <label class="subtitle-form-label">手动扫描字幕来源</label>
@@ -112,8 +112,8 @@
                   v-model="manualArchivePath"
                   type="text"
                   class="subtitle-form-input"
-                  placeholder="压缩包或字幕文件夹路径（文件夹内散装字幕、压缩包均可识别）"
-                  @keyup.enter="previewManualArchive"
+                  placeholder="字幕来源目录或压缩包路径（留空时扫描使用设置中的默认字幕目录）"
+                  @keyup.enter="scanManualDirectory"
                 />
                 <button
                   v-if="manualArchivePath"
@@ -130,11 +130,20 @@
               <button
                 type="button"
                 class="subtitle-action-btn is-slate"
-                :disabled="manualArchiveLoading || !manualArchivePath.trim()"
+                :disabled="manualScanLoading || manualArchiveLoading || !hasManualScanSource"
+                @click="scanManualDirectory"
+              >
+                <Search class="w-3.5 h-3.5" :class="{ 'animate-pulse': manualScanLoading }" />
+                {{ manualScanLoading ? '扫描中…' : '扫描' }}
+              </button>
+              <button
+                type="button"
+                class="subtitle-action-btn is-slate"
+                :disabled="manualArchiveLoading || manualScanLoading || !hasManualScanSource"
                 @click="previewManualArchive"
               >
                 <Eye class="w-3.5 h-3.5" :class="{ 'animate-pulse': manualArchiveLoading }" />
-                {{ manualArchiveLoading ? '预检中…' : '扫描并预检' }}
+                {{ manualArchiveLoading ? '预检中…' : '预检' }}
               </button>
             </div>
           </div>
@@ -218,9 +227,9 @@
           </div>
         </aside>
 
-        <!-- 右侧：目录扫描结果（输入文件夹且内含多个压缩包时展示） -->
+        <!-- 右侧：目录扫描结果（扫描发现的压缩包列表 / 散装字幕提示） -->
         <section
-          v-if="manualDirectoryArchives.length"
+          v-if="manualDirectoryArchives.length || manualDirectoryLooseSubtitleCount > 0"
           class="subtitle-detail-pane"
           :key="`manual-directory-${manualDirectorySource}`"
         >
@@ -237,8 +246,11 @@
                 </p>
               </div>
               <div class="subtitle-detail-actions">
-                <span class="lib-chip lib-chip-warning">
+                <span v-if="manualDirectoryArchives.length" class="lib-chip lib-chip-warning">
                   {{ manualDirectoryArchives.length }} 个压缩包
+                </span>
+                <span v-else class="lib-chip lib-chip-warning">
+                  {{ manualDirectoryLooseSubtitleCount }} 个散装字幕
                 </span>
               </div>
             </div>
@@ -247,10 +259,12 @@
           <div class="subtitle-detail-body no-scrollbar">
             <div class="subtitle-detail-alert is-warning">
               <AlertTriangle class="w-5 h-5 flex-shrink-0 mt-0.5 text-amber-500" />
-              <p>目录内发现 {{ manualDirectoryArchives.length }} 个压缩包，请选择要补配的压缩包。</p>
+              <p v-if="manualDirectoryArchives.length">目录内发现 {{ manualDirectoryArchives.length }} 个压缩包，请选择要补配的压缩包后再预检。</p>
+              <p v-else-if="manualDirectoryLooseSubtitleCount > 0">目录内无压缩包，发现 {{ manualDirectoryLooseSubtitleCount }} 个散装字幕文件；可直接点击「预检」按文件夹补配处理。</p>
+              <p v-else>目录内未发现压缩包或字幕文件，请检查来源目录。</p>
             </div>
 
-            <article class="subtitle-info-card">
+            <article v-if="manualDirectoryArchives.length" class="subtitle-info-card">
               <div class="subtitle-info-card-header">
                 <h3 class="subtitle-info-card-title">压缩包列表</h3>
                 <span class="lib-chip lib-chip-info ml-auto">{{ manualDirectoryArchives.length }} 项</span>
@@ -262,11 +276,18 @@
                     :key="archive.path"
                     type="button"
                     class="subtitle-candidate-card"
-                    :disabled="manualArchiveLoading"
+                    :class="{ 'is-selected': manualSelectedArchive === archive.path }"
+                    :disabled="manualArchiveLoading || manualScanLoading"
                     @click="selectManualDirectoryArchive(archive)"
                   >
-                    <span class="subtitle-candidate-radio is-checked">
-                      <span class="subtitle-candidate-radio-dot"></span>
+                    <span
+                      class="subtitle-candidate-radio"
+                      :class="{ 'is-checked': manualSelectedArchive === archive.path }"
+                    >
+                      <span
+                        v-if="manualSelectedArchive === archive.path"
+                        class="subtitle-candidate-radio-dot"
+                      ></span>
                     </span>
                     <div class="subtitle-candidate-body">
                       <h4 class="subtitle-candidate-name">{{ archive.name }}</h4>
@@ -399,7 +420,7 @@
             <article class="subtitle-info-card">
               <div class="subtitle-info-card-header">
                 <FolderTree class="w-4 h-4 text-slate-400" />
-                <h3>目标目录候选</h3>
+                <h3>目标目录候选（可多选，按字幕树↔音频树自动分发）</h3>
                 <span class="lib-chip lib-chip-info ml-auto">
                   {{ manualArchivePreview.candidate_count ?? 0 }} 个
                 </span>
@@ -416,15 +437,15 @@
                     :key="candidateKey(candidate)"
                     type="button"
                     class="subtitle-candidate-card"
-                    :class="{ 'is-selected': manualCandidateSelection === candidateKey(candidate) }"
-                    @click="manualCandidateSelection = candidateKey(candidate)"
+                    :class="{ 'is-selected': manualTargetSelections.includes(candidateKey(candidate)) }"
+                    @click="toggleManualTargetSelection(candidate)"
                   >
                     <span
                       class="subtitle-candidate-radio"
-                      :class="{ 'is-checked': manualCandidateSelection === candidateKey(candidate) }"
+                      :class="{ 'is-checked': manualTargetSelections.includes(candidateKey(candidate)) }"
                     >
                       <span
-                        v-if="manualCandidateSelection === candidateKey(candidate)"
+                        v-if="manualTargetSelections.includes(candidateKey(candidate))"
                         class="subtitle-candidate-radio-dot"
                       ></span>
                     </span>
@@ -786,6 +807,7 @@ import {
   RotateCw,
   X,
   Eye,
+  Search,
   Info,
 } from 'lucide-vue-next'
 
@@ -1009,17 +1031,22 @@ const {
 const {
   manualArchivePath,
   manualArchiveLoading,
+  manualScanLoading,
   manualArchiveImporting,
   manualArchivePreview,
-  manualCandidateSelection,
-  selectedManualCandidate,
+  manualTargetSelections,
+  selectedManualCandidates,
   canExecuteManualArchiveImport,
   manualDirectoryArchives,
   manualDirectorySource,
+  manualSelectedArchive,
+  hasManualScanSource,
 
   formatArchiveSize,
   clearManualArchivePreview,
   selectManualDirectoryArchive,
+  toggleManualTargetSelection,
+  scanManualDirectory,
   previewManualArchive,
   executeManualArchiveImport
 } = useSubtitleImportArchiveManual({

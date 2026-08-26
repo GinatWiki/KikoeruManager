@@ -598,6 +598,76 @@ class LinkedSubtitleImportService:
 
         return results
 
+    def _build_directory_scan_summary(self, folder_path: str) -> Dict[str, Any]:
+        """扫描/预检分离：轻量目录内容清点，不解包、不解析目标候选。
+
+        返回 is_directory_scan 形状的清单：压缩包列表（可为空）+ 散装字幕计数，
+        供前端"扫描"按钮快速重复执行；正式预检由用户选定条目后单独触发。
+        """
+        archives = self._scan_directory_for_archives(folder_path)
+        loose_subtitle_count = 0
+        if not archives:
+            try:
+                loose_subtitle_count = len(
+                    self._scan_source_subtitles(folder_path, source_root=folder_path)
+                )
+            except Exception:
+                logger.debug(
+                    "[字幕补配] 扫描目录散装字幕失败: %s", folder_path, exc_info=True
+                )
+        return {
+            "is_directory_scan": True,
+            "scan_only": True,
+            "source_path": folder_path,
+            "source_label": os.path.basename(folder_path.rstrip("\\/")) or folder_path,
+            "directory_archives": archives,
+            "directory_archive_count": len(archives),
+            "loose_subtitle_count": loose_subtitle_count,
+            "subtitle_count": loose_subtitle_count if not archives else 0,
+            "reason": (
+                f"目录内发现 {len(archives)} 个压缩包，请选择要补配的压缩包"
+                if archives
+                else (
+                    f"目录内无压缩包，发现 {loose_subtitle_count} 个散装字幕文件"
+                    if loose_subtitle_count
+                    else "目录内未发现压缩包或字幕文件"
+                )
+            ),
+            "candidates": [],
+            "candidate_count": 0,
+            "ready_candidate_count": 0,
+            "can_execute": False,
+            "can_auto_import": False,
+        }
+
+    def _build_directory_scan_summary_for_file(self, file_path: str) -> Dict[str, Any]:
+        try:
+            stat = os.stat(file_path)
+            entry = {
+                "name": os.path.basename(file_path),
+                "path": file_path,
+                "size": int(stat.st_size),
+                "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+            }
+        except OSError as exc:
+            raise ValueError(f"无法访问指定文件: {exc}") from exc
+        return {
+            "is_directory_scan": True,
+            "scan_only": True,
+            "source_path": file_path,
+            "source_label": entry["name"],
+            "directory_archives": [entry],
+            "directory_archive_count": 1,
+            "loose_subtitle_count": 0,
+            "subtitle_count": 0,
+            "reason": "已定位到 1 个压缩包，可执行预检",
+            "candidates": [],
+            "candidate_count": 0,
+            "ready_candidate_count": 0,
+            "can_execute": False,
+            "can_auto_import": False,
+        }
+
     async def _wait_for_archive_file(
         self,
         archive_path: str,
@@ -2654,6 +2724,7 @@ class LinkedSubtitleImportService:
         precheck_timeout: Optional[float] = None,
         allow_directory: bool = False,
         manual_entry: bool = False,
+        scan_only: bool = False,
     ) -> Dict[str, Any]:
         archive_path = await self._wait_for_archive_file(archive_path, allow_directory=allow_directory)
 
@@ -2662,6 +2733,14 @@ class LinkedSubtitleImportService:
         directory_scan_source = ""
         if allow_directory and os.path.isdir(archive_path):
             directory_scan_source = str(archive_path)
+
+            # 扫描/预检分离：scan_only 只做轻量目录内容清点（压缩包清单 + 散装字幕计数），
+            # 不解包、不解析候选目标，保证"扫描"永远快速可重复执行。
+            if scan_only:
+                return await asyncio.to_thread(
+                    self._build_directory_scan_summary, directory_scan_source
+                )
+
             archives = self._scan_directory_for_archives(archive_path)
             if not archives:
                 # 入口统一：目录内没有压缩包时，若含散装字幕文件则自动降级为
@@ -2712,6 +2791,16 @@ class LinkedSubtitleImportService:
             raise ValueError("压缩包路径不能为空")
         if not os.path.exists(archive_path):
             raise FileNotFoundError("压缩包不存在")
+
+        # 扫描/预检分离：输入本身就是文件时，"扫描"只回显该文件的轻量清单，
+        # 不触发解包与候选解析；正式预检由前端再以 scan_only=False 调用。
+        if scan_only:
+            if not os.path.isfile(archive_path):
+                raise ValueError("指定路径不是压缩包文件")
+            return await asyncio.to_thread(
+                self._build_directory_scan_summary_for_file, archive_path
+            )
+
         if not os.path.isfile(archive_path):
             raise ValueError("指定路径不是压缩包文件")
 
@@ -3028,6 +3117,376 @@ class LinkedSubtitleImportService:
             raise ValueError(preview.get("reason") or "没有可用的目标目录")
         raise ValueError("命中多个可用目标目录，请手动选择目标目录")
 
+    def _normalize_selected_targets(
+        self,
+        preview: Dict[str, Any],
+        *,
+        target_library_id: Optional[str] = None,
+        target_folder_path: Optional[str] = None,
+        target_folders: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """把请求中的目标（单个或多个）解析为候选列表；至少返回一个可用目标。
+
+        - target_folders 非空：多目标模式，逐项校验必须存在于预检候选且可导入；
+        - 否则退回原有单目标解析逻辑。
+        """
+        resolved: List[Dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        candidates = list(preview.get("candidates") or [])
+        for item in target_folders or []:
+            if not isinstance(item, dict):
+                continue
+            lid = str(item.get("library_id") or item.get("target_library_id") or "").strip()
+            fpath = str(item.get("folder_path") or item.get("target_folder_path") or "").strip()
+            if not lid or not fpath:
+                continue
+            key = (lid, os.path.normcase(fpath))
+            if key in seen:
+                continue
+            seen.add(key)
+            matched = next(
+                (
+                    c
+                    for c in candidates
+                    if str(c.get("library_id") or "") == lid
+                    and os.path.normcase(str(c.get("folder_path") or "")) == os.path.normcase(fpath)
+                ),
+                None,
+            )
+            if matched is None:
+                raise ValueError(f"指定的目标目录不在当前候选列表中: {fpath}")
+            if not bool(matched.get("ready_for_import")):
+                raise ValueError(f"目标目录已有字幕，不能进入字幕补配: {fpath}")
+            resolved.append(matched)
+        if resolved:
+            return resolved
+        return [
+            self._resolve_target_candidate(
+                preview,
+                target_library_id=target_library_id,
+                target_folder_path=target_folder_path,
+            )
+        ]
+
+    @staticmethod
+    def _norm_tree_key(value: str) -> str:
+        """文件树匹配键：统一分隔符、小写、去扩展名。"""
+        normalized = str(value or "").replace("\\", "/").strip().lower()
+        normalized = os.path.splitext(normalized)[0]
+        return normalized.strip("/")
+
+    def _scan_target_audio_entries(self, folder_path: str) -> List[Dict[str, str]]:
+        """扫描本地目标目录的音频文件清单（相对路径 + 文件名），供树匹配路由。"""
+        root = Path(folder_path)
+        items: List[Dict[str, str]] = []
+        for file_path in root.rglob("*"):
+            try:
+                if not file_path.is_file():
+                    continue
+                if file_path.suffix.lower() not in self.subtitle_service.AUDIO_EXTENSIONS:
+                    continue
+                items.append(
+                    {
+                        "name": file_path.name,
+                        "relative_path": str(file_path.relative_to(root)).replace("\\", "/"),
+                    }
+                )
+            except OSError:
+                logger.debug("[字幕补配] 树匹配跳过不可访问条目: %s", file_path, exc_info=True)
+        return items
+
+    def _build_audio_key_index(self, audio_entries: List[Dict[str, str]]) -> Dict[str, set]:
+        rel_keys: set = set()
+        name_keys: set = set()
+        for item in audio_entries or []:
+            name = str(item.get("name") or "")
+            rel = str(item.get("relative_path") or "") or name
+            rel_key = self._norm_tree_key(rel)
+            name_key = self._norm_tree_key(name)
+            if rel_key:
+                rel_keys.add(rel_key)
+            if name_key:
+                name_keys.add(name_key)
+        return {"rel_keys": rel_keys, "name_keys": name_keys}
+
+    def _score_subtitle_against_audio_index(
+        self,
+        subtitle: Dict[str, Any],
+        key_index: Dict[str, set],
+    ) -> int:
+        """字幕 ↔ 目标音频索引打分：相对路径全匹配=2，仅文件名主干匹配=1。"""
+        rel = str(subtitle.get("relative_path") or "") or str(subtitle.get("name") or "")
+        name = str(subtitle.get("name") or "")
+        score = 0
+        rel_key = self._norm_tree_key(rel)
+        name_key = self._norm_tree_key(name)
+        if rel_key and rel_key in key_index.get("rel_keys", set()):
+            score = max(score, 2)
+        if name_key and name_key in key_index.get("name_keys", set()):
+            score = max(score, 1)
+        return score
+
+    def _route_subtitles_by_tree_match(
+        self,
+        source_subtitles: List[Dict[str, Any]],
+        target_candidates: List[Dict[str, Any]],
+    ) -> tuple[List[List[Dict[str, Any]]], List[Dict[str, Any]]]:
+        """字幕树 ↔ 音频树：按相对路径结构把每条字幕路由到最匹配的目标目录。
+
+        - 本地目标扫描其音频文件构建匹配索引；远程库目标无法廉价扫描，索引为空；
+        - 每条字幕分给得分最高的目标（并列取靠前选中的目标）；
+        - 全部未命中的字幕进入第一个选中目标，避免静默丢弃；
+        - 返回与 targets 对齐的字幕桶列表和路由明细（用于日志与前端展示）。
+        """
+        key_indexes: List[Dict[str, set]] = []
+        for candidate in target_candidates:
+            entries: List[Dict[str, str]] = []
+            lib_type = str(candidate.get("library_type") or "")
+            folder = str(candidate.get("folder_path") or "").strip()
+            if lib_type != "synology_filestation" and folder:
+                try:
+                    entries = self._scan_target_audio_entries(folder)
+                except Exception:
+                    logger.warning(
+                        "[字幕补配] 树匹配扫描目标音频失败: %s",
+                        folder,
+                        exc_info=True,
+                    )
+                    entries = []
+            key_indexes.append(self._build_audio_key_index(entries))
+
+        buckets: List[List[Dict[str, Any]]] = [[] for _ in target_candidates]
+        routing: List[Dict[str, Any]] = []
+        for subtitle in source_subtitles or []:
+            best_idx: Optional[int] = None
+            best_score = 0
+            for idx, key_index in enumerate(key_indexes):
+                score = self._score_subtitle_against_audio_index(subtitle, key_index)
+                if score > best_score:
+                    best_idx = idx
+                    best_score = score
+            matched = best_idx is not None
+            if best_idx is None:
+                best_idx = 0
+            buckets[best_idx].append(subtitle)
+            routing.append(
+                {
+                    "subtitle": str(subtitle.get("relative_path") or subtitle.get("name") or ""),
+                    "target_index": best_idx,
+                    "target_folder_path": str(
+                        (target_candidates[best_idx] or {}).get("folder_path") or ""
+                    ),
+                    "match_score": best_score,
+                    "matched": matched,
+                }
+            )
+        unmatched_count = sum(1 for item in routing if not item["matched"])
+        logger.info(
+            "[字幕补配] 字幕树↔音频树路由完成: targets=%s subtitles=%s matched=%s fallback=%s",
+            len(target_candidates),
+            len(routing),
+            len(routing) - unmatched_count,
+            unmatched_count,
+        )
+        return buckets, routing
+
+    async def _import_source_subset_to_candidate(
+        self,
+        *,
+        preview: Dict[str, Any],
+        source_subtitles: List[Dict[str, Any]],
+        target_candidate: Dict[str, Any],
+        use_filter_rules: bool = False,
+        subtitle_filter_rules: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """把一组来源字幕导入单个目标候选：空目录直接入库，否则进工作台等待人工配对。"""
+        if self._should_direct_import_to_empty_candidate(preview, target_candidate):
+            return await self._direct_import_source_subtitles_to_target(
+                source_subtitles=source_subtitles,
+                target_candidate=target_candidate,
+                use_filter_rules=use_filter_rules,
+                subtitle_filter_rules=subtitle_filter_rules,
+            )
+        return await self._create_manual_match_workbench(
+            source_subtitles=source_subtitles,
+            target_candidate=target_candidate,
+            use_filter_rules=use_filter_rules,
+            subtitle_filter_rules=subtitle_filter_rules,
+        )
+
+    def _normalize_subset_import_result(
+        self,
+        import_result: Dict[str, Any],
+        target_candidate: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """把工作台/直接入库结果统一为标准 import_result 形状。"""
+        if "awaiting_manual_match" in import_result:
+            return import_result
+        # 工作台分支：包装为与直接入库一致的结构
+        return {
+            "success": True,
+            "partial": False,
+            "error": None,
+            "download_files": import_result.get("staged_files", []),
+            "downloaded_count": int(import_result.get("downloaded_count") or 0),
+            "filtered_out_count": int(import_result.get("filtered_out_count") or 0),
+            "content_deduped_count": int(import_result.get("content_deduped_count") or 0),
+            "content_deduped_files": import_result.get("content_deduped_files", []),
+            "renamed_collision_files": import_result.get("renamed_collision_files", []),
+            "written_files": [
+                {
+                    "subtitle_name": item.get("name") or "",
+                    "output_name": item.get("name") or "",
+                    "match_type": "raw_workbench_stage",
+                    "match_score": 0,
+                }
+                for item in (import_result.get("staged_files") or [])
+            ],
+            "skipped_files": [],
+            "write_errors": [],
+            "awaiting_manual_match": True,
+            "existing_subtitle_count": int(target_candidate.get("existing_subtitle_count") or 0),
+            "subtitle_dir": import_result.get("subtitle_dir") or "",
+            "subtitle_library_id": import_result.get("library_id") or "",
+            "linked_workbench_root_dir": import_result.get("workspace_root_dir") or "",
+            "match_result": {
+                "matches": [],
+                "matched_group_count": 0,
+                "matched_subtitle_count": 0,
+                "unmatched_audio": [],
+                "unmatched_subtitles": [],
+            },
+        }
+
+    async def _dispatch_multi_target_import(
+        self,
+        *,
+        preview: Dict[str, Any],
+        source_subtitles: List[Dict[str, Any]],
+        target_candidates: List[Dict[str, Any]],
+        use_filter_rules: bool = False,
+        subtitle_filter_rules: Optional[List[Dict[str, Any]]] = None,
+        import_reason: str,
+        source_mode: str,
+        source_path: str = "",
+        source_rjcode: str = "",
+        target_rjcode: str = "",
+        kikoeru_checked_rjcode: str = "",
+        kikoeru_has_work: bool = False,
+    ) -> Dict[str, Any]:
+        """字幕树↔音频树多目标分发：路由字幕子集 → 每个目标独立入库/建工作台任务。"""
+        buckets, routing = self._route_subtitles_by_tree_match(source_subtitles, target_candidates)
+
+        aggregated_written: List[Dict[str, Any]] = []
+        aggregated_skipped: List[Dict[str, Any]] = []
+        write_errors: List[Dict[str, Any]] = []
+        target_summaries: List[Dict[str, Any]] = []
+        registered_tasks: List[Task] = []
+        total_filtered = 0
+        total_deduped = 0
+        any_success = False
+        any_partial = False
+
+        for target_candidate, subset in zip(target_candidates, buckets):
+            if not subset:
+                continue
+            raw_result = await self._import_source_subset_to_candidate(
+                preview=preview,
+                source_subtitles=subset,
+                target_candidate=target_candidate,
+                use_filter_rules=use_filter_rules,
+                subtitle_filter_rules=subtitle_filter_rules,
+            )
+            import_result = self._normalize_subset_import_result(raw_result, target_candidate)
+            any_success = any_success or bool(import_result.get("success"))
+            any_partial = any_partial or bool(import_result.get("partial"))
+            total_filtered += int(import_result.get("filtered_out_count") or 0)
+            total_deduped += int(import_result.get("content_deduped_count") or 0)
+            aggregated_written.extend(import_result.get("written_files") or [])
+            aggregated_skipped.extend(import_result.get("skipped_files") or [])
+            write_errors.extend(import_result.get("write_errors") or [])
+
+            task = None
+            if import_result.get("success") and import_result.get("awaiting_manual_match"):
+                task = await self._register_import_task(
+                    source_mode=source_mode,
+                    source_path=source_path or str(preview.get("source_path") or ""),
+                    source_rjcode=source_rjcode or str(preview.get("source_rjcode", "")),
+                    target_rjcode=target_rjcode or str(preview.get("target_rjcode", "")),
+                    target_candidate=target_candidate,
+                    import_result=import_result,
+                    import_reason=import_reason,
+                    kikoeru_checked_rjcode=kikoeru_checked_rjcode or str(preview.get("kikoeru_checked_rjcode", "")),
+                    kikoeru_has_work=bool(kikoeru_has_work or preview.get("kikoeru_has_work")),
+                )
+                registered_tasks.append(task)
+
+            target_summaries.append(
+                {
+                    "library_id": str(target_candidate.get("library_id") or ""),
+                    "folder_path": str(target_candidate.get("folder_path") or ""),
+                    "subtitle_count": len(subset),
+                    "success": bool(import_result.get("success")),
+                    "awaiting_manual_match": bool(import_result.get("awaiting_manual_match")),
+                    "task_id": task.id if task is not None else None,
+                }
+            )
+
+        aggregated = {
+            "success": any_success,
+            "partial": any_partial,
+            "error": None if any_success else "所有目标均未成功导入",
+            "multi_target": True,
+            "target_count": len(target_candidates),
+            "targets": target_summaries,
+            "routing": routing,
+            "download_files": aggregated_written,
+            "downloaded_count": len(aggregated_written),
+            "filtered_out_count": total_filtered,
+            "content_deduped_count": total_deduped,
+            "content_deduped_files": [],
+            "renamed_collision_files": [],
+            "written_files": aggregated_written,
+            "skipped_files": aggregated_skipped,
+            "write_errors": write_errors,
+            "failed_files": [],
+            "awaiting_manual_match": True,
+            "match_result": {
+                "matches": [],
+                "matched_group_count": 0,
+                "matched_subtitle_count": 0,
+                "unmatched_audio": [],
+                "unmatched_subtitles": [],
+            },
+        }
+
+        first_task = registered_tasks[0] if registered_tasks else None
+        return {
+            "success": any_success,
+            "preview": preview,
+            "target_candidate": target_candidates[0],
+            "import_result": aggregated,
+            "task": (
+                {
+                    "id": first_task.id,
+                    "folder_path": first_task.task_metadata.get("folder_path", ""),
+                    "library_id": first_task.task_metadata.get("library_id", ""),
+                    "source_mode": first_task.task_metadata.get("source_mode", ""),
+                }
+                if first_task is not None
+                else None
+            ),
+            "tasks": [
+                {
+                    "id": item.id,
+                    "folder_path": item.task_metadata.get("folder_path", ""),
+                    "library_id": item.task_metadata.get("library_id", ""),
+                    "source_mode": item.task_metadata.get("source_mode", ""),
+                }
+                for item in registered_tasks
+            ],
+        }
+
     def _build_progress_log(self, summary: str, detail_lines: List[str]) -> List[Dict[str, Any]]:
         now = datetime.now().isoformat()
         logs = []
@@ -3218,6 +3677,7 @@ class LinkedSubtitleImportService:
         preferred_library_id: Optional[str] = None,
         target_library_id: Optional[str] = None,
         target_folder_path: Optional[str] = None,
+        target_folders: Optional[List[Dict[str, Any]]] = None,
         prepared_preview: Optional[Dict[str, Any]] = None,
         use_filter_rules: bool = False,
         subtitle_filter_rules: Optional[List[Dict[str, Any]]] = None,
@@ -3252,6 +3712,7 @@ class LinkedSubtitleImportService:
                     preferred_library_id=preferred_library_id,
                     target_library_id=target_library_id,
                     target_folder_path=target_folder_path,
+                    target_folders=target_folders,
                     use_filter_rules=use_filter_rules,
                     subtitle_filter_rules=subtitle_filter_rules,
                     import_reason="手动字幕补配导入（目录无压缩包降级）",
@@ -3280,10 +3741,11 @@ class LinkedSubtitleImportService:
                     or "压缩包内未发现可导入的字幕文件"
                 )
             )
-        target_candidate = self._resolve_target_candidate(
+        target_candidates = self._normalize_selected_targets(
             preview,
             target_library_id=target_library_id,
             target_folder_path=target_folder_path,
+            target_folders=target_folders,
         )
 
         source_subtitles: List[Dict[str, Any]] = []
@@ -3305,6 +3767,19 @@ class LinkedSubtitleImportService:
                 temp_dir, source_subtitles, _probe_result = await self._collect_archive_subtitles_to_stage(
                     archive_path, full_extract=True
                 )
+            # 多目标：字幕树↔音频树按相对路径自动配对分发（任务在各目标内独立注册）
+            if len(target_candidates) > 1:
+                return await self._dispatch_multi_target_import(
+                    preview=preview,
+                    source_subtitles=source_subtitles,
+                    target_candidates=target_candidates,
+                    use_filter_rules=use_filter_rules,
+                    subtitle_filter_rules=subtitle_filter_rules,
+                    import_reason=import_reason or "手动压缩包字幕补配导入（多目标）",
+                    source_mode=source_mode,
+                    source_path=str(archive_path),
+                )
+            target_candidate = target_candidates[0]
             if self._should_direct_import_to_empty_candidate(preview, target_candidate):
                 import_result = await self._direct_import_source_subtitles_to_target(
                     source_subtitles=source_subtitles,
@@ -3391,6 +3866,7 @@ class LinkedSubtitleImportService:
         preferred_library_id: Optional[str] = None,
         target_library_id: Optional[str] = None,
         target_folder_path: Optional[str] = None,
+        target_folders: Optional[List[Dict[str, Any]]] = None,
         use_filter_rules: bool = False,
         subtitle_filter_rules: Optional[List[Dict[str, Any]]] = None,
         import_reason: str = "手动字幕文件夹补配导入",
@@ -3402,15 +3878,30 @@ class LinkedSubtitleImportService:
             preferred_library_id=preferred_library_id,
             source_rjcode_hint=source_rjcode_hint,
         )
-        target_candidate = self._resolve_target_candidate(
+        target_candidates = self._normalize_selected_targets(
             preview,
             target_library_id=target_library_id,
             target_folder_path=target_folder_path,
+            target_folders=target_folders,
         )
 
         source_dir = preview.get("source_subtitle_dir") or folder_path
         source_root = folder_path
         source_subtitles = self._scan_source_subtitles(source_dir, source_root=source_root)
+
+        # 多目标：字幕树↔音频树按相对路径自动配对分发，一次导入覆盖全部目标
+        if len(target_candidates) > 1:
+            return await self._dispatch_multi_target_import(
+                preview=preview,
+                source_subtitles=source_subtitles,
+                target_candidates=target_candidates,
+                use_filter_rules=use_filter_rules,
+                subtitle_filter_rules=subtitle_filter_rules,
+                import_reason=import_reason or "手动字幕文件夹补配导入（多目标）",
+                source_mode=source_mode,
+            )
+
+        target_candidate = target_candidates[0]
         if self._should_direct_import_to_empty_candidate(preview, target_candidate):
             import_result = await self._direct_import_source_subtitles_to_target(
                 source_subtitles=source_subtitles,
