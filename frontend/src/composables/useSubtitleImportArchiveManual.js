@@ -1,5 +1,5 @@
 import { ref, computed, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { subtitleImportApi, configApi } from '../api'
 
 /**
@@ -52,35 +52,83 @@ export function useSubtitleImportArchiveManual({
     Boolean(manualArchivePath.value.trim() || defaultSubtitleSourcePath)
   )
 
+  // 勾选标识：candidateKey(library_id::folder_path) 在关联作品场景可能出现重复候选，
+  // 追加候选列表索引保证唯一，否则 Set 勾选会同时命中重复项、无法只选其一。
+  function targetKeyOf (candidate) {
+    const list = manualArchivePreview.value?.candidates || []
+    const index = list.indexOf(candidate)
+    return `${index}::${candidateKey(candidate)}`
+  }
+
+  function isManualTargetSelected (candidate) {
+    return manualTargetSelections.value.includes(targetKeyOf(candidate))
+  }
+
+  // 显式「来源子树 ↔ 目标」映射：{ 来源顶层目录名: targetKey | '' }，'' 表示交给自动匹配
+  const manualTargetMappings = ref({})
+
+  // 来源字幕按相对路径的顶层段分组（如 "A/xx.srt" → "A"），供映射 UI 展示
+  const manualSourceGroups = computed(() => {
+    const entries = manualArchivePreview.value?.subtitle_entries || []
+    const groups = new Set()
+    for (const entry of entries) {
+      const rel = String(entry || '').replace(/\\/g, '/').replace(/^\/+/, '')
+      const top = rel.split('/')[0]
+      if (top && rel.includes('/')) groups.add(top)
+    }
+    return [...groups].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'))
+  })
+
+  const hasManualSourceGroups = computed(() => manualSourceGroups.value.length >= 2)
+
+  function setManualTargetMapping (group, targetKey) {
+    manualTargetMappings.value = { ...manualTargetMappings.value, [group]: targetKey || '' }
+  }
+
+  // 把映射表解析为后端 explicit_routes：[{ source_prefix, library_id, folder_path }]
+  function buildManualTargetRoutes () {
+    const candidates = manualArchivePreview.value?.candidates || []
+    const routes = []
+    for (const [group, key] of Object.entries(manualTargetMappings.value)) {
+      if (!group || !key) continue
+      const candidate = candidates.find(item => targetKeyOf(item) === key)
+      if (!candidate) continue
+      routes.push({
+        source_prefix: group,
+        library_id: candidate.library_id,
+        folder_path: candidate.folder_path
+      })
+    }
+    return routes
+  }
+
   const selectedManualCandidates = computed(() => {
     const candidates = manualArchivePreview.value?.candidates || []
-    return candidates.filter(
-      candidate =>
-        candidate?.ready_for_import &&
-        manualTargetSelections.value.includes(candidateKey(candidate))
-    )
+    // 已有字幕的候选也允许勾选（导入时确认后走"重新匹配"），不再硬性过滤
+    return candidates.filter(candidate => candidate && isManualTargetSelected(candidate))
   })
 
   const canExecuteManualArchiveImport = computed(() => {
     if (!manualArchivePreview.value) return false
-    const readyCount = Number(manualArchivePreview.value.ready_candidate_count || 0)
-    if (readyCount <= 0) return false
     return selectedManualCandidates.value.length > 0
   })
 
   watch(manualArchivePreview, (preview) => {
     if (!preview) {
       manualTargetSelections.value = []
+      manualTargetMappings.value = {}
       return
     }
     // 默认全选可导入目标；多目标场景下用户可在预检结果中增删勾选
     manualTargetSelections.value = (preview.candidates || [])
       .filter(candidate => candidate?.ready_for_import)
-      .map(candidate => candidateKey(candidate))
+      .map(candidate => targetKeyOf(candidate))
+    // 新预检重置显式映射
+    manualTargetMappings.value = {}
   }, { immediate: true })
 
   function toggleManualTargetSelection (candidate) {
-    const key = candidateKey(candidate)
+    const key = targetKeyOf(candidate)
     const next = new Set(manualTargetSelections.value)
     if (next.has(key)) {
       next.delete(key)
@@ -100,7 +148,8 @@ export function useSubtitleImportArchiveManual({
 
   function clearManualArchivePreview() {
     manualArchivePreview.value = null
-    manualCandidateSelection.value = ''
+    manualTargetSelections.value = []
+    manualTargetMappings.value = {}
     manualDirectoryArchives.value = []
     manualDirectorySource.value = ''
     manualDirectoryLooseSubtitleCount.value = 0
@@ -219,6 +268,23 @@ export function useSubtitleImportArchiveManual({
     const candidates = selectedManualCandidates.value
     if (!candidates.length) return false
 
+    // 已有字幕的目标：提示后允许"重新匹配"（进入工作台重新配对，不会静默覆盖）
+    const existingCandidates = candidates.filter(candidate => !candidate?.ready_for_import)
+    if (existingCandidates.length > 0) {
+      const names = existingCandidates
+        .map(candidate => candidate.folder_path || candidate.library_id)
+        .join('、')
+      try {
+        await ElMessageBox.confirm(
+          `以下目标目录已存在字幕文件：${names}。继续导入将进入工作台重新配对，可能覆盖同名字幕。是否继续？`,
+          '重新匹配确认',
+          { confirmButtonText: '继续导入', cancelButtonText: '取消', type: 'warning' }
+        )
+      } catch {
+        return false
+      }
+    }
+
     // 导入一律使用预检确认过的实际来源路径（压缩包文件或散装字幕目录）
     const path = String(manualArchivePreview.value?.source_path || '').trim() || resolveManualPreviewTarget()
     if (!path) return false
@@ -236,6 +302,7 @@ export function useSubtitleImportArchiveManual({
       // 散装字幕目录（preview.mode === 'subtitle_folder'）走 folder 导入 API
       const isFolderMode = manualArchivePreview.value?.mode === 'subtitle_folder'
       // 多目标：把勾选的全部目标交给后端做字幕树↔音频树路由分发
+      const targetRoutes = buildManualTargetRoutes()
       const requestOptions = {
         targetLibraryId: candidates[0].library_id,
         targetFolderPath: candidates[0].folder_path,
@@ -243,6 +310,8 @@ export function useSubtitleImportArchiveManual({
           library_id: candidate.library_id,
           folder_path: candidate.folder_path
         })),
+        targetRoutes: targetRoutes.length > 0 ? targetRoutes : undefined,
+        allowExisting: existingCandidates.length > 0,
         useFilterRules: filterOptions.useFilterRules,
         subtitleFilterRules: filterOptions.subtitleFilterRules
       }
@@ -277,8 +346,13 @@ export function useSubtitleImportArchiveManual({
     manualArchiveImporting,
     manualArchivePreview,
     manualTargetSelections,
+    manualSourceGroups,
+    hasManualSourceGroups,
+    manualTargetMappings,
+    setManualTargetMapping,
     selectedManualCandidates,
     canExecuteManualArchiveImport,
+    isManualTargetSelected,
     manualDirectoryArchives,
     manualDirectorySource,
     manualDirectoryLooseSubtitleCount,

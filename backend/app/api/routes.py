@@ -16973,6 +16973,8 @@ class LinkedSubtitleArchiveImportRequest(BaseModel):
     target_library_id: Optional[str] = None
     target_folder_path: Optional[str] = None
     target_folders: Optional[List[dict]] = []
+    target_routes: Optional[List[dict]] = []
+    allow_existing: bool = False
     use_filter_rules: bool = False
     subtitle_filter_rules: List[dict] = []
 
@@ -16983,6 +16985,8 @@ class LinkedSubtitleFolderImportRequest(BaseModel):
     target_library_id: Optional[str] = None
     target_folder_path: Optional[str] = None
     target_folders: Optional[List[dict]] = []
+    target_routes: Optional[List[dict]] = []
+    allow_existing: bool = False
     source_rjcode_hint: Optional[str] = None
     use_filter_rules: bool = False
     subtitle_filter_rules: List[dict] = []
@@ -18030,6 +18034,8 @@ async def execute_linked_subtitle_archive_import(request: LinkedSubtitleArchiveI
             target_library_id=request.target_library_id,
             target_folder_path=request.target_folder_path,
             target_folders=request.target_folders,
+            target_routes=request.target_routes,
+            allow_existing=bool(request.allow_existing),
             use_filter_rules=request.use_filter_rules,
             subtitle_filter_rules=request.subtitle_filter_rules,
             allow_directory=True,
@@ -18105,6 +18111,8 @@ async def execute_linked_subtitle_folder_import(
             target_library_id=payload.target_library_id,
             target_folder_path=payload.target_folder_path,
             target_folders=payload.target_folders,
+            target_routes=payload.target_routes,
+            allow_existing=bool(payload.allow_existing),
             source_rjcode_hint=payload.source_rjcode_hint,
             use_filter_rules=payload.use_filter_rules,
             subtitle_filter_rules=payload.subtitle_filter_rules,

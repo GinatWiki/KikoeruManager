@@ -437,20 +437,32 @@
                     :key="candidateKey(candidate)"
                     type="button"
                     class="subtitle-candidate-card"
-                    :class="{ 'is-selected': manualTargetSelections.includes(candidateKey(candidate)) }"
+                    :class="{
+                      'is-selected': isManualTargetSelected(candidate),
+                      'is-existing': !candidate.ready_for_import
+                    }"
+                    :title="candidate.ready_for_import
+                      ? candidate.folder_path
+                      : `该目录已有 ${candidate.existing_subtitle_count ?? 0} 个字幕文件，勾选后导入将进入工作台重新配对`"
                     @click="toggleManualTargetSelection(candidate)"
                   >
                     <span
                       class="subtitle-candidate-radio"
-                      :class="{ 'is-checked': manualTargetSelections.includes(candidateKey(candidate)) }"
+                      :class="{ 'is-checked': isManualTargetSelected(candidate) }"
                     >
                       <span
-                        v-if="manualTargetSelections.includes(candidateKey(candidate))"
+                        v-if="isManualTargetSelected(candidate)"
                         class="subtitle-candidate-radio-dot"
                       ></span>
                     </span>
                     <div class="subtitle-candidate-body">
-                      <h4 class="subtitle-candidate-name">{{ candidate.folder_name || candidate.folder_path }}</h4>
+                      <h4 class="subtitle-candidate-name">
+                        {{ candidate.folder_name || candidate.folder_path }}
+                        <span
+                          v-if="!candidate.ready_for_import"
+                          class="lib-chip lib-chip-warning"
+                        >已有字幕，可重新匹配</span>
+                      </h4>
                       <div class="subtitle-candidate-chips">
                         <span class="lib-chip lib-chip-info">{{ candidate.library_name }}</span>
                         <span
@@ -466,6 +478,49 @@
                       <div class="subtitle-candidate-path mono">{{ candidate.folder_path }}</div>
                     </div>
                   </button>
+                </div>
+              </div>
+            </article>
+
+            <!-- 来源子树 ↔ 目标 显式映射：来源含多个顶层子目录且勾选了多个目标时显示 -->
+            <article
+              v-if="hasManualSourceGroups && selectedManualCandidates.length >= 2"
+              class="subtitle-info-card"
+            >
+              <div class="subtitle-info-card-header">
+                <ArrowRight class="w-4 h-4 text-slate-400" />
+                <h3>来源子目录 ↔ 目标映射</h3>
+                <span class="lib-chip lib-chip-info ml-auto">
+                  {{ manualSourceGroups.length }} 组
+                </span>
+              </div>
+              <div class="subtitle-info-card-body">
+                <p class="subtitle-mapping-hint">
+                  未指定的来源子目录将按字幕树↔音频树自动匹配；指定后该子目录下的全部字幕固定导入所选目标。
+                </p>
+                <div class="subtitle-mapping-list">
+                  <div
+                    v-for="group in manualSourceGroups"
+                    :key="group"
+                    class="subtitle-mapping-row"
+                  >
+                    <span class="subtitle-mapping-source mono">{{ group }}</span>
+                    <ArrowRight class="subtitle-mapping-arrow w-3.5 h-3.5" />
+                    <select
+                      class="subtitle-mapping-select"
+                      :value="manualTargetMappings[group] || ''"
+                      @change="setManualTargetMapping(group, $event.target.value)"
+                    >
+                      <option value="">自动匹配</option>
+                      <option
+                        v-for="candidate in selectedManualCandidates"
+                        :key="candidateKey(candidate)"
+                        :value="candidateKeyOf(candidate)"
+                      >
+                        {{ candidate.folder_name || candidate.folder_path }}
+                      </option>
+                    </select>
+                  </div>
                 </div>
               </div>
             </article>
@@ -1035,8 +1090,13 @@ const {
   manualArchiveImporting,
   manualArchivePreview,
   manualTargetSelections,
+  manualSourceGroups,
+  hasManualSourceGroups,
+  manualTargetMappings,
+  setManualTargetMapping,
   selectedManualCandidates,
   canExecuteManualArchiveImport,
+  isManualTargetSelected,
   manualDirectoryArchives,
   manualDirectorySource,
   manualSelectedArchive,
@@ -1054,6 +1114,12 @@ const {
   openImportedTask,
   candidateKey
 })
+
+// 映射下拉框的 option value：与 composable 的勾选 key 保持一致（索引+候选键，防重复候选冲突）
+function candidateKeyOf (candidate) {
+  const list = manualArchivePreview.value?.candidates || []
+  return `${list.indexOf(candidate)}::${candidateKey(candidate)}`
+}
 
 const pendingListPage = ref(1)
 const pendingListPageDirection = ref('next')
@@ -1985,6 +2051,68 @@ button:disabled { cursor: not-allowed; }
   background: rgba(15, 23, 42, 0.035);
   box-shadow: none;
 }
+.subtitle-candidate-card.is-existing {
+  border-style: dashed;
+  border-color: var(--subtitle-border);
+}
+.subtitle-candidate-name .lib-chip-warning {
+  margin-left: 6px;
+  vertical-align: 1px;
+}
+
+/* ==============================================================
+ * 来源子树 ↔ 目标 映射
+ * ============================================================ */
+.subtitle-mapping-hint {
+  margin: 0 0 10px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--subtitle-text-soft);
+}
+.subtitle-mapping-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.subtitle-mapping-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.subtitle-mapping-source {
+  flex: 0 0 auto;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', ui-monospace, monospace;
+  color: var(--subtitle-text);
+  padding: 5px 9px;
+  border: 1px solid var(--subtitle-border);
+  border-radius: 8px;
+  background: var(--subtitle-panel);
+}
+.subtitle-mapping-arrow {
+  flex-shrink: 0;
+  color: var(--subtitle-text-soft);
+}
+.subtitle-mapping-select {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--subtitle-border-strong);
+  border-radius: 8px;
+  background: var(--subtitle-panel);
+  color: var(--subtitle-text);
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+}
+.subtitle-mapping-select:focus {
+  border-color: var(--subtitle-success);
+}
 .subtitle-candidate-radio {
   flex-shrink: 0;
   width: 16px;
@@ -2314,6 +2442,20 @@ button:disabled { cursor: not-allowed; }
 :global(html.kikoerumanager-dark) .subtitle-candidate-card.is-selected {
   background: var(--subtitle-panel-muted);
   border-color: var(--subtitle-border-strong);
+  color: var(--subtitle-text);
+}
+
+:global(html.kikoerumanager-dark) .subtitle-mapping-source,
+:global(html.kikoerumanager-dark) .subtitle-mapping-select,
+:global(body.kikoerumanager-dark .subtitle-mapping-source),
+:global(body.kikoerumanager-dark .subtitle-mapping-select) {
+  background: var(--subtitle-panel);
+  border-color: var(--subtitle-border);
+  color: var(--subtitle-text);
+}
+
+:global(html.kikoerumanager-dark) .subtitle-mapping-select option {
+  background: var(--subtitle-panel);
   color: var(--subtitle-text);
 }
 

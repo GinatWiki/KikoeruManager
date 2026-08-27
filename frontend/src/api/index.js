@@ -2468,6 +2468,8 @@ export const subtitleImportApi = {
       target_library_id: options.targetLibraryId || undefined,
       target_folder_path: options.targetFolderPath || undefined,
       target_folders: Array.isArray(options.targetFolders) ? options.targetFolders : undefined,
+      target_routes: Array.isArray(options.targetRoutes) ? options.targetRoutes : undefined,
+      allow_existing: options.allowExisting ?? false,
       use_filter_rules: options.useFilterRules ?? false,
       subtitle_filter_rules: options.subtitleFilterRules || []
     }, {
@@ -2494,6 +2496,8 @@ export const subtitleImportApi = {
       target_library_id: options.targetLibraryId || undefined,
       target_folder_path: options.targetFolderPath || undefined,
       target_folders: Array.isArray(options.targetFolders) ? options.targetFolders : undefined,
+      target_routes: Array.isArray(options.targetRoutes) ? options.targetRoutes : undefined,
+      allow_existing: options.allowExisting ?? false,
       source_rjcode_hint: options.sourceRJCodeHint || undefined,
       use_filter_rules: options.useFilterRules ?? false,
       subtitle_filter_rules: options.subtitleFilterRules || []

@@ -3124,6 +3124,7 @@ class LinkedSubtitleImportService:
         target_library_id: Optional[str] = None,
         target_folder_path: Optional[str] = None,
         target_folders: Optional[List[Dict[str, Any]]] = None,
+        allow_existing: bool = False,
     ) -> List[Dict[str, Any]]:
         """把请求中的目标（单个或多个）解析为候选列表；至少返回一个可用目标。
 
@@ -3156,7 +3157,12 @@ class LinkedSubtitleImportService:
             if matched is None:
                 raise ValueError(f"指定的目标目录不在当前候选列表中: {fpath}")
             if not bool(matched.get("ready_for_import")):
-                raise ValueError(f"目标目录已有字幕，不能进入字幕补配: {fpath}")
+                if not allow_existing:
+                    raise ValueError(f"目标目录已有字幕，不能进入字幕补配: {fpath}")
+                logger.warning(
+                    "[字幕补配] 目标目录已有字幕，用户确认后允许重新匹配: %s",
+                    fpath,
+                )
             resolved.append(matched)
         if resolved:
             return resolved
@@ -3167,6 +3173,41 @@ class LinkedSubtitleImportService:
                 target_folder_path=target_folder_path,
             )
         ]
+
+    @staticmethod
+    def _resolve_explicit_routes(
+        target_candidates: List[Dict[str, Any]],
+        target_routes: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """把前端的显式映射（来源子树 → 目标目录）解析为内部路由规则。
+
+        输入项形如 {"source_prefix": "A", "library_id": "...", "folder_path": "..."}；
+        输出形如 [{"source_prefix": "a", "target_index": 0}]，目标必须存在于已选候选中。
+        按前缀长度降序排序，保证更长的前缀（如 "a/b"）优先于其父前缀（如 "a"）。
+        """
+        resolved: List[Dict[str, Any]] = []
+        seen_prefixes: set = set()
+        for item in target_routes or []:
+            prefix = str((item or {}).get("source_prefix") or "").strip().lower().strip("/")
+            if not prefix or prefix in seen_prefixes:
+                continue
+            lid = str((item or {}).get("library_id") or "").strip()
+            fpath = str((item or {}).get("folder_path") or "").strip()
+            matched_index = next(
+                (
+                    idx
+                    for idx, candidate in enumerate(target_candidates)
+                    if str(candidate.get("library_id") or "") == lid
+                    and os.path.normcase(str(candidate.get("folder_path") or "")) == os.path.normcase(fpath)
+                ),
+                None,
+            )
+            if matched_index is None:
+                raise ValueError(f"显式映射的目标目录不在已选目标中: {fpath}")
+            seen_prefixes.add(prefix)
+            resolved.append({"source_prefix": prefix, "target_index": matched_index})
+        resolved.sort(key=lambda entry: len(entry["source_prefix"]), reverse=True)
+        return resolved
 
     @staticmethod
     def _norm_tree_key(value: str) -> str:
@@ -3230,10 +3271,14 @@ class LinkedSubtitleImportService:
         self,
         source_subtitles: List[Dict[str, Any]],
         target_candidates: List[Dict[str, Any]],
+        explicit_routes: Optional[List[Dict[str, Any]]] = None,
     ) -> tuple[List[List[Dict[str, Any]]], List[Dict[str, Any]]]:
         """字幕树 ↔ 音频树：按相对路径结构把每条字幕路由到最匹配的目标目录。
 
-        - 本地目标扫描其音频文件构建匹配索引；远程库目标无法廉价扫描，索引为空；
+        - 显式路由（用户手动指定的 来源子树→目标 映射）优先命中：相对路径等于
+          source_prefix 或位于其子树内（rel == prefix 或 rel.startswith(prefix + "/")）；
+        - 其余字幕按音频索引自动打分：本地目标扫描其音频文件构建匹配索引，
+          远程库目标无法廉价扫描，索引为空；
         - 每条字幕分给得分最高的目标（并列取靠前选中的目标）；
         - 全部未命中的字幕进入第一个选中目标，避免静默丢弃；
         - 返回与 targets 对齐的字幕桶列表和路由明细（用于日志与前端展示）。
@@ -3258,14 +3303,28 @@ class LinkedSubtitleImportService:
         buckets: List[List[Dict[str, Any]]] = [[] for _ in target_candidates]
         routing: List[Dict[str, Any]] = []
         for subtitle in source_subtitles or []:
+            rel = str(subtitle.get("relative_path") or "") or str(subtitle.get("name") or "")
+            rel_norm = rel.replace("\\", "/").strip().lower().strip("/")
             best_idx: Optional[int] = None
             best_score = 0
-            for idx, key_index in enumerate(key_indexes):
-                score = self._score_subtitle_against_audio_index(subtitle, key_index)
-                if score > best_score:
-                    best_idx = idx
-                    best_score = score
-            matched = best_idx is not None
+            matched = False
+
+            # 1) 显式映射优先：命中来源前缀即直接分配，不再参与自动打分
+            for route in explicit_routes or []:
+                prefix = route.get("source_prefix") or ""
+                if rel_norm == prefix or rel_norm.startswith(f"{prefix}/"):
+                    best_idx = int(route.get("target_index") or 0)
+                    matched = True
+                    break
+
+            # 2) 自动打分：相对路径全匹配=2，仅文件名主干匹配=1
+            if best_idx is None:
+                for idx, key_index in enumerate(key_indexes):
+                    score = self._score_subtitle_against_audio_index(subtitle, key_index)
+                    if score > best_score:
+                        best_idx = idx
+                        best_score = score
+                matched = best_idx is not None
             if best_idx is None:
                 best_idx = 0
             buckets[best_idx].append(subtitle)
@@ -3278,14 +3337,17 @@ class LinkedSubtitleImportService:
                     ),
                     "match_score": best_score,
                     "matched": matched,
+                    "explicit": bool(explicit_routes) and matched and best_score == 0,
                 }
             )
         unmatched_count = sum(1 for item in routing if not item["matched"])
+        explicit_count = sum(1 for item in routing if item.get("explicit"))
         logger.info(
-            "[字幕补配] 字幕树↔音频树路由完成: targets=%s subtitles=%s matched=%s fallback=%s",
+            "[字幕补配] 字幕树↔音频树路由完成: targets=%s subtitles=%s matched=%s explicit=%s fallback=%s",
             len(target_candidates),
             len(routing),
             len(routing) - unmatched_count,
+            explicit_count,
             unmatched_count,
         )
         return buckets, routing
@@ -3373,9 +3435,12 @@ class LinkedSubtitleImportService:
         target_rjcode: str = "",
         kikoeru_checked_rjcode: str = "",
         kikoeru_has_work: bool = False,
+        explicit_routes: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """字幕树↔音频树多目标分发：路由字幕子集 → 每个目标独立入库/建工作台任务。"""
-        buckets, routing = self._route_subtitles_by_tree_match(source_subtitles, target_candidates)
+        buckets, routing = self._route_subtitles_by_tree_match(
+            source_subtitles, target_candidates, explicit_routes=explicit_routes
+        )
 
         aggregated_written: List[Dict[str, Any]] = []
         aggregated_skipped: List[Dict[str, Any]] = []
@@ -3678,6 +3743,8 @@ class LinkedSubtitleImportService:
         target_library_id: Optional[str] = None,
         target_folder_path: Optional[str] = None,
         target_folders: Optional[List[Dict[str, Any]]] = None,
+        target_routes: Optional[List[Dict[str, Any]]] = None,
+        allow_existing: bool = False,
         prepared_preview: Optional[Dict[str, Any]] = None,
         use_filter_rules: bool = False,
         subtitle_filter_rules: Optional[List[Dict[str, Any]]] = None,
@@ -3713,6 +3780,8 @@ class LinkedSubtitleImportService:
                     target_library_id=target_library_id,
                     target_folder_path=target_folder_path,
                     target_folders=target_folders,
+                    target_routes=target_routes,
+                    allow_existing=allow_existing,
                     use_filter_rules=use_filter_rules,
                     subtitle_filter_rules=subtitle_filter_rules,
                     import_reason="手动字幕补配导入（目录无压缩包降级）",
@@ -3746,6 +3815,7 @@ class LinkedSubtitleImportService:
             target_library_id=target_library_id,
             target_folder_path=target_folder_path,
             target_folders=target_folders,
+            allow_existing=allow_existing,
         )
 
         source_subtitles: List[Dict[str, Any]] = []
@@ -3767,8 +3837,9 @@ class LinkedSubtitleImportService:
                 temp_dir, source_subtitles, _probe_result = await self._collect_archive_subtitles_to_stage(
                     archive_path, full_extract=True
                 )
-            # 多目标：字幕树↔音频树按相对路径自动配对分发（任务在各目标内独立注册）
-            if len(target_candidates) > 1:
+            # 多目标或存在显式映射：字幕树↔音频树路由分发（任务在各目标内独立注册）
+            explicit_routes = self._resolve_explicit_routes(target_candidates, target_routes)
+            if len(target_candidates) > 1 or explicit_routes:
                 return await self._dispatch_multi_target_import(
                     preview=preview,
                     source_subtitles=source_subtitles,
@@ -3778,6 +3849,7 @@ class LinkedSubtitleImportService:
                     import_reason=import_reason or "手动压缩包字幕补配导入（多目标）",
                     source_mode=source_mode,
                     source_path=str(archive_path),
+                    explicit_routes=explicit_routes,
                 )
             target_candidate = target_candidates[0]
             if self._should_direct_import_to_empty_candidate(preview, target_candidate):
@@ -3867,6 +3939,8 @@ class LinkedSubtitleImportService:
         target_library_id: Optional[str] = None,
         target_folder_path: Optional[str] = None,
         target_folders: Optional[List[Dict[str, Any]]] = None,
+        target_routes: Optional[List[Dict[str, Any]]] = None,
+        allow_existing: bool = False,
         use_filter_rules: bool = False,
         subtitle_filter_rules: Optional[List[Dict[str, Any]]] = None,
         import_reason: str = "手动字幕文件夹补配导入",
@@ -3883,14 +3957,16 @@ class LinkedSubtitleImportService:
             target_library_id=target_library_id,
             target_folder_path=target_folder_path,
             target_folders=target_folders,
+            allow_existing=allow_existing,
         )
 
         source_dir = preview.get("source_subtitle_dir") or folder_path
         source_root = folder_path
         source_subtitles = self._scan_source_subtitles(source_dir, source_root=source_root)
 
-        # 多目标：字幕树↔音频树按相对路径自动配对分发，一次导入覆盖全部目标
-        if len(target_candidates) > 1:
+        # 多目标或存在显式映射：字幕树↔音频树路由分发，一次导入覆盖全部目标
+        explicit_routes = self._resolve_explicit_routes(target_candidates, target_routes)
+        if len(target_candidates) > 1 or explicit_routes:
             return await self._dispatch_multi_target_import(
                 preview=preview,
                 source_subtitles=source_subtitles,
@@ -3899,6 +3975,7 @@ class LinkedSubtitleImportService:
                 subtitle_filter_rules=subtitle_filter_rules,
                 import_reason=import_reason or "手动字幕文件夹补配导入（多目标）",
                 source_mode=source_mode,
+                explicit_routes=explicit_routes,
             )
 
         target_candidate = target_candidates[0]
