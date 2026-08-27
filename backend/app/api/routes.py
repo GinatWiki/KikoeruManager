@@ -17812,7 +17812,7 @@ async def rj_subtitle_rerun_task(task_id: str, request: RJSubtitleRerunRequest):
 
 
 @app.post("/api/rj-subtitle/task/{task_id}/clear")
-async def rj_subtitle_clear_task(task_id: str):
+async def rj_subtitle_clear_task(task_id: str, force: bool = False):
     from ..core.task_engine import TaskType, get_task_engine
 
     try:
@@ -17825,16 +17825,20 @@ async def rj_subtitle_clear_task(task_id: str):
 
         metadata = dict(task.task_metadata or {})
         source_mode = str(metadata.get("source_mode") or "").strip().lower()
+        workbench_cleanup_enabled = bool(force)
         if (
             source_mode in {"linked_translation_archive_import", "subtitle_folder_import"}
             and metadata.get("awaiting_manual_match")
             and not metadata.get("manual_match_completed")
         ):
-            raise HTTPException(status_code=400, detail="字幕补配仍在等待筛选与配对，不能清理")
+            # 强制清理：用户明确要放弃这次待配对任务（配错了/不想要了），否则之前会永远卡住
+            if not force:
+                raise HTTPException(status_code=400, detail="字幕补配仍在等待筛选与配对，不能清理")
+            metadata["force_clear"] = True
 
         if (
             source_mode in {"linked_translation_archive_import", "subtitle_folder_import"}
-            and metadata.get("manual_match_completed")
+            and (metadata.get("manual_match_completed") or metadata.get("force_clear"))
         ):
             workbench_root = str(metadata.get("linked_workbench_root_dir") or "").strip()
             if workbench_root:
@@ -17855,7 +17859,47 @@ async def rj_subtitle_clear_task(task_id: str):
                 except Exception:
                     logger.warning("[字幕补配] 清理未完成工作台目录失败: task_id=%s path=%s", task_id, workbench_root, exc_info=True)
 
+            # 强制清理还要同步放弃数据库里的预检单，否则"待处理预检单"列表会一直残留这条记录
+            if metadata.get("force_clear"):
+                try:
+                    from ..models.database import ConflictWork
+
+                    source_path = str(
+                        task.task_metadata.get("source_archive_path")
+                        or task.task_metadata.get("source_subtitle_folder_path")
+                        or ""
+                    ).strip()
+                    db = next(get_db())
+                    try:
+                        conflict_query = db.query(ConflictWork).filter(
+                            ConflictWork.conflict_type == "LINKED_SUBTITLE_IMPORT",
+                            ConflictWork.status == "IMPORTED",
+                        )
+                        if source_path:
+                            conflict_query = conflict_query.filter(ConflictWork.new_path == source_path)
+                        else:
+                            conflict_query = conflict_query.filter(ConflictWork.task_id == task_id)
+                        for conflict in conflict_query.all():
+                            analysis_info = dict(conflict.analysis_info or {})
+                            import_summary = dict(analysis_info.get("import_result_summary") or {})
+                            import_summary["manual_match_completed"] = False
+                            import_summary["force_cleared"] = True
+                            import_summary["force_cleared_at"] = datetime.now().isoformat()
+                            analysis_info["import_result_summary"] = import_summary
+                            conflict.status = "SKIP"
+                            conflict.analysis_info = analysis_info
+                        db.commit()
+                    except Exception:
+                        db.rollback()
+                        logger.warning("[字幕补配] 强制清理标记预检单失败: task_id=%s", task_id, exc_info=True)
+                    finally:
+                        db.close()
+                except Exception:
+                    logger.warning("[字幕补配] 强制清理预检单查询失败: task_id=%s", task_id, exc_info=True)
+
         await asyncio.to_thread(engine.remove_task, task_id)
+        if workbench_cleanup_enabled:
+            return {"success": True, "task_id": task_id, "message": "任务已强制清理（含工作台临时文件）"}
         return {"success": True, "task_id": task_id, "message": "任务已清理"}
     except HTTPException:
         raise

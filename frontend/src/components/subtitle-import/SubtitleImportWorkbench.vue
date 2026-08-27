@@ -756,10 +756,15 @@ function canRetargetTask(task) {
 
 function canClearTask(task) {
   // 执行中/排队中的任务不可清空；其余（待配对、已完成、失败）都允许清，
-  // 避免"配错了想清掉重配但按钮一直灰"
+  // 待配对任务走强制清理（需确认放弃，后端会一并删工作台临时目录）
   if (!task) return false
   if (isProcessingTask(task)) return false
   return true
+}
+
+function isForceClearTask(task) {
+  // 强制清理：字幕补配导入成功但还在等待人工配对，普通清理会被后端拒绝
+  return Boolean(isAwaitingManualTask(task))
 }
 
 function canAutoClearTaskOnClose(task) {
@@ -892,11 +897,15 @@ async function clearFinishedTasks() {
     ElMessage.warning('当前没有可清理的已完成、待配对或失败任务')
     return
   }
+  const forceTargets = targets.filter(task => isForceClearTask(task))
 
   try {
+    const forceHint = forceTargets.length
+      ? `其中 ${forceTargets.length} 条仍在等待配对，将被强制放弃（删除对应工作台临时文件）。`
+      : ''
     await showSystemConfirm({
       title: '清空队列确认',
-      message: `确定清空 ${targets.length} 条已完成、待配对或失败任务吗？正在下载/写入的任务会保留。`,
+      message: `确定清空 ${targets.length} 条已完成、待配对或失败任务吗？${forceHint}正在下载/写入的任务会保留。`,
       confirmText: '清空队列',
       cancelText: '取消',
       tone: 'warning'
@@ -909,7 +918,7 @@ async function clearFinishedTasks() {
   try {
     // 之前是串行 await，N 条任务等 N×100-300ms；改并发 6 让"清空队列"几乎瞬完成
     await runWithConcurrency(targets, 6, async (task) => {
-      await rjSubtitleApi.clearTask(task.id)
+      await rjSubtitleApi.clearTask(task.id, { force: isForceClearTask(task) })
     })
     await refreshTaskStatus(false, { inspect: true, forceInspect: true })
     ElMessage.success(`已清空 ${targets.length} 条历史任务`)
@@ -2738,7 +2747,20 @@ const subtitleTaskStageCtx = computed(() => ({
   cancelRJSubtitleTask: () => {},
   clearCurrentSubtitleTask: async task => {
     if (!task || !canClearTask(task)) return
-    await rjSubtitleApi.clearTask(task.id)
+    if (isForceClearTask(task)) {
+      try {
+        await showSystemConfirm({
+          title: '强制清空待配对任务',
+          message: `该任务仍在等待配对，强制清空会放弃本次补配并删除工作台临时文件。确定要放弃任务 ${task.actual_rjcode || task.rjcode || '未知RJ'} 吗？`,
+          tone: 'danger',
+          confirmText: '强制清空',
+          cancelText: '取消'
+        })
+      } catch (_) {
+        return
+      }
+    }
+    await rjSubtitleApi.clearTask(task.id, { force: isForceClearTask(task) })
     clearSubtitleTaskDraft(task.id)
     await refreshTaskStatus(false, { inspect: false, silent: true })
   },
@@ -2752,7 +2774,7 @@ const subtitleTaskStageCtx = computed(() => ({
     if (!tasks.length) return
     const ids = tasks.map(t => t.id)
     for (const id of ids) {
-      try { await rjSubtitleApi.clearTask(id) } catch (_) {}
+      try { await rjSubtitleApi.clearTask(id, { force: true }) } catch (_) {}
       clearSubtitleTaskDraft(id)
     }
     await refreshTaskStatus(false, { inspect: false, silent: true })

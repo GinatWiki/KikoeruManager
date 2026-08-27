@@ -2321,8 +2321,9 @@ export const rjSubtitleApi = {
     return response.data
   },
 
-  clearTask: async (taskId) => {
-    const response = await apiClient.post(`/rj-subtitle/task/${taskId}/clear`)
+  clearTask: async (taskId, options = {}) => {
+    const query = options.force ? '?force=true' : ''
+    const response = await apiClient.post(`/rj-subtitle/task/${taskId}/clear${query}`)
     return response.data
   },
 

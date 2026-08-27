@@ -572,6 +572,14 @@ export function useSubtitleTask ({
     return true
   }
 
+  function isForceClearSubtitleTask (task) {
+    // 字幕补配导入成功但还在等待人工配对：普通清理会被后端拒绝，需要走强制清理
+    if (!task || isRJSubtitleTaskCancelled(task)) return false
+    const sourceMode = String(task?.source_mode || '').trim().toLowerCase()
+    if (!['linked_translation_archive_import', 'subtitle_folder_import'].includes(sourceMode)) return false
+    return Boolean(task.awaiting_manual_match && !task.manual_match_completed)
+  }
+
   function canRerunSubtitleTask (task) {
     if (!task?.folder_path || !task?.id) return false
     if (isSubtitleTaskLiveMode(task) && task.status === 'processing') return false
@@ -1463,8 +1471,22 @@ export function useSubtitleTask ({
 
   async function clearCurrentSubtitleTask (task) {
     if (!canClearCurrentSubtitleTask(task)) return
+    const forceClear = isForceClearSubtitleTask(task)
+    if (forceClear) {
+      try {
+        await showSystemConfirm({
+          title: '强制清空待配对任务',
+          message: `该任务仍在等待配对，强制清空会放弃本次补配并删除工作台临时文件。确定要放弃任务 ${task.actual_rjcode || task.rjcode || '未知RJ'} 吗？`,
+          tone: 'danger',
+          confirmText: '强制清空',
+          cancelText: '取消'
+        })
+      } catch (_) {
+        return
+      }
+    }
     try {
-      await rjSubtitleApi.clearTask(task.id)
+      await rjSubtitleApi.clearTask(task.id, { force: forceClear })
       if (subtitleInspectorInfo.value.taskId === task.id) clearSubtitleInspectorState()
       if (subtitleActiveTaskId.value === task.id) subtitleActiveTaskId.value = ''
       await refreshRJSubtitleStatus(false, { silent: true })
@@ -1521,7 +1543,7 @@ export function useSubtitleTask ({
       let failedCount = 0
       for (const task of targets) {
         try {
-          await rjSubtitleApi.clearTask(task.id)
+          await rjSubtitleApi.clearTask(task.id, { force: isForceClearSubtitleTask(task) })
           successCount += 1
           if (subtitleInspectorInfo.value.taskId === task.id) clearSubtitleInspectorState()
           if (subtitleActiveTaskId.value === task.id) subtitleActiveTaskId.value = ''
@@ -1738,6 +1760,7 @@ export function useSubtitleTask ({
     getRJSubtitleProgressStatus,
     canCancelRJSubtitleTask,
     canClearCurrentSubtitleTask,
+    isForceClearSubtitleTask,
     canRerunSubtitleTask,
     isSubtitleTaskRerunLocked,
     getSubtitleTaskInspectLabel,
