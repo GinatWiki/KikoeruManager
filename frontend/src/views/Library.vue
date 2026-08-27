@@ -4297,6 +4297,22 @@ const subtitleAudioFilterMode = ref('all')
 
 const subtitleSubtitleFilterMode = ref('all')
 
+// 字幕格式筛选：'' = 全部格式；同名字幕存在 srt/lrc 等多版本时按格式区分显示
+const subtitleFormatFilter = ref('')
+const subtitleFormatOptions = computed(() => {
+  const formats = new Set()
+  for (const item of subtitleInspectorSubtitleFiles.value || []) {
+    const match = String(item?.name || '').match(/\.([a-z0-9]+)$/i)
+    if (match) formats.add(match[1].toLowerCase())
+  }
+  return [...formats].sort((left, right) => left.localeCompare(right))
+})
+
+function setSubtitleFormatFilter (format) {
+  subtitleFormatFilter.value = String(format || '').toLowerCase()
+}
+
+
 const activeSubtitleWorkbenchStage = ref('overview')
 
 const subtitleWorkbenchRailMode = ref('scan')
@@ -6924,6 +6940,14 @@ const filteredSubtitleInspectorSubtitleFiles = computed(() => {
 
   const items = subtitleInspectorSubtitleFiles.value.filter(item => {
 
+    if (subtitleFormatFilter.value) {
+
+      const match = String(item?.name || '').match(/\.([a-z0-9]+)$/i)
+
+      if (!match || match[1].toLowerCase() !== subtitleFormatFilter.value) return false
+
+    }
+
     if (subtitleSubtitleFilterMode.value === 'paired') return isSubtitlePaired(item.path)
 
     if (subtitleSubtitleFilterMode.value === 'unpaired') return !isSubtitlePaired(item.path)
@@ -6969,6 +6993,8 @@ const subtitleWorkbenchCtx = computed(() => ({
   subtitleInspectorHasDirectories: subtitleInspectorHasDirectories.value,
 
   subtitleInspectorAudioFiles: subtitleInspectorAudioFiles.value,
+
+  subtitleInspectorSubtitleFiles: subtitleInspectorSubtitleFiles.value,
 
   subtitleInspectorFlatTree: subtitleInspectorFlatTree.value,
 
@@ -7025,6 +7051,12 @@ const subtitleWorkbenchCtx = computed(() => ({
   subtitleAudioFilterMode: subtitleAudioFilterMode.value,
 
   subtitleSubtitleFilterMode: subtitleSubtitleFilterMode.value,
+
+  subtitleFormatFilter: subtitleFormatFilter.value,
+
+  subtitleFormatOptions: subtitleFormatOptions.value,
+
+  setSubtitleFormatFilter,
 
   subtitleMatchSelection: subtitleMatchSelection.value,
 

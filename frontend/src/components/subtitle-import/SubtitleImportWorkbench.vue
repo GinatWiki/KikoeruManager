@@ -342,6 +342,21 @@ const subtitlePairApplying = ref(false)
 const subtitleAutoPairing = ref(false)
 const subtitleAudioFilterMode = ref('all')
 const subtitleSubtitleFilterMode = ref('all')
+
+// 字幕格式筛选：'' = 全部格式；同名字幕存在 srt/lrc 等多版本时按格式区分显示
+const subtitleFormatFilter = ref('')
+const subtitleFormatOptions = computed(() => {
+  const formats = new Set()
+  for (const item of subtitleInspectorSubtitleFiles.value || []) {
+    const match = String(item?.name || '').match(/\.([a-z0-9]+)$/i)
+    if (match) formats.add(match[1].toLowerCase())
+  }
+  return [...formats].sort((left, right) => left.localeCompare(right))
+})
+
+function setSubtitleFormatFilter(format) {
+  subtitleFormatFilter.value = String(format || '').toLowerCase()
+}
 const TASK_STATUS_REFRESH_MS = 30000
 let taskStatusTimer = null
 let skipTaskDraftPersistence = false
@@ -722,7 +737,9 @@ function sortLinkedTasks(tasks = []) {
 }
 
 function canRetryTask(task) {
-  if (!isFailedTask(task)) return false
+  if (!task) return false
+  // 执行中/排队中不可重跑；失败、待配对（想换来源重新导入）均可
+  if (isProcessingTask(task)) return false
   const sourceMode = String(task?.source_mode || '').trim().toLowerCase()
   if (sourceMode === 'linked_translation_archive_import') return Boolean(task?.source_archive_path)
   if (sourceMode === 'subtitle_folder_import') return Boolean(task?.source_subtitle_folder_path)
@@ -738,7 +755,11 @@ function canRetargetTask(task) {
 }
 
 function canClearTask(task) {
-  return Boolean(task && (isFailedTask(task) || task.manual_match_completed))
+  // 执行中/排队中的任务不可清空；其余（待配对、已完成、失败）都允许清，
+  // 避免"配错了想清掉重配但按钮一直灰"
+  if (!task) return false
+  if (isProcessingTask(task)) return false
+  return true
 }
 
 function canAutoClearTaskOnClose(task) {
@@ -2409,6 +2430,10 @@ const filteredSubtitleInspectorAudioFiles = computed(() => {
 const filteredSubtitleInspectorSubtitleFiles = computed(() => {
   const keyword = subtitleInspectorSubtitleSearch.value.trim().toLowerCase()
   const items = subtitleInspectorSubtitleFiles.value.filter(item => {
+    if (subtitleFormatFilter.value) {
+      const match = String(item?.name || '').match(/\.([a-z0-9]+)$/i)
+      if (!match || match[1].toLowerCase() !== subtitleFormatFilter.value) return false
+    }
     if (subtitleSubtitleFilterMode.value === 'paired') return isSubtitlePaired(item.path)
     if (subtitleSubtitleFilterMode.value === 'unpaired') return !isSubtitlePaired(item.path)
     return true
@@ -2801,6 +2826,7 @@ const subtitleWorkbenchCtx = computed(() => ({
   subtitleInspectorDeleting: subtitleInspectorDeleting.value,
   subtitleInspectorHasDirectories: subtitleInspectorHasDirectories.value,
   subtitleInspectorAudioFiles: subtitleInspectorAudioFiles.value,
+  subtitleInspectorSubtitleFiles: subtitleInspectorSubtitleFiles.value,
   subtitleInspectorFlatTree: subtitleInspectorFlatTree.value,
   subtitleInspectorSelectedRows: subtitleInspectorSelectedRows.value,
   subtitleInspectorSelectedIds: subtitleInspectorSelectedIds.value,
@@ -2824,6 +2850,9 @@ const subtitleWorkbenchCtx = computed(() => ({
   canOpenSubtitleInspectorFilterDeleteDialog: canOpenSubtitleInspectorFilterDeleteDialog.value,
   subtitleAudioFilterMode: subtitleAudioFilterMode.value,
   subtitleSubtitleFilterMode: subtitleSubtitleFilterMode.value,
+  subtitleFormatFilter: subtitleFormatFilter.value,
+  subtitleFormatOptions: subtitleFormatOptions.value,
+  setSubtitleFormatFilter,
   subtitleMatchSelection: subtitleMatchSelection.value,
   filteredSubtitleInspectorAudioFiles: filteredSubtitleInspectorAudioFiles.value,
   filteredSubtitleInspectorSubtitleFiles: filteredSubtitleInspectorSubtitleFiles.value,

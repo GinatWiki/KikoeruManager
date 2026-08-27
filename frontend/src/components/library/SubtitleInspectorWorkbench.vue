@@ -152,8 +152,8 @@
                   <span v-if="view.getSubtitleSequenceIndex('audio', audio.path)" class="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-blue-600 px-1.5 text-[10px] font-black text-white shadow-[0_4px_12px_rgba(37,99,235,0.35)] ring-2 ring-white">#{{ view.getSubtitleSequenceIndex('audio', audio.path) }}</span>
 
                 </div>
-                <div class="subtitle-pairing-row-name text-[11.5px] font-semibold truncate transition-colors duration-300">{{ formatSubtitleItemName(audio) }}</div>
-                <div class="subtitle-pairing-row-path text-[10px] truncate">{{ audio.relative_path || audio.name }}</div>
+                <div class="subtitle-pairing-row-name text-[11.5px] font-semibold break-all leading-snug transition-colors duration-300">{{ formatSubtitleItemName(audio) }}</div>
+                <div class="subtitle-pairing-row-path text-[10px] break-all leading-snug">{{ audio.relative_path || audio.name }}</div>
               </button>
             </div>
           </div>
@@ -194,8 +194,14 @@
           <div class="flex flex-col rounded-[13px] border border-slate-200 bg-white overflow-hidden">
             <div class="flex items-center justify-between gap-2 px-3 py-2 border-b border-slate-100 bg-slate-50/60">
               <div class="flex items-center gap-1.5 text-[12px] font-semibold text-slate-700"><FileText :size="12" :stroke-width="2.2" class="text-violet-500" />字幕目录<span class="text-[11px] font-normal text-slate-400">{{ view.filteredSubtitleInspectorSubtitleFiles.length }} 项</span></div>
-              <div class="inline-flex gap-0.5 p-0.5 rounded-lg bg-slate-100">
-                <button v-for="mode in ['all','paired','unpaired']" :key="mode" type="button" class="px-1.5 py-0.5 rounded-md text-[10.5px] font-medium transition-all duration-150" :class="view.subtitleSubtitleFilterMode === mode ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'" @click="view.setSubtitleSubtitleFilterMode(mode)">{{ {all:'全部',paired:'已配对',unpaired:'未配对'}[mode] }}</button>
+              <div class="flex items-center gap-1.5 flex-wrap justify-end">
+                <div v-if="view.subtitleFormatOptions.length > 1" class="inline-flex gap-0.5 p-0.5 rounded-lg bg-violet-50 border border-violet-100">
+                  <button type="button" class="px-1.5 py-0.5 rounded-md text-[10.5px] font-medium transition-all duration-150" :class="!view.subtitleFormatFilter ? 'bg-white text-slate-900 shadow-sm' : 'text-violet-500 hover:text-violet-700'" title="只显示所选格式的字幕，避免同名字幕互相混淆" @click="view.setSubtitleFormatFilter('')">全部格式</button>
+                  <button v-for="fmt in view.subtitleFormatOptions" :key="fmt" type="button" class="px-1.5 py-0.5 rounded-md text-[10.5px] font-mono font-semibold uppercase transition-all duration-150" :class="view.subtitleFormatFilter === fmt ? 'bg-white text-slate-900 shadow-sm' : 'text-violet-500 hover:text-violet-700'" :title="`只显示 ${fmt.toUpperCase()} 字幕`" @click="view.setSubtitleFormatFilter(fmt)">{{ fmt }}</button>
+                </div>
+                <div class="inline-flex gap-0.5 p-0.5 rounded-lg bg-slate-100">
+                  <button v-for="mode in ['all','paired','unpaired']" :key="mode" type="button" class="px-1.5 py-0.5 rounded-md text-[10.5px] font-medium transition-all duration-150" :class="view.subtitleSubtitleFilterMode === mode ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'" @click="view.setSubtitleSubtitleFilterMode(mode)">{{ {all:'全部',paired:'已配对',unpaired:'未配对'}[mode] }}</button>
+                </div>
               </div>
             </div>
             <div class="px-2 pt-2"><input :value="view.subtitleInspectorSubtitleSearch" class="w-full h-7 px-2 rounded-lg bg-slate-50 border border-slate-200 text-[11.5px] placeholder-slate-400 outline-none focus:bg-white focus:border-slate-400 transition-all duration-150" placeholder="搜索字幕名..." :disabled="view.subtitleInspectorBusy" @input="view.setSubtitleInspectorSubtitleSearch($event.target.value)" /></div>
@@ -208,8 +214,8 @@
                   <span v-if="view.getSubtitleSequenceIndex('subtitle', subtitle.path)" class="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-violet-600 px-1.5 text-[10px] font-black text-white shadow-[0_4px_12px_rgba(124,58,237,0.35)] ring-2 ring-white">#{{ view.getSubtitleSequenceIndex('subtitle', subtitle.path) }}</span>
 
                 </div>
-                <div class="subtitle-pairing-row-name text-[11.5px] font-semibold truncate transition-colors duration-300">{{ formatSubtitleItemName(subtitle) }}</div>
-                <div class="subtitle-pairing-row-path text-[10px] truncate">{{ subtitle.relative_path || subtitle.name }}</div>
+                <div class="subtitle-pairing-row-name text-[11.5px] font-semibold break-all leading-snug transition-colors duration-300">{{ formatSubtitleItemName(subtitle) }}</div>
+                <div class="subtitle-pairing-row-path text-[10px] break-all leading-snug">{{ subtitle.relative_path || subtitle.name }}</div>
               </button>
             </div>
           </div>
@@ -352,7 +358,7 @@
                     <FolderOpen v-else-if="row.type === 'dir'" :size="12" :stroke-width="2.2" />
                     <component v-else :is="libraryEntryIconFor(row)" :size="12" :stroke-width="2.2" />
                   </span>
-                  <span class="subtitle-tree-row-name truncate text-[13px] font-medium text-slate-900" :title="row.name">{{ row.name }}</span>
+                  <span class="subtitle-tree-row-name break-all leading-snug text-[13px] font-medium text-slate-900" :title="row.name">{{ row.name }}</span>
                 </div>
               </div>
               <div class="subtitle-tree-row-size text-[12px] font-medium tabular-nums text-slate-600">{{ view.formatFileSize(row.size) }}</div>
@@ -523,6 +529,8 @@ const viewDefaults = {
   subtitleManualApplyLabel: '',
   subtitleAudioFilterMode: 'all',
   subtitleSubtitleFilterMode: 'all',
+  subtitleFormatFilter: '',
+  subtitleFormatOptions: [],
   subtitleMatchSelection: { audioPath: '', subtitlePath: '' },
   filteredSubtitleInspectorAudioFiles: [],
   filteredSubtitleInspectorSubtitleFiles: [],
