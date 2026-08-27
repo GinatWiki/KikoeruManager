@@ -86,11 +86,13 @@ export function useSubtitleImportArchiveManual({
   }
 
   // 把映射表解析为后端 explicit_routes：[{ source_prefix, library_id, folder_path }]
+  // 只解析仍勾选的目标；映射指向的目标被取消勾选时，该组回退为自动匹配而非报错
   function buildManualTargetRoutes () {
+    const selectedKeys = new Set(manualTargetSelections.value)
     const candidates = manualArchivePreview.value?.candidates || []
     const routes = []
     for (const [group, key] of Object.entries(manualTargetMappings.value)) {
-      if (!group || !key) continue
+      if (!group || !key || !selectedKeys.has(key)) continue
       const candidate = candidates.find(item => targetKeyOf(item) === key)
       if (!candidate) continue
       routes.push({
