@@ -87,7 +87,7 @@
             </span>
             <div class="scan-rail-inline-empty-copy">
               <strong>暂无可执行项目</strong>
-              <span>{{ ctx.subtitleSkippedSelectionItems.length ? '命中项已归入下方“被跳过”' : '当前没有待加入或已入任务的 RJ 目录' }}</span>
+              <span>{{ ctx.subtitleSkippedSelectionItems.length ? '命中项已归入下方“被跳过”' : (ctx.subtitleCompletedSelectionItems.length ? '未处理项已全部完成，详见下方“已完成”' : '当前没有待加入或已入任务的 RJ 目录') }}</span>
             </div>
           </div>
 
@@ -173,6 +173,73 @@
             <button type="button" class="scan-rail-btn scan-rail-btn-ghost" :disabled="ctx.subtitleSelectionPage <= 1" @click="ctx.setSubtitleSelectionPage(ctx.subtitleSelectionPage - 1)">上一页</button>
             <span class="inline-flex min-h-[26px] min-w-[52px] items-center justify-center rounded-[8px] border border-slate-200 bg-slate-50 px-2.5 font-medium text-slate-600">{{ ctx.subtitleSelectionPage }} / {{ ctx.subtitleSelectionTotalPages }}</span>
             <button type="button" class="scan-rail-btn scan-rail-btn-ghost" :disabled="ctx.subtitleSelectionPage >= ctx.subtitleSelectionTotalPages" @click="ctx.setSubtitleSelectionPage(ctx.subtitleSelectionPage + 1)">下一页</button>
+          </div>
+        </section>
+
+        <section v-if="ctx.subtitleCompletedSelectionItems.length" class="scan-rail-section scan-rail-completed-section grid gap-3 border-t border-slate-100 pt-3">
+          <div class="scan-rail-section-head">
+            <div class="scan-rail-section-title">
+              <div class="scan-rail-section-label text-[13px] font-semibold text-slate-900">已完成</div>
+              <span class="scan-rail-count-badge scan-rail-count-badge-amber">
+                <CheckCircle2 class="h-3 w-3" :stroke-width="2.2" />
+                {{ ctx.subtitleCompletedSelectionItems.length }}
+              </span>
+              <button type="button" class="scan-rail-toggle scan-rail-section-collapse" @click="ctx.setSubtitleCompletedCollapsed(!ctx.subtitleCompletedCollapsed)">
+                <span>{{ ctx.subtitleCompletedCollapsed ? '展开' : '收起' }}</span>
+                <ChevronDown class="h-3.5 w-3.5 transition-transform duration-200" :class="{ '-rotate-90': ctx.subtitleCompletedCollapsed }" />
+              </button>
+            </div>
+            <div class="text-[11px] leading-4 text-slate-500">字幕补配已完成的压缩包，不再出现在待处理列表中</div>
+          </div>
+
+          <div v-if="!ctx.subtitleCompletedCollapsed" class="scan-rail-completed-list grid gap-2">
+            <button
+              v-for="item in getPagedCompletedSelectionItems(ctx.subtitleCompletedSelectionItems, subtitleCompletedSelectionPage)"
+              :key="`${ctx.buildSubtitleSelectionKey(item)}-completed`"
+              type="button"
+              class="scan-rail-card group w-full rounded-[14px] border border-emerald-100 bg-white px-3 py-2 text-left transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)] hover:scale-[1.01] hover:border-emerald-200 hover:bg-white active:scale-[0.98]"
+              :class="ctx.isSubtitleSelectionActive(item) ? 'border-slate-950' : ''"
+              :title="item.folder_path"
+              @click="ctx.focusSubtitleSelectionItem(item)"
+            >
+              <div class="scan-skipped-card-content">
+                <div class="scan-skipped-card-head">
+                  <span class="scan-completed-card-icon">
+                    <CheckCircle2 class="h-3 w-3" :stroke-width="2.2" />
+                  </span>
+                  <div class="scan-skipped-card-title-wrap">
+                    <div class="scan-rail-card-title scan-skipped-card-title">{{ getDisplayFolderName(item) }}</div>
+                    <div v-if="ctx.getLibraryLabelById(item.library_id)" class="scan-rail-card-source">
+                      来源 · {{ ctx.getLibraryLabelById(item.library_id) }}
+                    </div>
+                  </div>
+                </div>
+                <div class="scan-skipped-card-meta">
+                  <span class="scan-rail-tag scan-rail-tag-success">
+                    <CheckCircle2 class="h-3 w-3 text-emerald-600" :stroke-width="2.2" />
+                    {{ ctx.getSubtitleSelectionQueueLabel(item) }}
+                  </span>
+                  <span
+                    v-for="chip in ctx.getSubtitleSelectionExistingChips(item)"
+                    :key="`${ctx.buildSubtitleSelectionKey(item)}-${chip.key}`"
+                    :class="getExistingChipClass(chip)"
+                  >
+                    <component :is="getExistingChipIcon(chip)" class="h-3 w-3" :class="getExistingChipIconClass(chip)" :stroke-width="2.2" />
+                    {{ chip.label }}
+                  </span>
+                </div>
+                <div v-if="item.queue_message" class="scan-rail-card-message scan-skipped-card-message">{{ item.queue_message }}</div>
+                <div class="scan-skipped-card-actions">
+                  <button v-if="ctx.canInspectSubtitleSelectionFolder(item)" type="button" class="scan-rail-btn scan-rail-btn-primary" @click.stop="ctx.inspectSubtitleSelectionFolder(item)">检查字幕稿</button>
+                </div>
+              </div>
+            </button>
+          </div>
+
+          <div v-if="!ctx.subtitleCompletedCollapsed && getCompletedSelectionPageCount(ctx.subtitleCompletedSelectionItems) > 1" class="scan-target-pager">
+            <button type="button" class="scan-rail-btn scan-rail-btn-ghost" :disabled="subtitleCompletedSelectionPage <= 1" @click="subtitleCompletedSelectionPage -= 1">上一页</button>
+            <span class="scan-target-page-indicator">{{ subtitleCompletedSelectionPage }} / {{ getCompletedSelectionPageCount(ctx.subtitleCompletedSelectionItems) }}</span>
+            <button type="button" class="scan-rail-btn scan-rail-btn-ghost" :disabled="subtitleCompletedSelectionPage >= getCompletedSelectionPageCount(ctx.subtitleCompletedSelectionItems)" @click="subtitleCompletedSelectionPage += 1">下一页</button>
           </div>
         </section>
 
@@ -416,8 +483,10 @@ import AppEmptyState from '../../common/AppEmptyState.vue'
 
 const SCAN_TARGET_PAGE_SIZE = 6
 const SKIPPED_SELECTION_PAGE_SIZE = 5
+const COMPLETED_SELECTION_PAGE_SIZE = 5
 const subtitleScanTargetPage = ref(1)
 const subtitleSkippedSelectionPage = ref(1)
+const subtitleCompletedSelectionPage = ref(1)
 
 defineProps({
   ctx: {
@@ -460,6 +529,22 @@ function getPagedSkippedSelectionItems(items = [], page = 1) {
   const currentPage = normalizeSkippedPage(page, source)
   const start = (currentPage - 1) * SKIPPED_SELECTION_PAGE_SIZE
   return source.slice(start, start + SKIPPED_SELECTION_PAGE_SIZE)
+}
+
+function normalizeCompletedPage(page, items = []) {
+  const totalPage = Math.max(1, Math.ceil((Array.isArray(items) ? items.length : 0) / COMPLETED_SELECTION_PAGE_SIZE))
+  return Math.min(Math.max(1, Number(page) || 1), totalPage)
+}
+
+function getCompletedSelectionPageCount(items = []) {
+  return Math.max(1, Math.ceil((Array.isArray(items) ? items.length : 0) / COMPLETED_SELECTION_PAGE_SIZE))
+}
+
+function getPagedCompletedSelectionItems(items = [], page = 1) {
+  const source = Array.isArray(items) ? items : []
+  const currentPage = normalizeCompletedPage(page, source)
+  const start = (currentPage - 1) * COMPLETED_SELECTION_PAGE_SIZE
+  return source.slice(start, start + COMPLETED_SELECTION_PAGE_SIZE)
 }
 
 function getDisplayFolderName(item) {
@@ -925,6 +1010,29 @@ function getScanResultIcon(status) {
   background: #ffffff;
   color: #f59e0b;
   transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.scan-completed-card-icon {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: 1px solid #cfeedd;
+  background: #ffffff;
+  color: #3f7a5d;
+  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.scan-rail-card:hover .scan-completed-card-icon {
+  transform: rotate(-6deg) scale(1.08);
+}
+
+.scan-rail-completed-list {
+  align-content: start;
+  grid-auto-rows: max-content;
 }
 
 .scan-rail-card:hover .scan-skipped-card-icon {
@@ -1793,6 +1901,11 @@ function getScanResultIcon(status) {
   background-image: none !important;
   color: rgba(245, 245, 247, 0.88) !important;
   box-shadow: none !important;
+}
+
+:global(html.kikoerumanager-dark) .subtitle-scan-rail-root .scan-rail-completed-list .scan-rail-card,
+:global(html.dark) .subtitle-scan-rail-root .scan-rail-completed-list .scan-rail-card {
+  border-color: rgba(74, 222, 128, 0.24) !important;
 }
 
 :global(html.kikoerumanager-dark) .subtitle-scan-rail-root :deep(.scan-rail-tag-success),

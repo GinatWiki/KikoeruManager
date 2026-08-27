@@ -4068,6 +4068,8 @@ const subtitleExecutableCollapsed = ref(false)
 
 const subtitleSkippedCollapsed = ref(false)
 
+const subtitleCompletedCollapsed = ref(true)
+
 const subtitleScanTargetsCollapsed = ref(true)
 
 const subtitleInspectorLoading = ref(false)
@@ -6594,7 +6596,11 @@ function matchesSubtitleSkippedSelectionFilter (item, filter = subtitleSkippedSe
 
 const subtitleSelectionDisplayItems = computed(() => subtitleDialogSelection.value)
 
-const subtitleExecutableSelectionItems = computed(() => subtitleDialogSelection.value.filter(item => !String(item?.queue_state || '').startsWith('skipped_')))
+const isSubtitleSelectionCompletedItem = item => (item?.queue_state || '') === 'manual_match_completed'
+
+const subtitleCompletedSelectionItems = computed(() => subtitleDialogSelection.value.filter(item => isSubtitleSelectionCompletedItem(item)))
+
+const subtitleExecutableSelectionItems = computed(() => subtitleDialogSelection.value.filter(item => !String(item?.queue_state || '').startsWith('skipped_') && !isSubtitleSelectionCompletedItem(item)))
 
 const subtitleSelectionFilterOptions = computed(() => ([
 
@@ -7196,6 +7202,8 @@ const subtitleScanCtx = computed(() => ({
 
   subtitleExecutableSelectionItems: subtitleExecutableSelectionItems.value,
 
+  subtitleCompletedSelectionItems: subtitleCompletedSelectionItems.value,
+
   subtitleSkippedSelectionItems: subtitleSkippedSelectionItems.value,
 
   subtitleExecutableDisplayItems: subtitleExecutableDisplayItems.value,
@@ -7233,6 +7241,8 @@ const subtitleScanCtx = computed(() => ({
   subtitleScanSkipFilter: subtitleScanSkipFilter.value,
 
   subtitleExecutableCollapsed: subtitleExecutableCollapsed.value,
+
+  subtitleCompletedCollapsed: subtitleCompletedCollapsed.value,
 
   subtitleSkippedCollapsed: subtitleSkippedCollapsed.value,
 
@@ -7285,6 +7295,8 @@ const subtitleScanCtx = computed(() => ({
   setSubtitleScanSkipFilter: (v) => { subtitleScanSkipFilter.value = v },
 
   setSubtitleExecutableCollapsed: (v) => { subtitleExecutableCollapsed.value = v },
+
+  setSubtitleCompletedCollapsed: (v) => { subtitleCompletedCollapsed.value = v },
 
   setSubtitleSkippedCollapsed: (v) => { subtitleSkippedCollapsed.value = v },
 
