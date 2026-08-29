@@ -47,6 +47,7 @@ class FileProcessor:
 
     def __init__(self):
         self._processed_files: Set[str] = set()  # 已处理文件集合
+        self._stability_timeout_counts: dict = {}  # 文件等待稳定超时计数（防无限重试）
 
     @property
     def config(self):
@@ -173,10 +174,26 @@ class FileProcessor:
                 try:
                     await self.wait_file_stable(file_path, max_wait=max_wait)
                     logger.debug(f"[FileProcessor] 文件已稳定: {file_path}")
+                    self._stability_timeout_counts.pop(file_path, None)
                 except TimeoutError:
-                    logger.error(f"[FileProcessor] 等待文件稳定超时: {file_path}")
-                    if mark_processed:
-                        mark_processed(file_path)
+                    # 超时通常是文件仍被占用/写入中（Windows 常见），不立即标记
+                    # 已处理——永久跳过会导致任务丢失。同一路径累计超时 3 次后
+                    # 才标记，避免无限重试刷屏。
+                    count = self._stability_timeout_counts.get(file_path, 0) + 1
+                    self._stability_timeout_counts[file_path] = count
+                    if count >= 3:
+                        logger.error(
+                            "[FileProcessor] 文件连续 %d 次等待稳定超时，标记已处理以避免无限重试: %s",
+                            count, file_path,
+                        )
+                        if mark_processed:
+                            mark_processed(file_path)
+                    else:
+                        logger.error(
+                            "[FileProcessor] 等待文件稳定超时（第 %d 次，文件可能仍被占用/写入中），"
+                            "本次跳过且不标记已处理，后续事件可重试: %s",
+                            count, file_path,
+                        )
                     return None
                 if self._has_active_aria2_sidecar(file_path):
                     logger.info("[FileProcessor] 文件稳定后仍存在 aria2 未完成标记，跳过处理: %s", file_path)
@@ -560,7 +577,11 @@ class FileProcessor:
         return None
 
     async def wait_file_stable(self, file_path: str, max_wait: int = 300):
-        """等待文件稳定（大小不再变化）
+        """等待文件稳定（委托 file_stability 共享实现，含 Windows 占用软放行）
+
+        size+mtime 双维度稳定判定 + open 探测 1 字节检测锁定；
+        Windows 上文件被下载器/杀软占用时 PermissionError 会以 WARNING
+        日志可见并软放行，不再静默重置到超时。
 
         Args:
             file_path: 文件路径
@@ -569,45 +590,15 @@ class FileProcessor:
         Raises:
             TimeoutError: 等待超时
         """
-        previous_size = -1
-        stable_count = 0
-        required_stable = 3  # 需要连续3次稳定
-        check_interval = 2  # 每2秒检查一次
-        start_time = asyncio.get_event_loop().time()
+        from .file_stability import wait_file_stable_robust
 
-        while stable_count < required_stable:
-            current_time = asyncio.get_event_loop().time()
-
-            # 检查超时
-            if current_time - start_time > max_wait:
-                raise TimeoutError(f"等待文件稳定超时: {file_path}")
-
-            try:
-                if not os.path.exists(file_path):
-                    await asyncio.sleep(check_interval)
-                    continue
-
-                current_size = os.path.getsize(file_path)
-
-                # 检查文件是否为空
-                if current_size < 1024:  # 小于1KB
-                    logger.debug(f"[FileProcessor] 文件太小，继续等待: {file_path} ({current_size} bytes)")
-                    stable_count = 0
-                elif current_size == previous_size:
-                    stable_count += 1
-                    logger.debug(f"[FileProcessor] 文件大小稳定 ({stable_count}/{required_stable}): {file_path}")
-                else:
-                    if previous_size != -1:
-                        logger.debug(f"[FileProcessor] 文件仍在复制中: {file_path} ({previous_size} -> {current_size} bytes)")
-                    stable_count = 0
-
-                previous_size = current_size
-
-            except Exception as e:
-                logger.debug(f"[FileProcessor] 等待文件稳定时出错: {e}")
-                stable_count = 0
-
-            await asyncio.sleep(check_interval)
+        await wait_file_stable_robust(
+            file_path,
+            max_wait=max_wait,
+            required_stable_checks=3,
+            check_interval=2.0,
+            log_prefix="[FileProcessor]",
+        )
 
     # ========== 私有方法 ==========
 

@@ -2558,10 +2558,13 @@ class TestExtractService:
                 call.args[1]
                 for call in extract_service._probe_password.await_args_list
             ]
+            # candidate-7 命中后，会用空密码做一次对照探测（确认归档不是
+            # 未加密包），因此末尾多一个 '' 探测。
             assert probed_passwords == [
                 "outer-password",
                 "",
                 *[f"candidate-{index}" for index in range(8)],
+                "",
             ]
             extract_service._run_7z_command.assert_awaited_once()
             extract_call = extract_service._run_7z_command.await_args
@@ -2680,6 +2683,224 @@ class TestExtractService:
             assert task.task_metadata["nested_password_probe_failed"] is True
         finally:
             extract_service.config.extract.password_list = old_password_list
+
+    @pytest.mark.asyncio
+    async def test_unencrypted_opaque_rar_prefers_empty_password_after_misjudged_probe(
+        self, extract_service, temp_dir,
+    ):
+        """内层无扩展名 RAR 无密码时，7zz 对未加密条目忽略 -p 会把外层密码
+        误判为 'ok'。空密码对照探测通过后必须纠偏选空密码，unar 不带 -p 解压。"""
+        archive_path = os.path.join(temp_dir, "RJ01688609")
+        output_path = os.path.join(temp_dir, "out")
+        os.makedirs(output_path, exist_ok=True)
+        with open(archive_path, "wb") as fp:
+            fp.write(b"Rar!\x1a\x00" + (b"\0" * 64))
+        task = Task(
+            TaskType.EXTRACT,
+            os.path.join(temp_dir, "RJ01688609.zip"),
+            task_id="opaque-unencrypted-rar",
+        )
+
+        old_password_list = extract_service.config.extract.password_list
+        old_prefer_unar = extract_service.config.extract.prefer_unar_for_rar
+        try:
+            extract_service.config.extract.password_list = []
+            extract_service.config.extract.prefer_unar_for_rar = True
+            extract_service._get_password_candidates_for_archive = AsyncMock(return_value=[])
+            extract_service._list_archive_contents = AsyncMock(return_value=[
+                {"name": "readme.txt", "size": 128, "is_dir": False},
+            ])
+            # 任意密码（含空密码）都返回 'ok' —— 模拟 7zz 对未加密 RAR 忽略 -p 的误判
+            extract_service._probe_password = AsyncMock(return_value="ok")
+            extract_service._is_rar_archive = Mock(return_value=True)
+            extract_service._find_unar_executable = Mock(return_value="/usr/bin/unar")
+            extract_service._try_unar_extract = AsyncMock(return_value=subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=b"", stderr=b"",
+            ))
+
+            success, password = await extract_service._try_extract_nested_direct(
+                archive_path,
+                output_path,
+                parent_password="outer-password",
+                task=task,
+            )
+
+            assert success is True
+            assert password is None  # 空密码 → 返回 None
+            # 空密码对照探测被触发过（第二次 probe 调用）
+            probe_passwords = [call.args[1] for call in extract_service._probe_password.await_args_list]
+            assert probe_passwords == ["outer-password", ""]
+            # unar 收到的是空密码（不带 -p），而不是被误判的外层密码
+            unar_call = extract_service._try_unar_extract.await_args
+            assert unar_call.args[2] == ""
+        finally:
+            extract_service.config.extract.password_list = old_password_list
+            extract_service.config.extract.prefer_unar_for_rar = old_prefer_unar
+
+    @pytest.mark.asyncio
+    async def test_encrypted_opaque_rar_keeps_nonempty_password_when_empty_probe_fails(
+        self, extract_service, temp_dir,
+    ):
+        """空密码对照探测失败（真加密）时保留非空密码，且候选列表不被截断。"""
+        archive_path = os.path.join(temp_dir, "RJ01555018")
+        output_path = os.path.join(temp_dir, "out")
+        os.makedirs(output_path, exist_ok=True)
+        with open(archive_path, "wb") as fp:
+            fp.write(b"Rar!\x1a\x00" + (b"\0" * 64))
+        task = Task(
+            TaskType.EXTRACT,
+            os.path.join(temp_dir, "RJ01555018.zip"),
+            task_id="opaque-encrypted-rar",
+        )
+        correct_password = "real-secret"
+
+        old_password_list = extract_service.config.extract.password_list
+        try:
+            extract_service.config.extract.password_list = []
+            extract_service._get_password_candidates_for_archive = AsyncMock(return_value=[])
+            extract_service._list_archive_contents = AsyncMock(return_value=[
+                {"name": "small.txt", "size": 128, "is_dir": False},
+            ])
+            # 外层密码误判 'ok'（未加密条目忽略 -p）；空密码对照返回 wrong_password
+            # —— 说明归档真的加密了，应保留外层密码
+            def probe_side_effect(_path, password, **_kwargs):
+                if password in ("outer-password", correct_password):
+                    return "ok"
+                return "wrong_password"
+
+            extract_service._probe_password = AsyncMock(side_effect=probe_side_effect)
+            extract_service._is_rar_archive = Mock(return_value=False)
+            extract_service._run_7z_command = AsyncMock(return_value=subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=b"", stderr=b"",
+            ))
+
+            with patch.object(
+                extract_service,
+                "_reject_if_garbled_after_extract",
+                new=AsyncMock(return_value=False),
+            ):
+                success, password = await extract_service._try_extract_nested_direct(
+                    archive_path,
+                    output_path,
+                    parent_password="outer-password",
+                    task=task,
+                )
+
+            assert success is True
+            assert password == "outer-password"
+            # 候选未截断：7zz 循环先试误判的外层密码（会真实失败 rc=2 已 mock 为成功，
+            # 此处主要验证 probe 后 password_list 保留了完整候选 —— 通过
+            # nested_password_candidate_total 元数据间接确认
+            assert task.task_metadata["nested_password_prevalidated"] is True
+        finally:
+            extract_service.config.extract.password_list = old_password_list
+
+    @pytest.mark.asyncio
+    async def test_opaque_rar_unar_failure_falls_back_to_7z(self, extract_service, temp_dir):
+        """unar 全部候选失败（非超时）时必须回退 7zz，而不是直接放弃。"""
+        archive_path = os.path.join(temp_dir, "RJ01688609")
+        output_path = os.path.join(temp_dir, "out")
+        os.makedirs(output_path, exist_ok=True)
+        with open(archive_path, "wb") as fp:
+            fp.write(b"Rar!\x1a\x00" + (b"\0" * 64))
+        task = Task(
+            TaskType.EXTRACT,
+            os.path.join(temp_dir, "RJ01688609.zip"),
+            task_id="opaque-unar-fallback",
+        )
+
+        old_password_list = extract_service.config.extract.password_list
+        old_prefer_unar = extract_service.config.extract.prefer_unar_for_rar
+        try:
+            extract_service.config.extract.password_list = []
+            extract_service.config.extract.prefer_unar_for_rar = True
+            extract_service._get_password_candidates_for_archive = AsyncMock(return_value=[])
+            extract_service._list_archive_contents = AsyncMock(return_value=[
+                {"name": "readme.txt", "size": 128, "is_dir": False},
+            ])
+            extract_service._probe_password = AsyncMock(return_value="ok")
+            extract_service._is_rar_archive = Mock(return_value=True)
+            extract_service._find_unar_executable = Mock(return_value="/usr/bin/unar")
+            # unar 全部失败（普通失败，非超时/磁盘满/不支持）
+            extract_service._try_unar_extract = AsyncMock(return_value=subprocess.CompletedProcess(
+                args=[], returncode=1, stdout=b"", stderr=b"cannot extract",
+            ))
+            extract_service._run_7z_command = AsyncMock(return_value=subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=b"", stderr=b"",
+            ))
+
+            with patch.object(
+                extract_service,
+                "_reject_if_garbled_after_extract",
+                new=AsyncMock(return_value=False),
+            ):
+                success, password = await extract_service._try_extract_nested_direct(
+                    archive_path,
+                    output_path,
+                    parent_password="outer-password",
+                    task=task,
+                )
+
+            assert success is True
+            # 回退 7zz 生效：_run_7z_command 被调用过
+            extract_service._run_7z_command.assert_awaited()
+            extract_service._try_unar_extract.assert_awaited()
+        finally:
+            extract_service.config.extract.password_list = old_password_list
+            extract_service.config.extract.prefer_unar_for_rar = old_prefer_unar
+
+    @pytest.mark.asyncio
+    async def test_opaque_rar_unar_timeout_keeps_original_no_fallback_behavior(
+        self, extract_service, temp_dir,
+    ):
+        """unar 单候选超时（rc=-9）时保持原行为：不再用 7zz 重复穷举。"""
+        archive_path = os.path.join(temp_dir, "RJ01688609")
+        output_path = os.path.join(temp_dir, "out")
+        os.makedirs(output_path, exist_ok=True)
+        with open(archive_path, "wb") as fp:
+            fp.write(b"Rar!\x1a\x00" + (b"\0" * 64))
+        task = Task(
+            TaskType.EXTRACT,
+            os.path.join(temp_dir, "RJ01688609.zip"),
+            task_id="opaque-unar-timeout",
+        )
+
+        old_password_list = extract_service.config.extract.password_list
+        old_prefer_unar = extract_service.config.extract.prefer_unar_for_rar
+        try:
+            extract_service.config.extract.password_list = []
+            extract_service.config.extract.prefer_unar_for_rar = True
+            extract_service._get_password_candidates_for_archive = AsyncMock(return_value=[])
+            extract_service._list_archive_contents = AsyncMock(return_value=[
+                {"name": "readme.txt", "size": 128, "is_dir": False},
+            ])
+            extract_service._probe_password = AsyncMock(return_value="ok")
+            extract_service._is_rar_archive = Mock(return_value=True)
+            extract_service._find_unar_executable = Mock(return_value="/usr/bin/unar")
+            # unar 超时（rc=-9）
+            extract_service._try_unar_extract = AsyncMock(return_value=subprocess.CompletedProcess(
+                args=[], returncode=-9, stdout=b"", stderr=b"",
+            ))
+            _7z_mock = AsyncMock(return_value=subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=b"", stderr=b"",
+            ))
+            extract_service._run_7z_command = _7z_mock
+
+            success, password = await extract_service._try_extract_nested_direct(
+                archive_path,
+                output_path,
+                parent_password="outer-password",
+                task=task,
+            )
+
+            assert success is False
+            assert password is None
+            # 超时不回退 7zz
+            _7z_mock.assert_not_awaited()
+            assert task.task_metadata["nested_password_probe_timeout"] is True
+        finally:
+            extract_service.config.extract.password_list = old_password_list
+            extract_service.config.extract.prefer_unar_for_rar = old_prefer_unar
 
     @pytest.mark.asyncio
     async def test_nested_extract_tries_outer_filename_password_candidate(

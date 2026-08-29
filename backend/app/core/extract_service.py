@@ -3973,7 +3973,29 @@ class ExtractService:
                         allow_full_test=False,
                     )
                     if probe_result == "ok":
-                        selected_password = password
+                        if password and "" in seen:
+                            # 7zz 对未加密条目忽略 -p，CRC 通过即返回 'ok'，非空密码
+                            # 可能被误判（内层包实际无密码）。用空密码对照探测：
+                            # 空密码也通过 → 归档未加密，应选空密码。
+                            empty_probe = await self._probe_password(
+                                archive_path,
+                                "",
+                                timeout=self.PROBE_TIMEOUT_SECONDS,
+                                file_list=opaque_file_list,
+                                task=task,
+                                allow_full_test=False,
+                            )
+                            if empty_probe == "ok":
+                                logger.info(
+                                    "无扩展名嵌套包空密码对照探测通过，归档未加密，"
+                                    "放弃被误判的非空密码: %s",
+                                    archive_name,
+                                )
+                                selected_password = ""
+                            else:
+                                selected_password = password
+                        else:
+                            selected_password = password
                         break
                     if probe_result != "wrong_password":
                         probe_had_unknown = True
@@ -3984,7 +4006,12 @@ class ExtractService:
                         )
 
                 if selected_password is not None:
-                    password_list = [selected_password]
+                    # 把验证通过的密码排到最前，但保留其余候选作为解压阶段自救后备，
+                    # 不再截断为单一候选（探测误判时其余候选仍有机会）。
+                    password_list = [
+                        selected_password,
+                        *[p for p in password_list if p != selected_password],
+                    ]
                     opaque_password_prevalidated = True
                     if task is not None:
                         self._set_extract_meta(
@@ -3997,7 +4024,8 @@ class ExtractService:
                             nested_password_prevalidated=True,
                         )
                     logger.info(
-                        "无扩展名嵌套包已通过小文件密码校验，将执行一次不限时完整解压: %s",
+                        "无扩展名嵌套包已通过小文件密码校验，密码状态: %s（其余候选保留为后备，将执行一次不限时完整解压）: %s",
+                        self._password_log_state(selected_password),
                         archive_name,
                     )
                 elif not probe_had_unknown:
@@ -4022,12 +4050,23 @@ class ExtractService:
         # 大型 7z 可能没有可供小条目 CRC 探测的文件，此时不能再把这个已验证
         # 的父级密码也套进 45 秒完整解压超时；否则正确密码会在真实解压完成前
         # 被杀掉。若两层密码不同，父级密码失败后仍按受限候选继续尝试。
+        # 注意：小文件密码校验已命中（opaque_password_prevalidated）时，probe
+        # 的排序（含空密码对照纠偏结果）优先于 trusted 重排——外层密码可能
+        # 已被 probe 判为 wrong_password 或确认归档未加密，不能再提到最前。
         trusted_parent_password = (
             normalize_password_value(parent_password)
-            if is_opaque_nested_archive and parent_password
+            if (
+                is_opaque_nested_archive
+                and parent_password
+                and not opaque_password_prevalidated
+            )
             else ""
         )
-        has_trusted_parent_password = trusted_parent_password in password_list
+        # trusted_parent_password 为空串时不能启用重排：空串 in password_list
+        # 恒为 True（空密码候选），会把空密码错误提到最前，覆盖 probe 的排序。
+        has_trusted_parent_password = (
+            bool(trusted_parent_password) and trusted_parent_password in password_list
+        )
         fallback_password_list = (
             [
                 password
@@ -4122,6 +4161,7 @@ class ExtractService:
         ):
             unar_unsupported = False
             unar_disk_full = False
+            unar_timed_out = False
             for index, password in enumerate(password_list):
                 if index > 0:
                     await asyncio.to_thread(clean_output)
@@ -4158,6 +4198,7 @@ class ExtractService:
                         unar_disk_full = True
                         break
                     if result.returncode == -9:
+                        unar_timed_out = True
                         if task is not None:
                             self._set_extract_meta(
                                 task,
@@ -4191,17 +4232,30 @@ class ExtractService:
                 logger.error("嵌套 RAR unar 解压因磁盘空间不足终止: %s", archive_path)
                 return False, None
             if is_opaque_nested_archive and not unar_unsupported:
+                if unar_timed_out:
+                    # 已发生单候选超时，7zz 重复穷举只会再次超时，维持原行为。
+                    if task is not None:
+                        self._set_extract_meta(
+                            task,
+                            nested_password_probe_failed=True,
+                            nested_password_probe_reason="无扩展名嵌套 RAR 未在受限候选中验证出可用密码",
+                        )
+                    logger.warning(
+                        "无扩展名嵌套 RAR unar 候选探测超时，不再用 7zz 重复穷举: %s",
+                        archive_name,
+                    )
+                    return False, None
                 if task is not None:
                     self._set_extract_meta(
                         task,
                         nested_password_probe_failed=True,
-                        nested_password_probe_reason="无扩展名嵌套 RAR 未在受限候选中验证出可用密码",
+                        nested_password_probe_reason="无扩展名嵌套 RAR unar 全部候选失败，回退 7zz 完整解压",
                     )
                 logger.warning(
-                    "无扩展名嵌套 RAR 未验证出可用密码，不再用 7zz 重复穷举: %s",
+                    "无扩展名嵌套 RAR unar 全部候选失败，回退 7zz 完整解压路径: %s",
                     archive_name,
                 )
-                return False, None
+                # 不 return，落入下方 7zz 循环（password_list 已含空密码与全部候选）
 
             # unar 没成 → 清空 output 让 7zz 接手
             await asyncio.to_thread(clean_output)
