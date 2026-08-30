@@ -111,7 +111,7 @@
       <div class="field-stack">
         <div class="test-bar">
           <stateful-button
-            :click="testAITitleConnection"
+            @click="testAITitleConnection"
             :disabled="!cfg.enabled || !cfg.model"
             class="stateful-button"
           >
@@ -208,11 +208,13 @@ const aiTitleTestResult = ref(null)
 async function testAITitleConnection() {
   aiTitleTestResult.value = null
   try {
+    // 复用 AI 配对 API 时不传独立连接参数，后端按 use_ai_subtitle_api 读取字幕配对配置
+    const reuseSubtitleApi = cfg.value?.use_ai_subtitle_api === true
     const resp = await fetch('/api/ai-title-translation/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        config: {
+        config: reuseSubtitleApi ? { use_ai_subtitle_api: true } : {
           enabled: true,
           model: cfg.value?.model,
           api_key: cfg.value?.api_key === '********' ? '' : cfg.value?.api_key,

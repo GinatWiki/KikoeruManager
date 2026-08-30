@@ -197,3 +197,14 @@ def get_archive_total_size(file_path: str) -> int:
         except OSError:
             pass
     return total
+
+
+def is_small_archive(file_path: str, threshold_bytes: int) -> bool:
+    """判断压缩包是否属于"小型压缩包"（0 < 整组大小 < threshold）。
+
+    ★ 必须用整组大小而不是首卷单文件大小：分卷格式（.7z.001/.002 ...）的
+    头分卷经常只有几 KB，若按单文件 stat 判定，一个 3GB 的分卷包会被误判成
+    "小型字幕包"，进而被"包内无字幕 → 转人工核查"链路拦截（v2.5.26 用户实测）。
+    """
+
+    return 0 < get_archive_total_size(file_path) < threshold_bytes

@@ -17,7 +17,7 @@ from pathlib import Path
 import logging
 from sqlalchemy import or_
 
-from .archive_volume_utils import get_archive_total_size, get_archive_volume_paths, sort_archive_volumes
+from .archive_volume_utils import get_archive_total_size, get_archive_volume_paths, is_small_archive, sort_archive_volumes
 from .failure_reason_formatter import format_problem_failure_message
 
 logger = logging.getLogger(__name__)
@@ -2797,17 +2797,15 @@ class TaskEngine:
                                 and getattr(config.auto_process, 'import_linked_translation_subtitles', False)
                                 and os.path.isfile(task.source_path)
                             ):
-                                try:
-                                    _unknown_size = os.path.getsize(task.source_path)
-                                except OSError:
-                                    _unknown_size = 0
-                                if 0 < _unknown_size < 10 * 1024 * 1024:
+                                # 用整组大小判定：分卷头包（.7z.001 等）单文件可能只有 1KB，
+                                # 按单文件大小会把大体积分卷包误判成字幕小包
+                                if is_small_archive(task.source_path, 10 * 1024 * 1024):
                                     _reason = "小型压缩包无法识别 RJ 号，需人工处理"
                                     task.fail(_reason)
                                     self._record_problem_work_for_extract_failure(task, None, _reason)
                                     logger.warning(
                                         f"[未知] 小型压缩包未识别到 RJ 号，已转入问题作品: "
-                                        f"source={os.path.basename(task.source_path)} size={_unknown_size}"
+                                        f"source={os.path.basename(task.source_path)} size={os.path.getsize(task.source_path)}"
                                     )
                                     await self._abort_precheck(precheck_task)
                                     return
@@ -2924,11 +2922,9 @@ class TaskEngine:
                                     getattr(config.auto_process, 'import_linked_translation_subtitles', False)
                                     and os.path.isfile(task.source_path)
                                 ):
-                                    try:
-                                        _src_size = os.path.getsize(task.source_path)
-                                    except OSError:
-                                        _src_size = 0
-                                    if 0 < _src_size < 10 * 1024 * 1024:
+                                    # 用整组大小判定：分卷头包（.7z.001 等）单文件可能只有 1KB，
+                                    # 按单文件大小会把大体积分卷包误判成字幕小包转入人工核查
+                                    if is_small_archive(task.source_path, 10 * 1024 * 1024):
                                         _is_small_subtitle_candidate = True
 
                                 if _is_small_subtitle_candidate:

@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..config.settings import get_config
 from ..models.database import ConflictWork, SessionLocal, WorkCanonicalLink, get_db
+from .archive_volume_utils import get_archive_total_size, is_small_archive
 from .dlsite_service import get_dlsite_service
 from .extract_service import ExtractService
 from .kikoeru_duplicate_service import get_kikoeru_service
@@ -2889,11 +2890,13 @@ class LinkedSubtitleImportService:
         manual_entry: bool = False,
     ) -> Dict[str, Any]:
         _subtitle_size_threshold = int(self.extract_service.NESTED_SUBTITLE_SIZE_THRESHOLD)
+        # 用整组大小判定小型压缩包：分卷头包（.7z.001 等）单文件可能只有 1KB，
+        # 按单文件 stat 会把大体积分卷包误判成字幕小包
+        _is_small_archive = is_small_archive(archive_path, _subtitle_size_threshold)
         try:
-            _archive_size = os.path.getsize(archive_path)
+            _archive_size = get_archive_total_size(archive_path)
         except OSError:
             _archive_size = 0
-        _is_small_archive = (0 < _archive_size < _subtitle_size_threshold)
         source_rjcode = self._extract_rjcode(source_rjcode_hint) or self._extract_rjcode_from_paths(archive_path)
         archive_info = None
         if not source_rjcode:
@@ -2911,7 +2914,7 @@ class LinkedSubtitleImportService:
         source_subtitles: List[Dict[str, Any]] = []
         probe_result: Dict[str, Any] = {}
 
-        if 0 < _archive_size < _subtitle_size_threshold:
+        if _is_small_archive:
             # 小包（< 10MB）：先解压探查字幕，再查 DLsite 确认翻译作关系，
             # 本地字幕状态由 _build_common_preview 读取 ready 库存索引。
             # 手动入口（manual_entry=True）走完整解压链路：嵌套压缩包按主流程

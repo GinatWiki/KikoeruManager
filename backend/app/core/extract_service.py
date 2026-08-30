@@ -41,6 +41,7 @@ from datetime import datetime
 
 from ..config.settings import get_config
 from ..core.archive_detection import detect_embedded_zip_offset
+from ..core.archive_volume_utils import get_archive_total_size
 from ..core.polyglot_detector import find_embedded_archive
 from ..core.task_engine import Task
 from ..core.password_utils import (
@@ -3290,7 +3291,9 @@ class ExtractService:
                     #   - 其他一切（命名不规范 / peek 失败 / 含媒体 / 含说明 .txt）
                     #     → non_subtitle，走常规解压让密码列表逐个尝试，保证不漏奖励
                     try:
-                        nested_archive_size = os.path.getsize(file_path)
+                        # 用整组大小判定：分卷头包（.7z.001 等）单文件可能只有 1KB，
+                        # 按单文件 stat 会把嵌套大体积分卷包误判成字幕小包跳过解压
+                        nested_archive_size = get_archive_total_size(file_path)
                     except OSError:
                         nested_archive_size = 0
 

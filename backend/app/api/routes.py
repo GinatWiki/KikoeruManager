@@ -3990,6 +3990,76 @@ def reveal_ai_title_translation_secret(payload: AITitleTranslationSecretRevealRe
     return {"value": _read_ai_title_translation_api_key_from_disk()}
 
 
+@app.post("/api/ai-title-translation/test")
+async def ai_title_translation_test(request: AITitleTranslationTestRequest):
+    """测试 AI 标题汉化模型连接：向模型发送一个短标题并确认能返回翻译。
+
+    传入 config.use_ai_subtitle_api=true 时复用 AI 字幕配对的连接配置（与任务执行链路一致）；
+    否则使用前端表单草稿的连接参数。api_key 为掩码时回退磁盘上保存的真实 Key。
+    """
+    from ..core.ai_title_translation_service import get_ai_title_translation_service
+
+    try:
+        cfg_dict = dict(request.config or {})
+        if not cfg_dict.get("model"):
+            # 未传模型时回退当前保存配置（保持与字幕配对测试接口一致的行为）
+            saved_cfg = get_config().ai_title_translation
+            cfg_dict.setdefault("model", getattr(saved_cfg, "model", ""))
+
+        if cfg_dict.get("use_ai_subtitle_api"):
+            saved_cfg = get_config().ai_title_translation
+            sub_cfg = get_config().ai_subtitle_matching
+            cfg_dict = {
+                **cfg_dict,
+                "enabled": True,
+                "model": getattr(sub_cfg, "model", ""),
+                "api_key": getattr(sub_cfg, "api_key", ""),
+                "api_base": getattr(sub_cfg, "api_base", ""),
+                "api_version": getattr(sub_cfg, "api_version", ""),
+                "organization": getattr(sub_cfg, "organization", ""),
+                "proxy_url": getattr(sub_cfg, "proxy_url", ""),
+                "timeout_seconds": getattr(sub_cfg, "timeout_seconds", 30),
+                "max_retries": getattr(sub_cfg, "max_retries", 2),
+                "temperature": getattr(sub_cfg, "temperature", 0.1),
+                "prompt_template": getattr(saved_cfg, "prompt_template", ""),
+            }
+            saved_api_key = ""
+        else:
+            cfg_dict.setdefault("enabled", True)
+            saved_api_key = _read_ai_title_translation_api_key_from_disk() or ""
+
+        result = await get_ai_title_translation_service().translate_single(
+            "テスト",
+            cfg_dict,
+            saved_api_key=saved_api_key,
+        )
+        # translate_single 对 disabled 配置返回 success=False + status=disabled，
+        # 统一转成测试失败信息，避免前端把"未启用"误显示成连接错误
+        if result.get("status") == "disabled":
+            return {
+                "success": False,
+                "status": "failed",
+                "error": {"code": "disabled", "title": "未启用", "suggestion": "请先启用 AI 标题汉化"},
+                "model": str(cfg_dict.get("model") or ""),
+                "duration_ms": 0,
+            }
+        return result
+    except Exception as exc:
+        logger.warning("[AI标题] 测试连接失败: %s", exc)
+        return {
+            "success": False,
+            "status": "failed",
+            "error": {
+                "code": "unknown_error",
+                "title": "测试失败",
+                "message": str(exc),
+                "suggestion": "检查后端日志和 AI 配置",
+            },
+            "model": str((request.config or {}).get("model") or ""),
+            "duration_ms": 0,
+        }
+
+
 def _ai_title_folder_name(rjcode_value: str, folder_title: str, metadata: Optional[dict] = None) -> str:
     """AI 标题汉化后的项目文件夹名。
 

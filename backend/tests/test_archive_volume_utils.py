@@ -4,6 +4,7 @@ from app.core.archive_volume_utils import (
     detect_archive_volume_group,
     get_archive_total_size,
     get_archive_volume_paths,
+    is_small_archive,
 )
 
 
@@ -71,3 +72,33 @@ def test_single_exe_sfx_does_not_become_volume_group(tmp_path):
     assert detect_archive_volume_group(str(exe)) is None
     assert get_archive_volume_paths(str(exe)) == [str(exe)]
     assert get_archive_total_size(str(exe)) == 128
+
+
+def test_small_archive_judgement_uses_whole_volume_group_size(tmp_path):
+    """回归：分卷头包（.7z.001 只有 1KB）不能按单文件大小误判成小型字幕包。
+
+    v2.5.26 用户实测 RJ01609179.7z.001 = 1KB + .7z.002 = 3.31GB，
+    task_engine 按首卷 os.path.getsize 判定 < 10MB → 误入"小型压缩包内未发现
+    字幕文件"人工核查链路。
+    """
+    head = tmp_path / "RJ01609179.7z.001"
+    tail = tmp_path / "RJ01609179.7z.002"
+    _write_bytes(head, 1024)
+    _write_bytes(tail, 32 * 1024 * 1024)  # 32MB
+
+    threshold = 10 * 1024 * 1024
+
+    # 从任意一个分卷成员进入都必须看到整组大小
+    assert not is_small_archive(str(head), threshold)
+    assert not is_small_archive(str(tail), threshold)
+    assert get_archive_total_size(str(head)) == 1024 + 32 * 1024 * 1024
+
+    # 真正的小包（单文件、无分卷）仍判定为小包
+    tiny = tmp_path / "RJ00000003.zip"
+    _write_bytes(tiny, 5 * 1024 * 1024)
+    assert is_small_archive(str(tiny), threshold)
+
+    # 空文件不算小包（保持 0 < size 语义）
+    empty = tmp_path / "RJ00000004.zip"
+    empty.write_bytes(b"")
+    assert not is_small_archive(str(empty), threshold)

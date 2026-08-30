@@ -106,3 +106,95 @@ def test_completion_kwargs_uses_configured_max_tokens():
     service = AITitleTranslationService()
     assert service._completion_kwargs(_config(max_tokens=8192), [])["max_tokens"] == 8192
     assert service._completion_kwargs(_config(), [])["max_tokens"] == 4096
+
+
+# ---------------------------------------------------------------------------
+# /api/ai-title-translation/test 接口回归
+#
+# v2.5.26 用户实测：设置页"AI 标题汉化 → 测试连接"点击无反应。双重根因：
+#   1. 前端 <stateful-button :click="..."> 传了不存在的 prop，组件只认 @click；
+#   2. 后端 /api/ai-title-translation/test 接口根本不存在（404）。
+# 这里固定后端接口行为：普通模式用表单草稿参数 + 掩码 Key 回退；
+# use_ai_subtitle_api=true 时复用字幕配对连接配置。
+# ---------------------------------------------------------------------------
+
+def _install_fake_litellm_capture(monkeypatch: pytest.MonkeyPatch, capture: dict):
+    async def acompletion(**kwargs):
+        capture["kwargs"] = kwargs
+        return _make_response('{"テスト": "测试"}')
+
+    monkeypatch.setitem(sys.modules, "litellm", types.SimpleNamespace(acompletion=acompletion))
+
+
+def test_test_endpoint_exists_and_translates(client, monkeypatch):
+    capture: dict = {}
+    _install_fake_litellm_capture(monkeypatch, capture)
+
+    resp = client.post(
+        "/api/ai-title-translation/test",
+        json={"config": {"enabled": True, "model": "openai/gpt-4o-mini", "api_key": "sk-test"}},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    assert data["translated_title"] == "测试"
+    assert capture["kwargs"]["model"] == "openai/gpt-4o-mini"
+
+
+def test_test_endpoint_reuses_subtitle_api_config(client, monkeypatch):
+    capture: dict = {}
+    _install_fake_litellm_capture(monkeypatch, capture)
+
+    saved_model = client.app.state  # noqa: F841  仅确保 app 可访问
+    from app.config.settings import get_config
+    cfg = get_config()
+    monkeypatch.setattr(cfg, "ai_subtitle_matching", type(
+        "SubCfg",
+        (),
+        {
+            "model": "openai/subtitle-model",
+            "api_key": "sk-sub",
+            "api_base": "https://sub.example.com/v1",
+            "api_version": "",
+            "organization": "",
+            "proxy_url": "",
+            "timeout_seconds": 45,
+            "max_retries": 1,
+            "temperature": 0.2,
+        },
+    )(), raising=False)
+
+    resp = client.post(
+        "/api/ai-title-translation/test",
+        json={"config": {"use_ai_subtitle_api": True}},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    assert capture["kwargs"]["model"] == "openai/subtitle-model"
+    assert capture["kwargs"]["api_key"] == "sk-sub"
+    assert capture["kwargs"]["api_base"] == "https://sub.example.com/v1"
+
+
+def test_test_endpoint_masked_api_key_falls_back_to_disk(client, monkeypatch):
+    capture: dict = {}
+    _install_fake_litellm_capture(monkeypatch, capture)
+
+    import app.api.routes as routes_mod
+    monkeypatch.setattr(
+        routes_mod,
+        "_read_ai_title_translation_api_key_from_disk",
+        lambda: "sk-saved-on-disk",
+    )
+
+    resp = client.post(
+        "/api/ai-title-translation/test",
+        json={"config": {"enabled": True, "model": "openai/gpt-4o-mini", "api_key": "********"}},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    assert capture["kwargs"]["api_key"] == "sk-saved-on-disk"
