@@ -485,6 +485,10 @@
 - 改安全网关：跑相关 `routes.py` / `security_gate_service.py` `py_compile`，并手动验证 `/verify`、`/blocked`、正常业务页跳转。
 - 改数据库维护 / FTS：跑 `backend/tests/test_routes_maintenance_config.py backend/tests/test_activity_log_rollup_service.py -q`，前端设置页改动再跑 `npm run build`。
 - 改发布流程：检查 `.github/workflows/ghcr.yml` 和 semver tag。
+- 每次发版固定产出 4 个产物：GHCR 镜像（`ghcr.yml`）、免安装版控制台 zip、免安装版无控制台 zip、Windows 安装包（均在 `.github/workflows/release.yml` 的 `build-windows` 任务里）。
+- Windows 安装包脚本在 `installer/windows/KikoeruManager.iss`，语言包 `installer/windows/ChineseSimplified.isl`，两个文件都必须是 **UTF-8 with BOM**，否则 Inno Setup 6 按系统代码页解析中文会乱码。
+- 安装包默认装到 `{localappdata}\Programs\KikoeruManager` 且 `PrivilegesRequired=lowest`：应用把数据写在 exe 同级 `data` 目录，装到 Program Files 会因无写入权限启动失败，改安装脚本时不要把这个默认值改回系统目录。
+- 安装包靠命名互斥体 `KikoeruManager_SingleInstance_Mutex`（`desktop_app.py` 的 `SINGLE_INSTANCE_MUTEX_NAME`）判断应用是否运行中，改名要同步改 ISS 里的 `MyAppMutex`。
 
 ## 11. 常用排查路径
 

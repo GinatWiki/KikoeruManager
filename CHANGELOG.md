@@ -2,6 +2,15 @@
 
 本文件记录 KikoeruManager 的版本变化、功能更新与问题修复。更早的历史版本可通过 GitHub Tags 与提交历史查看。
 
+## v2.5.28
+
+- 新增：Windows 安装包（`kikoerumanager-<版本>-windows-setup.exe`，Inno Setup，由 GitHub Actions 与免安装版一同构建发布）。
+  - 免管理员安装，默认装到 `%LOCALAPPDATA%\Programs\KikoeruManager`——应用把配置、内置数据库和日志写在安装目录下的 `data`，装到 Program Files 会因缺少写入权限无法启动；选到系统受保护目录时安装向导会弹提示。
+  - 可选组件：桌面快捷方式、开机托盘自启、控制台版（排错用）；开始菜单内置「数据目录」与卸载入口。
+  - 升级安装沿用原目录并保留数据；卸载默认保留 `data`（内置数据库、配置、日志），仅在确认后删除。
+- 优化：桌面端创建 Windows 命名互斥体，安装包/卸载程序能检测并提示关闭正在运行的实例。
+- 优化：托盘菜单新增「打开数据目录」，安装版也能一键打开数据所在文件夹。
+
 ## v2.4.64
 
 - 修复：PyInstaller 打包 exe 后 AI 字幕配对提示"后端未安装 litellm"——litellm 数据文件 `model_prices_and_context_window_backup.json` 未被打包进 exe，运行时找不到文件
