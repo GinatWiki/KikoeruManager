@@ -2,6 +2,10 @@
 
 本文件记录 KikoeruManager 的版本变化、功能更新与问题修复。更早的历史版本可通过 GitHub Tags 与提交历史查看。
 
+## v2.5.29
+
+- 优化：安装包不再打包控制台版 exe，体积从 272MB 降到与免安装版 zip 齐平（约 181MB）；需要控制台排错时下载免安装版控制台 zip 即可。
+
 ## v2.5.28
 
 - 新增：Windows 安装包（`kikoerumanager-<版本>-windows-setup.exe`，Inno Setup，由 GitHub Actions 与免安装版一同构建发布）。

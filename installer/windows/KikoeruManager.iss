@@ -9,7 +9,6 @@
 #define MyAppPublisher "GinatWiki"
 #define MyAppURL "https://github.com/GinatWiki/KikoeruManager"
 #define MyAppExeName "KikoeruManager.exe"
-#define MyAppConsoleExeName "KikoeruManager-console.exe"
 ; 与 desktop_app.py 中 SINGLE_INSTANCE_MUTEX_NAME 保持一致，用于检测运行中实例
 #define MyAppMutex "KikoeruManager_SingleInstance_Mutex"
 
@@ -66,13 +65,11 @@ Name: "chinesesimplified"; MessagesFile: "{#MyLangFile}"
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加快捷方式："
 Name: "runatstartup"; Description: "开机后在托盘后台自动启动"; GroupDescription: "其他任务："; Flags: unchecked
-Name: "consoleversion"; Description: "同时安装控制台版（排错用，体积约翻倍）"; GroupDescription: "可选组件："; Flags: unchecked
 
 [Files]
-; 主程序：托盘版（无控制台窗口）
+; 主程序：托盘版（无控制台窗口）。控制台版不再打进安装包——它只在排错时用得到，
+; 打进来会让安装包体积多出约 90MB，需要排错时直接下载免安装版控制台 zip 即可。
 Source: "..\..\backend\dist\KikoeruManager-noconsole.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
-; 控制台版（排错用，默认不安装）
-Source: "..\..\backend\dist\KikoeruManager.exe"; DestDir: "{app}"; DestName: "{#MyAppConsoleExeName}"; Flags: ignoreversion; Tasks: consoleversion
 ; 内置 PostgreSQL 运行目录（完整目录树：bin / lib / share 等）
 Source: "..\..\tools\postgres\pgsql\*"; DestDir: "{app}\tools\postgres\pgsql"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; 内置 Redis 运行目录（redis-server / redis-cli 与 msys 运行时 DLL 必须同目录）
@@ -84,7 +81,6 @@ Name: "{app}\data"
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{group}\{#MyAppName}（控制台版）"; Filename: "{app}\{#MyAppConsoleExeName}"; Tasks: consoleversion
 Name: "{group}\数据目录"; Filename: "{app}\data"
 Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
