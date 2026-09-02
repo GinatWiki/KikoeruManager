@@ -57,6 +57,7 @@ data/library_stats_cache.json
 # Project specific
 backend/build/
 backend/dist/
+dist-installer/
 frontend/dist/
 frontend/node_modules/
 *.spec
