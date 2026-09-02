@@ -38,6 +38,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Windows 命名互斥体：供安装包 / 卸载程序检测应用是否正在运行
+# （Inno Setup 的 AppMutex 只能识别命名互斥体，识别不了本应用基于锁定端口的单实例机制）。
+# 单实例判定本身仍以锁定端口为准，互斥体只作为外部可观测的运行标记，创建失败不影响启动。
+SINGLE_INSTANCE_MUTEX_NAME = "KikoeruManager_SingleInstance_Mutex"
+
+
+def create_single_instance_mutex():
+    """创建一个随进程生命周期存在的命名互斥体，返回内核句柄（失败返回 None）。"""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, ctypes.c_wchar_p]
+        handle = kernel32.CreateMutexW(None, False, SINGLE_INSTANCE_MUTEX_NAME)
+        if not handle:
+            logger.warning("创建单实例互斥体失败，安装包将无法检测运行中的实例")
+            return None
+        return handle
+    except Exception:
+        logger.debug("创建单实例互斥体异常（忽略）", exc_info=True)
+        return None
+
+
 class DesktopApp:
     def __init__(self):
         self.stop_event = threading.Event()
@@ -50,7 +77,9 @@ class DesktopApp:
         self.lock_socket = None
         self.backend_error = None
         self.server = None
-        
+        self.data_dir = None
+        self._mutex_handle = None
+
         # 查找图标路径
         self.icon_path = self._find_icon()
 
@@ -135,6 +164,22 @@ class DesktopApp:
         logger.info(f"打开浏览器界面: {self.url}")
         webbrowser.open(self.url)
 
+    def open_data_dir(self, icon=None, item=None):
+        """打开数据目录（安装版默认在用户目录下，托盘菜单提供直达入口）"""
+        target = self.data_dir
+        if not target:
+            logger.warning("数据目录尚未初始化")
+            return
+        try:
+            os.makedirs(target, exist_ok=True)
+            if os.name == "nt":
+                os.startfile(target)  # noqa: S606 - 仅用于打开本机数据目录
+            else:
+                webbrowser.open("file://" + target)
+            logger.info(f"已打开数据目录: {target}")
+        except Exception:
+            logger.exception("打开数据目录失败")
+
     def show_status(self, icon, item):
         """显示当前运行状态"""
         icon.notify("应用正在后台运行", "KikoeruManager")
@@ -195,6 +240,7 @@ class DesktopApp:
             menu = pystray.Menu(
                 pystray.MenuItem("打开浏览器界面", self.open_browser, default=True),
                 pystray.MenuItem("查看运行状态", self.show_status),
+                pystray.MenuItem("打开数据目录", self.open_data_dir),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("访问地址: " + self.url, lambda: None, enabled=False),
                 pystray.MenuItem("托盘运行中 (点击退出)", lambda: None, enabled=False),
@@ -222,6 +268,9 @@ class DesktopApp:
                 time.sleep(1)
 
     def run(self):
+        # 0. 创建命名互斥体：安装包/卸载程序据此判断应用是否在运行；句柄随进程存活
+        self._mutex_handle = create_single_instance_mutex()
+
         # 1. 检查单实例
         if not self.check_single_instance():
             import tkinter as tk
@@ -241,6 +290,7 @@ class DesktopApp:
 
         data_dir = os.path.join(base_dir, 'data')
         os.environ['DATA_PATH'] = data_dir
+        self.data_dir = data_dir
 
         config_dir = os.path.join(data_dir, 'config')
         os.makedirs(config_dir, exist_ok=True)
