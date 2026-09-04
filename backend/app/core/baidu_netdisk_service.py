@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
+from functools import partial
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
@@ -25,10 +26,12 @@ from urllib.request import Request, urlopen
 
 import aiohttp
 import requests
+import urllib3
 
 from ..config.settings import get_config, save_config
 from .fs_utils import move_path_efficient
 from .http_download_service import sanitize_http_download_item
+from .log_sanitizer import sanitize_text_for_log
 from .netdisk_link_parser import extract_share_inputs as parse_netdisk_share_inputs
 from .resource_budget_service import get_resource_budget_service
 
@@ -63,6 +66,15 @@ _BAIDU_PREVIEW_HTTP_TIMEOUT_SECONDS = 8.0
 _BAIDU_PREVIEW_MAX_CONCURRENCY = 4
 _BAIDU_LOW_SPEED_MIN_FILE_SIZE_BYTES = 512 * 1024 * 1024
 _BAIDU_TRANSFER_RETRY_DELAYS_SECONDS = (0, 2, 5, 12, 30)
+# ★ 关键：百度模块的 requests 请求必须显式声明压缩协商，不能走 urllib3 默认值。
+#   项目装了 brotlicffi（给 httpx 解 br 用），urllib3 v2 检测到后会默认在
+#   Accept-Encoding 里带上 br；百度部分分享页会返回 "Content-Encoding: gzip"
+#   但响应体并不是合法 gzip（风控页 / CDN 异常页最常见），urllib3 按 gzip 解就抛
+#   DecodeError（-3 incorrect header check），最终用户看到英文报错且接口仍返回 200。
+#   这里只用 gzip/deflate：页面是几十 KB 的 HTML，关掉 br 没有体积损失。
+_BAIDU_ACCEPT_ENCODING = "gzip, deflate"
+# 解压失败时改用不压缩方式重取的次数（每个候选 URL 至多一次，避免放大请求）。
+_BAIDU_DECODE_FALLBACK_ATTEMPTS = 1
 
 
 class BaiduNetdiskError(ValueError):
@@ -1158,6 +1170,11 @@ class BaiduNetdiskService:
             return "百度分享接口跳转异常，已尝试兼容入口；仍失败请确认分享链接和提取码后重试"
         if "params error" in lowered:
             return "百度分享验证接口拒绝当前请求，请确认分享链接和提取码；若浏览器可正常打开，稍后重试或重新绑定百度登录态"
+        if any(
+            fragment in lowered
+            for fragment in ("content-encoding", "failed to decode", "incorrect header check", "contentdecodingerror")
+        ):
+            return "百度返回的压缩内容无法解压（多为风控或临时异常页，已自动改用不压缩方式重试）；仍失败请稍后重试或重新绑定百度登录态"
         if any(fragment in text for fragment in ("提取码", "访问码", "密码", "密码错误", "需要输入")):
             return text
         if any(fragment in text for fragment in ("提取", "验证失败", "校验失败")):
@@ -2560,6 +2577,9 @@ class BaiduNetdiskService:
             "Accept": "application/json, text/javascript, */*; q=0.01" if browser_like else "application/json,text/plain,*/*",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "X-Requested-With": "XMLHttpRequest",
+            # 显式声明压缩协商：不声明 br，避免百度返回 "Content-Encoding: gzip"
+            # 却给非法 gzip 内容时 urllib3 解压失败（详见 _BAIDU_ACCEPT_ENCODING 注释）
+            "Accept-Encoding": _BAIDU_ACCEPT_ENCODING,
         }
         if content_type:
             headers["Content-Type"] = content_type
@@ -2577,6 +2597,105 @@ class BaiduNetdiskService:
             })
         return headers
 
+    @staticmethod
+    def _log_baidu_decode_failure(
+        url: str,
+        response: Any,
+        exc: BaseException,
+        *,
+        identity_retry: bool,
+        recovered: bool,
+    ) -> None:
+        """解压失败时把响应特征落日志，用于判断是百度侧下发非法压缩内容还是客户端问题。"""
+        headers = getattr(response, "headers", None) or {}
+        raw_prefix_hex = ""
+        raw = getattr(response, "raw", None)
+        if raw is not None:
+            try:
+                raw_prefix_hex = bytes(raw.read(8, decode_content=False) or b"").hex()
+            except Exception:
+                raw_prefix_hex = ""
+        logger.warning(
+            "[百度网盘] 响应解压失败 url=%s status=%s content_encoding=%s content_type=%s "
+            "content_length=%s transfer_encoding=%s raw_prefix_hex=%s identity_retry=%s recovered=%s "
+            "requests=%s urllib3=%s error=%s",
+            sanitize_text_for_log(url, max_length=200),
+            getattr(response, "status_code", ""),
+            headers.get("Content-Encoding", ""),
+            headers.get("Content-Type", ""),
+            headers.get("Content-Length", ""),
+            headers.get("Transfer-Encoding", ""),
+            raw_prefix_hex,
+            identity_retry,
+            recovered,
+            getattr(requests, "__version__", ""),
+            getattr(urllib3, "__version__", ""),
+            sanitize_text_for_log(str(exc), max_length=300),
+        )
+
+    @staticmethod
+    def _request_with_decode_fallback(
+        method: str,
+        url: str,
+        headers: Dict[str, str],
+        timeout: float,
+        *,
+        session: Any = None,
+        data: Any = None,
+        allow_redirects: bool = True,
+    ) -> Any:
+        """发请求并读取响应体；解压失败时改用 Accept-Encoding: identity 重取一次。
+
+        百度部分响应会声明 `Content-Encoding: gzip` 但响应体不是合法 gzip（风控页 /
+        CDN 异常页最常见），urllib3 按 gzip 解压会抛 DecodeError（zlib -3 incorrect
+        header check）。此时声明不压缩重取即可拿到明文，比直接失败给用户更稳。
+        """
+        client = session or requests
+        # 优先用 get/post 这类具名方法：requests 模块与 Session 都有，
+        # 测试里的假 Session 通常只实现 get/post，具名调用兼容性更好。
+        sender = getattr(client, str(method or "GET").lower(), None)
+        if sender is None:
+            sender = partial(client.request, method)
+        attempts = max(0, int(_BAIDU_DECODE_FALLBACK_ATTEMPTS))
+        for attempt in range(attempts + 1):
+            identity_retry = attempt > 0
+            request_headers = dict(headers)
+            if identity_retry:
+                request_headers["Accept-Encoding"] = "identity"
+            response = None
+            try:
+                request_kwargs: Dict[str, Any] = {
+                    "headers": request_headers,
+                    "timeout": timeout,
+                    "allow_redirects": allow_redirects,
+                }
+                # GET 不带 data：requests.get / Session.get 都接受它，但假 Session
+                # 与部分代理封装只认 GET 的常见参数，按需传更稳
+                if data is not None:
+                    request_kwargs["data"] = data
+                response = sender(url, **request_kwargs)
+                response.raise_for_status()
+                # requests 在读取 body 时才解压，必须在这里把解码异常逼出来；
+                # 只暴露 text 的响应（测试替身 / 代理封装）退回读 text
+                if hasattr(response, "content"):
+                    response.content
+                else:
+                    response.text
+                if identity_retry:
+                    BaiduNetdiskService._log_baidu_decode_failure(
+                        url, response, "前一次压缩响应解压失败，已用不压缩方式重取成功",
+                        identity_retry=True, recovered=True,
+                    )
+                return response
+            except requests.exceptions.ContentDecodingError as exc:
+                if response is not None:
+                    BaiduNetdiskService._log_baidu_decode_failure(
+                        url, response, exc, identity_retry=identity_retry, recovered=False
+                    )
+                if identity_retry or attempts <= 0:
+                    raise
+        raise BaiduNetdiskError("百度响应解压失败且重试未成功")
+
     async def _fetch_json(
         self,
         url: str,
@@ -2589,9 +2708,8 @@ class BaiduNetdiskService:
         def run() -> Dict[str, Any]:
             headers = self._baidu_web_api_headers(cookie, referer=referer, browser_like=use_requests)
             if use_requests:
-                response = requests.get(url, headers=headers, timeout=timeout)
-                response.raise_for_status()
-                return response.json()
+                response = self._request_with_decode_fallback("GET", url, headers, timeout)
+                return json.loads(response.text)
             request = Request(
                 url,
                 headers=headers,
@@ -2623,14 +2741,15 @@ class BaiduNetdiskService:
             if use_requests:
                 headers["Connection"] = "close"
                 with requests.Session() as session:
-                    response = session.post(
+                    response = self._request_with_decode_fallback(
+                        "POST",
                         url,
+                        headers,
+                        timeout,
+                        session=session,
                         data={key: str(value or "") for key, value in (data or {}).items()},
-                        headers=headers,
-                        timeout=timeout,
                     )
-                    response.raise_for_status()
-                    return response.json()
+                    return json.loads(response.text)
             request = Request(url, data=body, headers=headers)
             with urlopen(request, timeout=timeout) as response:
                 body_text = response.read().decode("utf-8", errors="replace")
@@ -2653,6 +2772,9 @@ class BaiduNetdiskService:
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
                 "Referer": referer or "https://pan.baidu.com/disk/home",
                 "Cookie": cookie,
+                # 不声明 br：百度部分分享页会返回 Content-Encoding: gzip 但内容不是
+                # 合法 gzip，urllib3 自动带上 br 时更容易踩到这种不一致的响应
+                "Accept-Encoding": _BAIDU_ACCEPT_ENCODING,
             }
             if referer and "/share/init" in referer:
                 headers["Referer"] = referer
@@ -2668,13 +2790,13 @@ class BaiduNetdiskService:
             session = requests.Session()
             for share_link in urls:
                 try:
-                    response = session.get(
+                    response = self._request_with_decode_fallback(
+                        "GET",
                         share_link,
-                        headers=headers,
-                        timeout=timeout,
-                        allow_redirects=True,
+                        headers,
+                        timeout,
+                        session=session,
                     )
-                    response.raise_for_status()
                     body = response.text
                     if "platform-non-found" in body or "error-404" in body:
                         raise BaiduNetdiskError("分享链接已失效")
@@ -2682,7 +2804,11 @@ class BaiduNetdiskService:
                     break
                 except Exception as exc:
                     last_error = str(exc)
-                    logger.debug("百度分享页参数读取失败 url=%s error=%s", share_link, exc)
+                    logger.warning(
+                        "百度分享页参数读取失败 url=%s error=%s",
+                        sanitize_text_for_log(share_link, max_length=200),
+                        sanitize_text_for_log(exc, max_length=300),
+                    )
             if not payload:
                 raise BaiduNetdiskError(f"无法读取百度分享页登录参数: {last_error or '页面无响应'}")
             return {
@@ -4258,6 +4384,9 @@ class BaiduNetdiskService:
             requests.exceptions.ConnectionError,
             requests.exceptions.ConnectTimeout,
             requests.exceptions.ReadTimeout,
+            # 响应体解压失败（百度偶发下发与 Content-Encoding 不符的内容）：
+            # 发生在解析响应之前、没有写副作用，重试是安全的
+            requests.exceptions.ContentDecodingError,
         )):
             return True
         if isinstance(exc, requests.exceptions.HTTPError):
