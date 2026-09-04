@@ -2663,3 +2663,84 @@ def test_routes_baidu_payload_accepts_obfuscated_domain_and_next_line_code():
     ])
 
     assert urls == ["https://pan.baidu.com/s/13EU1GlLvUULM43mkqhoZxA?pwd=38a2"]
+
+
+class _FakeDecodeResponse:
+    """模拟百度「声明 gzip 但内容不是合法 gzip」的响应：读 body 时才抛解码异常。"""
+
+    def __init__(self, decodable: bool):
+        self._decodable = decodable
+        self.status_code = 200
+        self.headers = {"Content-Encoding": "gzip", "Content-Type": "text/html"}
+        self.raw = None
+
+    def raise_for_status(self):
+        return None
+
+    @property
+    def content(self):
+        if not self._decodable:
+            raise requests.exceptions.ContentDecodingError(
+                "Received response with content-encoding: gzip, but failed to decode it.",
+            )
+        return b"<html>ok</html>"
+
+    @property
+    def text(self):
+        return "<html>ok</html>"
+
+
+class _FakeDecodeClient:
+    def __init__(self, decodable_from_attempt: int):
+        self.calls = []
+        self._decodable_from_attempt = decodable_from_attempt
+
+    def request(self, method, url, headers=None, data=None, timeout=None, allow_redirects=True):
+        self.calls.append({"method": method, "url": url, "headers": dict(headers or {})})
+        return _FakeDecodeResponse(len(self.calls) >= self._decodable_from_attempt)
+
+
+def test_request_with_decode_fallback_retries_with_identity_encoding():
+    client = _FakeDecodeClient(decodable_from_attempt=2)
+
+    response = BaiduNetdiskService._request_with_decode_fallback(
+        "GET",
+        "https://pan.baidu.com/s/1BwmBDmz",
+        {"Accept-Encoding": "gzip, deflate"},
+        5,
+        session=client,
+    )
+
+    assert response.text == "<html>ok</html>"
+    assert len(client.calls) == 2
+    assert client.calls[0]["headers"]["Accept-Encoding"] == "gzip, deflate"
+    assert client.calls[1]["headers"]["Accept-Encoding"] == "identity"
+
+
+def test_request_with_decode_fallback_raises_when_identity_retry_also_fails():
+    client = _FakeDecodeClient(decodable_from_attempt=99)
+
+    with pytest.raises(requests.exceptions.ContentDecodingError):
+        BaiduNetdiskService._request_with_decode_fallback(
+            "GET",
+            "https://pan.baidu.com/s/1BwmBDmz",
+            {"Accept-Encoding": "gzip, deflate"},
+            5,
+            session=client,
+        )
+
+    # 每个候选 URL 至多重试一次，不能无限放大请求
+    assert len(client.calls) == 2
+
+
+def test_share_preview_warning_translates_decode_failure():
+    service = BaiduNetdiskService()
+    raw = (
+        "('Received response with content-encoding: gzip, but failed to decode it.', "
+        "error('Error -3 while decompressing data: incorrect header check'))"
+    )
+
+    message = service._share_preview_warning(raw)
+
+    assert "content-encoding" not in message.lower()
+    assert "无法解压" in message

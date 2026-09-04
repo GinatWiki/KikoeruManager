@@ -2,6 +2,16 @@
 
 本文件记录 KikoeruManager 的版本变化、功能更新与问题修复。更早的历史版本可通过 GitHub Tags 与提交历史查看。
 
+## v2.5.30
+
+- 修复：库存「补全文件夹」创建任务必定失败，报「创建补全任务失败：name 'config' is not defined」（接口 400）。
+  - 根因是 `start_downloads()` 构造任务参数时读了 `config.storage.temp_path` / `config.asmr_sync`，却漏了 `config = get_config()`；该问题自 2026-06-08 的首次实现起就存在，`v2.5.20` 起的版本全部受影响。
+  - 整批失败时补 ERROR 级日志，并新增不依赖数据库的回归测试，防止再次写漏。
+- 修复：百度网盘部分分享链接预览失败，提示里出现英文 `Received response with content-encoding: gzip, but failed to decode it.`。
+  - 百度对个别链接（多为风控或临时异常页）会返回 `Content-Encoding: gzip` 但内容不是合法 gzip，urllib3 解压时抛 `-3 incorrect header check`；模块此前完全没声明 `Accept-Encoding`，装了 brotlicffi 后 urllib3 默认还会带上 br，更容易踩到。
+  - 现在显式声明 `gzip, deflate`，并在解压失败时自动改用不压缩方式重取一次（每个候选 URL 至多一次）；转存重试也把这类错误纳入可重试范围。
+  - 失败提示中文化，并在日志里记录响应的 `Content-Encoding` 与响应体前 8 字节，便于判定是百度侧下发非法压缩内容还是客户端问题。
+
 ## v2.5.29
 
 - 优化：安装包不再打包控制台版 exe，体积从 272MB 降到与免安装版 zip 齐平（约 181MB）；需要控制台排错时下载免安装版控制台 zip 即可。
