@@ -435,6 +435,8 @@ class LibraryFolderCompletionService:
         }
 
     async def start_downloads(self, library_id: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+        # 下载落盘目录、超时等参数都取自全局配置，必须先取到 config 再构造 metadata
+        config = get_config()
         library = self._get_local_library(library_id)
         raw_items = [item for item in items or [] if isinstance(item, dict)]
         if not raw_items:
@@ -546,6 +548,8 @@ class LibraryFolderCompletionService:
 
         if not created_tasks:
             first_error = errors[0]["error"] if errors else "没有有效下载项"
+            # 整批失败通常是配置/代码问题而不是用户选错了项，用 ERROR 级暴露原始错误
+            logger.error("[补全文件夹] 全部 %d 个下载项创建任务失败，首个错误: %s", len(raw_items), first_error)
             raise ValueError(first_error)
         return {
             "success": True,
