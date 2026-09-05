@@ -2,6 +2,21 @@
 
 本文件记录 KikoeruManager 的版本变化、功能更新与问题修复。更早的历史版本可通过 GitHub Tags 与提交历史查看。
 
+## v2.5.31
+
+- 修复：大压缩包（用户实测 1.03GB 的 RAR）放进监视目录后十几分钟都不建任务，且此后这个文件再也触发不了。
+  - **稳定等待窗口写死 300 秒**：`watcher` 给 `process_file` 传的 `max_wait` 是硬编码的 300，且按「从进入等待起算」判定。1GB 文件复制超过 300 秒是常态，于是必然超时；而超时后文件早已写完、不再产生任何 `on_modified` 事件，只能靠周期扫描重试，每次重试又烧掉 300 秒——用户等 10 分钟时恰好落在重试空窗里。
+    - 现在超时只按「**无进展**时长」判定：只要文件大小或 mtime 还在变化就一直等，慢速复制不再被误杀；另设按体积放宽的绝对上限（1GB 约 30 分钟）兜底，防止卡死的写入方让等待无限循环。
+  - **超时三次后永久拉黑**：连续 3 次超时会把文件塞进监视器的「已处理名单」，而这个集合**全代码库只有 `add`、没有 `clear`/`discard`/`remove`**，`stop()` 与 `start()` 都不碰它——所以关掉再打开监视器没用、把文件挪出去再挪回来也没用、连手动「扫描导入」也照样被拦（`_scan_and_create_tasks` 的 `is_processed` 同样查这个集合），**只有重启后端进程才能清空**。
+    - 现在名单带 TTL：成功处理记 30 天，失败/超时只记 30 分钟冷却，到期自动恢复；停止或启动监视器都会重置名单；名单条目上限 5000 条，超限时先清过期再淘汰最快到期的，不再无界增长。
+    - 超时计数也带归零窗口（默认 1 小时），历史上的偶发超时不会一直累积成「攒够 3 次就废掉」。
+  - 以上组合自 2026-08-30 的提交 `f6c38dc` 引入，**v2.5.29、v2.5.30 受影响**；其中 300 秒固定窗口与「名单从不清除」自初始提交起就存在。
+- 修复：监视器的周期扫描协程会静默停摆。`_periodic_scan` 原先 `except asyncio.CancelledError: break`，一旦触发扫描就永久停止，而 `is_running` 仍为 `true`、状态接口照常显示「运行中」；Docker / 网络挂载下 inotify 本就不可靠，兜底再没了就彻底不会触发任何处理。现在取消向外传播，并新增监护协程在扫描意外退出时自动拉起。
+- 修复：停止监视器时 `observer.join()` 没有超时，会把整个事件循环冻住（日志里表现为 `/api/watcher/stop` 响应极慢）。现在 join 限时 5 秒，且停止动作放到工作线程执行。
+- 优化：普通压缩包不再被误判为「带前缀伪装」的 polyglot 文件。`find_embedded_archive` 以前对偏移为 0 的 RAR/7z 也会返回命中（只有 ZIP 有 `offset == 0 → None` 的处理），导致每个普通 RAR 都被当成伪装文件，还要白读一大块数据做顺序扫描；现在文件头就是压缩包签名时直接排除。相关探测也移出事件循环（放到工作线程），避免 GB 级文件把主循环卡住。
+- 优化：可观测性——「文件在已处理名单内，跳过」从 DEBUG 提到 INFO（这是「文件摆在那却不建任务」最常见的原因）；`/api/watcher/status` 增加 `processed_files_count` 与 `last_scan_at`；新增 `POST /api/watcher/clear-processed` 与设置页「清空名单」按钮，让用户不重启就能自愈。
+- 新增配置项（`watcher` 段）：`stability_idle_timeout_seconds`、`stability_max_total_seconds`、`stability_max_total_per_gb_seconds`、`stability_max_total_cap_seconds`、`processed_memory_ttl_seconds`、`processed_failure_ttl_seconds`、`scan_supervisor_interval_seconds`；`processing` 段：`stability_timeout_blacklist_count`、`stability_timeout_reset_seconds`。均取默认值即可，无需手动配置。
+
 ## v2.5.30
 
 - 修复：库存「补全文件夹」创建任务必定失败，报「创建补全任务失败：name 'config' is not defined」（接口 400）。
