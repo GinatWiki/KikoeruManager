@@ -541,6 +541,13 @@ export const watcherApi = {
   stop: async () => {
     const response = await apiClient.post('/watcher/stop')
     return response.data
+  },
+
+  // 清空「已处理名单」：文件被记进名单后在 TTL 内不会再自动建任务，
+  // 偶发超时/异常也会进名单，这个接口让用户不必重启就能恢复。
+  clearProcessed: async () => {
+    const response = await apiClient.post('/watcher/clear-processed')
+    return response.data
   }
 }
 

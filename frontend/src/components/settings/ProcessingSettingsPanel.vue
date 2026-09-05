@@ -12,6 +12,31 @@
         <SettingsFieldCard label="扫描间隔（秒）">
           <SettingsRangeStepper v-model="config.watcher.scan_interval" :min="10" :max="300" :step="10" />
         </SettingsFieldCard>
+        <div class="watcher-memory-row">
+          <div class="watcher-memory-copy">
+            <span class="watcher-memory-title">已处理名单</span>
+            <span class="watcher-memory-sub">
+              进名单的文件在冷却期内不会再自动建任务。文件卡住不入库时，可清空名单让它重新被检测。
+            </span>
+            <span v-if="watcherMemoryHint" class="watcher-memory-hint">{{ watcherMemoryHint }}</span>
+          </div>
+          <StatefulButton
+            class="watcher-memory-btn"
+            unstyled
+            :success-hold="1200"
+            aria-label="清空监视器已处理名单"
+            @click="clearWatcherProcessed"
+          >
+            <template #prefix="{ state }">
+              <LoaderCircle v-if="state === 'loading'" class="watcher-memory-icon is-spinning" :size="14" :stroke-width="2.4" />
+              <Check v-else-if="state === 'success'" class="watcher-memory-icon" :size="14" :stroke-width="2.6" />
+              <Eraser v-else class="watcher-memory-icon" :size="14" :stroke-width="2.4" />
+            </template>
+            <template #default="{ state }">
+              {{ state === 'loading' ? '清空中' : state === 'success' ? '已清空' : '清空名单' }}
+            </template>
+          </StatefulButton>
+        </div>
       </div>
 
       <div class="settings-card">
@@ -175,18 +200,35 @@
 
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
-import { Check, HardDrive, HelpCircle, LoaderCircle, RefreshCw, Zap } from 'lucide-vue-next'
+import { Check, Eraser, HardDrive, HelpCircle, LoaderCircle, RefreshCw, Zap } from 'lucide-vue-next'
 import SettingsFieldCard from './SettingsFieldCard.vue'
 import SettingsToggleRow from './SettingsToggleRow.vue'
 import SettingsToggleChip from './SettingsToggleChip.vue'
 import SettingsRangeStepper from './SettingsRangeStepper.vue'
 import AppDropdown from '../common/AppDropdown.vue'
 import StatefulButton from '../ui/stateful-button.vue'
-import { systemApi } from '../../api'
+import { systemApi, watcherApi } from '../../api'
 
 const props = defineProps({
   config: { type: Object, required: true }
 })
+
+const watcherMemoryHint = ref('')
+
+async function clearWatcherProcessed() {
+  watcherMemoryHint.value = ''
+  try {
+    const data = await watcherApi.clearProcessed()
+    const cleared = Number(data?.cleared_count ?? 0)
+    watcherMemoryHint.value = cleared > 0
+      ? `已清空 ${cleared} 条，这些文件会在下一轮扫描时重新检测`
+      : '名单本来就是空的'
+  } catch (error) {
+    console.error('清空监视器已处理名单失败:', error)
+    watcherMemoryHint.value = '清空失败：' + (error.response?.data?.detail || error.message)
+    throw error
+  }
+}
 
 const autoProcessItems = [
   { key: 'check_duplicate', label: '预检重复' },
@@ -701,6 +743,68 @@ function formatDurationMs(value) {
 
 @keyframes diagnostics-refresh-spin {
   to { transform: rotate(360deg); }
+}
+
+.watcher-memory-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 10px;
+  background: rgba(148, 163, 184, 0.05);
+}
+
+.watcher-memory-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.watcher-memory-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.watcher-memory-sub {
+  font-size: 11.5px;
+  line-height: 1.5;
+  opacity: 0.65;
+}
+
+.watcher-memory-hint {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #0f766e;
+}
+
+.watcher-memory-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+
+.watcher-memory-btn:hover {
+  border-color: rgba(148, 163, 184, 0.4);
+  background: rgba(148, 163, 184, 0.09);
+}
+
+.watcher-memory-icon.is-spinning {
+  animation: diagnostics-refresh-spin 0.9s linear infinite;
+}
+
+:global(html.kikoerumanager-dark) .watcher-memory-hint {
+  color: #5eead4;
 }
 
 @media (max-width: 1200px) {
