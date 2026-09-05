@@ -99,6 +99,12 @@ class ProcessingConfig(BaseModel):
     archive_poll_interval_seconds: float = 3.0
     archive_retry_delay_seconds: int = 300
     archive_max_retry_count: int = 5
+    # 等待文件稳定连续超多少次才把文件标记为已处理（拉黑）。
+    # 拉黑是"最后手段"：一旦拉黑，在记忆 TTL 内该文件不会再自动建任务。
+    stability_timeout_blacklist_count: int = 3
+    # 超时计数的归零窗口（秒）。超过这个时间没有再发生超时，计数重新从 0 开始，
+    # 避免历史上的偶发超时累积到 3 次后把文件永久废掉。
+    stability_timeout_reset_seconds: int = 3600
 
 class WatcherConfig(BaseModel):
     """监视器配置"""
@@ -107,6 +113,22 @@ class WatcherConfig(BaseModel):
     auto_start: bool = True
     auto_classify: bool = True
     delete_after_process: bool = False
+    # 等待文件稳定的"无进展"超时（秒）：只要文件大小/mtime 还在变化就不会触发，
+    # 因此大文件慢慢复制不会误判。触发意味着文件已经停滞这么久了。
+    stability_idle_timeout_seconds: int = 300
+    # 绝对硬上限（秒）：无论文件是否还在增长，超过这个总时长就放弃本轮等待。
+    # 按体积放宽：base + per_gb * 文件GB数，再被 cap 截断。
+    stability_max_total_seconds: int = 900
+    stability_max_total_per_gb_seconds: int = 900
+    stability_max_total_cap_seconds: int = 7200
+    # 已处理名单（进程内记忆）的存活时间。
+    # 成功记录给得很长：delete_after_process 默认关闭，用户常把文件留在输入目录，
+    # TTL 太短会导致每天被重复建任务。
+    # 失败/超时拉黑只给短冷却，让偶发失败的文件自动恢复。
+    processed_memory_ttl_seconds: int = 2592000
+    processed_failure_ttl_seconds: int = 1800
+    # 周期扫描监护的检查间隔（秒）：扫描协程意外退出时自动拉起。
+    scan_supervisor_interval_seconds: int = 30
 
 class ExtractConfig(BaseModel):
     """解压配置"""

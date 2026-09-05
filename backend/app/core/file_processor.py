@@ -10,6 +10,7 @@
 
 import os
 import re
+import time
 import asyncio
 from pathlib import Path
 from typing import Optional, Set, List, Callable
@@ -47,12 +48,57 @@ class FileProcessor:
 
     def __init__(self):
         self._processed_files: Set[str] = set()  # 已处理文件集合
-        self._stability_timeout_counts: dict = {}  # 文件等待稳定超时计数（防无限重试）
+        # 文件等待稳定超时计数：path -> (连续次数, 最后一次的时间戳)
+        self._stability_timeout_counts: dict = {}
 
     @property
     def config(self):
         """动态获取最新配置"""
         return get_config()
+
+    def _stability_timeout_blacklist_count(self) -> int:
+        """连续超时多少次才把文件临时拉黑。"""
+        try:
+            return max(1, int(self.config.processing.stability_timeout_blacklist_count))
+        except Exception:
+            return 3
+
+    def _stability_timeout_reset_seconds(self) -> float:
+        """超过这么久没有再超时，计数就归零。
+
+        不设归零的话，历史上一次偶发超时会一直累积，攒够次数后这个文件
+        就被永久废掉了（用户只能重启进程）。
+        """
+        try:
+            return max(0.0, float(self.config.processing.stability_timeout_reset_seconds))
+        except Exception:
+            return 3600.0
+
+    def _bump_stability_timeout(self, file_path: str) -> int:
+        """累计某路径的连续超时次数，跨过归零窗口则从头计。"""
+        now = time.monotonic()
+        count, last_ts = self._stability_timeout_counts.get(file_path, (0, now))
+        if now - last_ts > self._stability_timeout_reset_seconds():
+            count = 0
+        count += 1
+        self._stability_timeout_counts[file_path] = (count, now)
+        return count
+
+    @staticmethod
+    def _call_mark_processed(mark_processed, file_path: str, failure: bool) -> None:
+        """调用标记回调，兼容只接受 (path) 的旧签名。
+
+        failure=True 时回调应给这条记忆一个更短的 TTL，让偶发失败的文件
+        能自动恢复，而不是被永久跳过。
+        """
+        if not mark_processed:
+            return
+        try:
+            mark_processed(file_path, failure=failure)
+        except TypeError as exc:
+            if "failure" not in str(exc):
+                raise
+            mark_processed(file_path)
 
     @staticmethod
     def _has_active_aria2_sidecar(file_path: str) -> bool:
@@ -122,8 +168,9 @@ class FileProcessor:
         auto_classify: bool = True,
         wait_stable: bool = True,
         max_wait: int = 300,
+        max_total_wait: Optional[float] = None,
         is_processed: Optional[Callable[[str], bool]] = None,
-        mark_processed: Optional[Callable[[str], None]] = None,
+        mark_processed: Optional[Callable[..., None]] = None,
         pause_fn: Optional[Callable[[], None]] = None,
         resume_fn: Optional[Callable[[], None]] = None,
         task_metadata: Optional[dict] = None,
@@ -136,9 +183,10 @@ class FileProcessor:
             file_path: 文件路径
             auto_classify: 是否自动分类
             wait_stable: 是否等待文件稳定
-            max_wait: 最大等待时间（秒）
+            max_wait: 无进展超时（秒），文件还在变化就不会触发
+            max_total_wait: 等待文件稳定的绝对总时长上限（秒）
             is_processed: 检查文件是否已处理的回调
-            mark_processed: 标记文件为已处理的回调
+            mark_processed: 标记文件为已处理的回调，可接收 failure 关键字参数
             pause_fn: 暂停文件监听的回调（用于重命名操作）
             resume_fn: 恢复文件监听的回调
 
@@ -157,8 +205,7 @@ class FileProcessor:
             # 先检查持久化归档声明，不能先走文件名规范化，否则可能改掉队列冻结的源路径。
             if await get_deferred_archive_service().is_source_claimed(file_path):
                 logger.info("[FileProcessor] 文件已由空闲归档队列声明，跳过重复入库: %s", file_path)
-                if mark_processed:
-                    mark_processed(file_path)
+                self._call_mark_processed(mark_processed, file_path, failure=False)
                 if isinstance(report, dict):
                     report["skipped_deferred_archive_count"] = int(report.get("skipped_deferred_archive_count") or 0) + 1
                 return None
@@ -172,27 +219,29 @@ class FileProcessor:
             if wait_stable:
                 logger.debug(f"[FileProcessor] 等待文件稳定: {file_path}")
                 try:
-                    await self.wait_file_stable(file_path, max_wait=max_wait)
+                    await self.wait_file_stable(
+                        file_path, max_wait=max_wait, max_total_wait=max_total_wait
+                    )
                     logger.debug(f"[FileProcessor] 文件已稳定: {file_path}")
                     self._stability_timeout_counts.pop(file_path, None)
                 except TimeoutError:
-                    # 超时通常是文件仍被占用/写入中（Windows 常见），不立即标记
-                    # 已处理——永久跳过会导致任务丢失。同一路径累计超时 3 次后
-                    # 才标记，避免无限重试刷屏。
-                    count = self._stability_timeout_counts.get(file_path, 0) + 1
-                    self._stability_timeout_counts[file_path] = count
-                    if count >= 3:
+                    # 超时意味着文件已经停滞（不再增长）这么久。仍不立即拉黑：
+                    # 同一路径累计若干次后才按"失败"短期记忆，避免无限重试刷屏。
+                    # 计数带归零窗口，历史偶发超时不会永久累积。
+                    count = self._bump_stability_timeout(file_path)
+                    blacklist_at = self._stability_timeout_blacklist_count()
+                    if count >= blacklist_at:
                         logger.error(
-                            "[FileProcessor] 文件连续 %d 次等待稳定超时，标记已处理以避免无限重试: %s",
+                            "[FileProcessor] 文件连续 %d 次等待稳定超时，按失败短期记忆跳过: %s",
                             count, file_path,
                         )
-                        if mark_processed:
-                            mark_processed(file_path)
+                        self._call_mark_processed(mark_processed, file_path, failure=True)
+                        self._stability_timeout_counts.pop(file_path, None)
                     else:
                         logger.error(
-                            "[FileProcessor] 等待文件稳定超时（第 %d 次，文件可能仍被占用/写入中），"
+                            "[FileProcessor] 等待文件稳定超时（第 %d/%d 次，文件可能仍被占用/写入中），"
                             "本次跳过且不标记已处理，后续事件可重试: %s",
-                            count, file_path,
+                            count, blacklist_at, file_path,
                         )
                     return None
                 if self._has_active_aria2_sidecar(file_path):
@@ -233,8 +282,7 @@ class FileProcessor:
             engine = get_task_engine()
             if await get_deferred_archive_service().is_source_claimed(file_path):
                 logger.info("[FileProcessor] 文件已由空闲归档队列声明，跳过重复入库: %s", file_path)
-                if mark_processed:
-                    mark_processed(file_path)
+                self._call_mark_processed(mark_processed, file_path, failure=False)
                 if isinstance(report, dict):
                     report["skipped_deferred_archive_count"] = int(report.get("skipped_deferred_archive_count") or 0) + 1
                 return None
@@ -244,8 +292,7 @@ class FileProcessor:
             )
             if existing:
                 logger.debug(f"[FileProcessor] 文件已在任务队列中: {file_path}")
-                if mark_processed:
-                    mark_processed(file_path)
+                self._call_mark_processed(mark_processed, file_path, failure=False)
                 if isinstance(report, dict):
                     report["skipped_duplicate_count"] = int(report.get("skipped_duplicate_count") or 0) + 1
                 return None
@@ -291,15 +338,13 @@ class FileProcessor:
                 report["created_count"] = int(report.get("created_count") or 0) + 1
 
             # 标记文件为已处理
-            if mark_processed:
-                mark_processed(file_path)
+            self._call_mark_processed(mark_processed, file_path, failure=False)
 
             return task
 
         except Exception as e:
             logger.error(f"[FileProcessor] 处理文件失败: {file_path}, {e}", exc_info=True)
-            if mark_processed:
-                mark_processed(original_path)
+            self._call_mark_processed(mark_processed, original_path, failure=True)
             return None
 
     async def process_directory(
@@ -576,7 +621,12 @@ class FileProcessor:
 
         return None
 
-    async def wait_file_stable(self, file_path: str, max_wait: int = 300):
+    async def wait_file_stable(
+        self,
+        file_path: str,
+        max_wait: int = 300,
+        max_total_wait: Optional[float] = None,
+    ):
         """等待文件稳定（委托 file_stability 共享实现，含 Windows 占用软放行）
 
         size+mtime 双维度稳定判定 + open 探测 1 字节检测锁定；
@@ -585,7 +635,8 @@ class FileProcessor:
 
         Args:
             file_path: 文件路径
-            max_wait: 最大等待时间（秒）
+            max_wait: 无进展超时（秒），只要文件还在变化就不会触发
+            max_total_wait: 绝对总时长上限（秒），为 None 时取 max_wait 的 6 倍
 
         Raises:
             TimeoutError: 等待超时
@@ -598,6 +649,7 @@ class FileProcessor:
             required_stable_checks=3,
             check_interval=2.0,
             log_prefix="[FileProcessor]",
+            max_total_wait=max_total_wait,
         )
 
     # ========== 私有方法 ==========
