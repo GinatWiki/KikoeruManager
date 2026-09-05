@@ -2666,7 +2666,7 @@ async def shutdown_event():
 
     # 停止监视器
     watcher = get_watcher()
-    watcher.stop()
+    await asyncio.to_thread(watcher.stop)
 
     # 停止库存后台 worker（本地索引追赶等）
     try:
@@ -3178,7 +3178,7 @@ async def _scan_and_create_tasks(
         auto_classify=config.watcher.auto_classify,
         is_processed=lambda path: (
             path in watcher.pending_files or
-            path in watcher._processed_files or
+            watcher._is_file_processed(path) or
             any(t.source_path == path and t.status.value in ["pending", "processing"]
                 for t in get_task_engine().get_all_tasks())
         ),
@@ -5527,7 +5527,7 @@ async def update_configuration(request: Request):
                     await watcher.start()
                     logger.info("配置保存：watcher.enabled=True，监视器已同步启动")
                 elif not watcher_enabled and watcher.is_running:
-                    watcher.stop()
+                    await asyncio.to_thread(watcher.stop)
                     logger.info("配置保存：watcher.enabled=False，监视器已同步停止")
             except Exception:
                 logger.warning("配置保存后同步监视器运行态失败", exc_info=True)
@@ -5649,7 +5649,9 @@ async def start_watcher():
 async def stop_watcher():
     """停止文件夹监视器"""
     watcher = get_watcher()
-    watcher.stop()
+    # 放到线程里执行：stop() 内部要 join Observer 线程，
+    # 直接调用会把事件循环冻住（历史上表现为这个接口响应极慢）。
+    await asyncio.to_thread(watcher.stop)
     _persist_watcher_enabled(False)
     return {"message": "监视器已停止"}
 
@@ -5660,7 +5662,24 @@ async def get_watcher_status():
     return {
         "is_running": watcher.is_running,
         "watch_path": get_config().storage.input_path,
-        "pending_files": list(watcher.pending_files)
+        "pending_files": list(watcher.pending_files),
+        "processed_files_count": len(watcher._processed_files),
+        "last_scan_at": watcher._last_scan_at,
+    }
+
+@app.post("/api/watcher/clear-processed")
+async def clear_watcher_processed_files():
+    """清空监视器的已处理名单。
+
+    文件被记录进这个名单后，在 TTL 内不会再自动建任务。偶发的超时/异常
+    也会进名单，以前只能重启进程才能清除，这里提供自助恢复入口。
+    """
+    watcher = get_watcher()
+    cleared = watcher.clear_processed_files()
+    logger.info("[Watcher] 已手动清空已处理名单，共 %d 条", cleared)
+    return {
+        "message": f"已清空已处理名单（{cleared} 条）",
+        "cleared_count": cleared,
     }
 
 @app.post("/api/scan")

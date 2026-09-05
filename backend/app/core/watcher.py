@@ -42,7 +42,7 @@ class ArchiveHandler(FileSystemEventHandler):
         on_archive_detected: Callable[[str], None],
         get_excluded_paths: Callable[[], Set[str]],
         is_paused: Callable[[], bool],
-        mark_processed: Callable[[str], None],
+        mark_processed: Callable[..., None],
         on_orphan_volume: Optional[Callable[[str], None]] = None,
     ):
         self.on_archive_detected = on_archive_detected
@@ -165,14 +165,25 @@ class FolderWatcher:
     监视指定文件夹，检测新文件并使用 FileProcessor 处理。
     """
 
+    # 已处理名单的最大条目数：超出先清过期，仍超限就淘汰最快到期的，避免无界增长
+    _PROCESSED_FILES_MAX = 5000
+    # 停止时等待 Observer 线程退出的上限（秒）。无限等待会把事件循环冻住
+    _OBSERVER_JOIN_TIMEOUT_SECONDS = 5
+
     def __init__(self):
         # 不缓存配置，每次都获取最新配置
         self.observer = None
         self.handler = None
         self.is_running = False
         self.pending_files = set()
-        self._processed_files = set()
+        # 已处理名单：path -> 过期时刻（time.monotonic）。
+        # 必须带 TTL：文件一旦进这个名单，在 TTL 内就不会再自动建任务。
+        # 历史上它是"只增不减"的 set，偶发失败/超时的文件会被永久废掉，
+        # 关了再开监视器、挪进挪出、甚至手动扫描都救不回来，只能重启进程。
+        self._processed_files: dict = {}
         self._scan_task = None
+        self._scan_supervisor_task = None
+        self._last_scan_at: Optional[float] = None
         self._loop = None
         self._paused = False  # 暂停监听标志
         self._file_processor = get_file_processor()
@@ -190,6 +201,8 @@ class FolderWatcher:
                 "is_running": bool(self.is_running),
                 "watch_path": self.config.storage.input_path,
                 "pending_files": list(self.pending_files),
+                "processed_files_count": len(self._processed_files),
+                "last_scan_at": self._last_scan_at,
             }
             broadcast_event({
                 "type": "watcher.status.changed",
@@ -205,14 +218,62 @@ class FolderWatcher:
 
     def _get_excluded_paths(self):
         """获取所有应该排除的路径（pending + processed）"""
-        return self.pending_files | self._processed_files
+        return self.pending_files | set(self._processed_files)
 
-    def _mark_file_processed(self, file_path: str):
-        """将文件标记为已处理"""
-        self._processed_files.add(file_path)
+    def _processed_ttl_seconds(self, failure: bool) -> float:
+        """已处理名单的存活时间。
+
+        失败（超时/异常）用短 TTL：这类记录不是"处理成功"，只是为了避免
+        无限重试，给个短期冷却让文件能自动恢复才是合理的。
+        """
+        try:
+            if failure:
+                return max(0.0, float(self.config.watcher.processed_failure_ttl_seconds))
+            return max(0.0, float(self.config.watcher.processed_memory_ttl_seconds))
+        except Exception:
+            return 1800.0 if failure else 86400.0
+
+    def _mark_file_processed(self, file_path: str, failure: bool = False):
+        """将文件标记为已处理（带 TTL，不再永久拉黑）"""
+        self._processed_files[file_path] = time.monotonic() + self._processed_ttl_seconds(failure)
+        if len(self._processed_files) > self._PROCESSED_FILES_MAX:
+            self._enforce_processed_limit()
+
+    def _enforce_processed_limit(self):
+        """已处理名单超限：先清过期，仍超限就淘汰最快到期的条目。"""
+        self.purge_expired_processed()
+        overflow = len(self._processed_files) - self._PROCESSED_FILES_MAX
+        if overflow <= 0:
+            return
+        for path, _ in sorted(self._processed_files.items(), key=lambda kv: kv[1])[:overflow]:
+            self._processed_files.pop(path, None)
+
+    def _reset_memory(self) -> None:
+        """清空进程内记忆（待处理 + 已处理名单）。
+
+        用户"关掉再打开监视器"就是想让卡住的文件重新被检测，保留旧名单会让
+        这个操作完全无效；停止监视器时同样重置，保证下次启动是干净状态。
+        """
+        self.pending_files.clear()
+        self._processed_files.clear()
+        self._last_scan_at = None
+
+    def purge_expired_processed(self) -> int:
+        """清理已过期的已处理记录，返回清理条数。"""
+        now = time.monotonic()
+        expired = [path for path, expire_at in self._processed_files.items() if expire_at <= now]
+        for path in expired:
+            self._processed_files.pop(path, None)
+        return len(expired)
+
+    def clear_processed_files(self) -> int:
+        """清空已处理名单（用户自助恢复用，不必重启进程）。"""
+        count = len(self._processed_files)
+        self._processed_files.clear()
+        return count
 
     def _is_file_processed(self, file_path: str) -> bool:
-        """检查文件是否已处理。
+        """检查文件是否已处理（顺带回收过期条目）。
 
         只认已处理集合，不能把 pending_files 算进来：检测入口
         （_on_archive_detected / _scan_folder）会先把文件放进 pending_files
@@ -221,7 +282,13 @@ class FolderWatcher:
         且文件永远进不了 processed 集合，周期扫描每轮都会重复检测。
         pending 期间的防重复由入口处的 pending 查重负责。
         """
-        return file_path in self._processed_files
+        expire_at = self._processed_files.get(file_path)
+        if expire_at is None:
+            return False
+        if expire_at <= time.monotonic():
+            self._processed_files.pop(file_path, None)
+            return False
+        return True
 
     def pause_watching(self):
         """暂停文件监听（在重命名等操作前调用）"""
@@ -265,6 +332,9 @@ class FolderWatcher:
         if not os.path.exists(watch_path):
             os.makedirs(watch_path, exist_ok=True)
 
+        # 重置进程内记忆，保证这次启动是干净状态
+        self._reset_memory()
+
         self.handler = ArchiveHandler(
             self._on_archive_detected,
             self._get_excluded_paths,
@@ -279,7 +349,10 @@ class FolderWatcher:
         observer.start()
         self.observer = observer
 
-        self._scan_task = asyncio.create_task(self._periodic_scan())
+        self._scan_task = asyncio.create_task(self._periodic_scan(), name="watcher-periodic-scan")
+        self._scan_supervisor_task = asyncio.create_task(
+            self._scan_supervisor(), name="watcher-scan-supervisor"
+        )
 
         self.is_running = True
         logger.info(f"文件夹监视器已启动: {watch_path}")
@@ -292,12 +365,27 @@ class FolderWatcher:
 
         if self.observer:
             self.observer.stop()
-            self.observer.join()
+            # join 必须限时：dispatch 线程可能卡在慢速磁盘/网络挂载的 I/O 上，
+            # 无限等待会把整个事件循环冻住（表现为 /api/watcher/stop 响应极慢）。
+            self.observer.join(timeout=self._OBSERVER_JOIN_TIMEOUT_SECONDS)
+            if self.observer.is_alive():
+                logger.warning(
+                    "[Watcher] Observer 线程 %s 秒内未退出，放弃等待（不影响停止流程）",
+                    self._OBSERVER_JOIN_TIMEOUT_SECONDS,
+                )
+            self.observer = None
 
         if self._scan_task:
             self._scan_task.cancel()
+            self._scan_task = None
+
+        if self._scan_supervisor_task:
+            self._scan_supervisor_task.cancel()
+            self._scan_supervisor_task = None
 
         self.is_running = False
+        # 停止即重置：下次启动从干净状态开始，卡住的文件可以重新被检测
+        self._reset_memory()
         logger.info("文件夹监视器已停止")
         self._broadcast_status("stopped")
 
@@ -308,8 +396,13 @@ class FolderWatcher:
             logger.debug(f"文件已在处理中，跳过: {file_path}")
             return
 
-        if file_path in self._processed_files:
-            logger.debug(f"文件已处理过，跳过: {file_path}")
+        if self._is_file_processed(file_path):
+            # 用 INFO：这是"文件就摆在输入目录里却始终不建任务"最常见的原因，
+            # 必须让默认日志级别下就能看出是谁拦住的。
+            logger.info(
+                "[Watcher] 文件在已处理名单内，跳过（名单 TTL 到期或重启监视器后会重新检测）: %s",
+                file_path,
+            )
             return
 
         self.pending_files.add(file_path)
@@ -380,6 +473,32 @@ class FolderWatcher:
         except Exception:
             return 120.0
 
+    def _stability_wait_seconds(self, file_path: str) -> tuple:
+        """按文件体积计算稳定等待参数，返回 (无进展超时, 绝对总时长上限)。
+
+        以前这里固定写死 300 秒，且按"从进入等待起算"判定，导致 1GB 级文件
+        复制超过 300 秒就必然超时，连续 3 次后被永久拉黑。现在：
+        - 无进展超时：只要文件还在增长就不会触发，慢速复制不再被误杀；
+        - 绝对上限：按体积放宽，1GB 约 30 分钟，避免无限等待。
+        """
+        try:
+            idle = max(30.0, float(self.config.watcher.stability_idle_timeout_seconds))
+        except Exception:
+            idle = 300.0
+        try:
+            base = max(idle, float(self.config.watcher.stability_max_total_seconds))
+            per_gb = max(0.0, float(self.config.watcher.stability_max_total_per_gb_seconds))
+            cap = max(base, float(self.config.watcher.stability_max_total_cap_seconds))
+        except Exception:
+            base, per_gb, cap = 900.0, 900.0, 7200.0
+
+        size_gb = 0.0
+        try:
+            size_gb = max(0.0, os.path.getsize(file_path) / (1024 ** 3))
+        except OSError:
+            pass
+        return idle, min(cap, base + per_gb * size_gb)
+
     async def _process_file(self, file_path: str):
         """处理文件（使用 FileProcessor 统一流程）"""
         logger.debug(f"[Watcher] 开始处理文件: {file_path}")
@@ -388,11 +507,17 @@ class FolderWatcher:
         try:
             # 使用 FileProcessor 处理文件
             # 传入暂停/恢复监听回调，用于文件名规范化时避免重复事件
+            idle_timeout, max_total_wait = self._stability_wait_seconds(file_path)
+            logger.debug(
+                "[Watcher] 稳定等待参数: path=%s idle=%.0fs total=%.0fs",
+                file_path, idle_timeout, max_total_wait,
+            )
             task = await self._file_processor.process_file(
                 file_path,
                 auto_classify=self.config.watcher.auto_classify,
                 wait_stable=True,
-                max_wait=300,
+                max_wait=idle_timeout,
+                max_total_wait=max_total_wait,
                 is_processed=self._is_file_processed,
                 mark_processed=self._mark_file_processed,
                 pause_fn=self.pause_watching,
@@ -405,7 +530,7 @@ class FolderWatcher:
                     await asyncio.sleep(1)
 
                 # 任务完成后添加到已处理列表
-                self._processed_files.add(task.source_path)
+                self._mark_file_processed(task.source_path)
                 logger.info(f"文件处理完成: {task.source_path}, 状态: {task.status.value}")
 
                 # 处理后删除原文件（如果配置允许且处理成功，且不是重新解压）
@@ -484,10 +609,39 @@ class FolderWatcher:
 
         except Exception as e:
             logger.error(f"处理文件失败: {file_path}, {e}", exc_info=True)
-            self._processed_files.add(file_path)
+            # 失败走短 TTL，不再把文件永久拉黑
+            self._mark_file_processed(file_path, failure=True)
         finally:
             self.pending_files.discard(original_path)
             self._broadcast_status("pending_removed")
+
+    def _scan_supervisor_interval_seconds(self) -> float:
+        try:
+            return max(5.0, float(self.config.watcher.scan_supervisor_interval_seconds))
+        except Exception:
+            return 30.0
+
+    async def _scan_supervisor(self):
+        """监护周期扫描协程，意外退出时自动拉起。
+
+        没有这层监护的话，扫描协程一旦退出就永久停止，而 is_running 仍为 True、
+        状态接口照常显示"运行中"；Docker/网络挂载下 inotify 本来就不可靠，
+        兜底再没了就彻底不会触发任何处理。
+        """
+        while True:
+            try:
+                await asyncio.sleep(self._scan_supervisor_interval_seconds())
+                if not self.is_running:
+                    return
+                if self._scan_task is None or self._scan_task.done():
+                    logger.warning("[Watcher] 周期扫描协程已退出，自动重启")
+                    self._scan_task = asyncio.create_task(
+                        self._periodic_scan(), name="watcher-periodic-scan"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"[Watcher] 扫描监护异常: {e}", exc_info=True)
 
     async def _periodic_scan(self):
         """定期扫描文件夹"""
@@ -495,10 +649,13 @@ class FolderWatcher:
             try:
                 await asyncio.sleep(self.config.watcher.scan_interval)
                 await self._scan_folder()
+                self._last_scan_at = time.time()
             except asyncio.CancelledError:
-                break
+                # 向外传播让任务正常结束；是否重新拉起由 _scan_supervisor 决定。
+                # 这里不能 break——那会让扫描静默停摆且无从恢复。
+                raise
             except Exception as e:
-                logger.error(f"定期扫描失败: {e}")
+                logger.error(f"定期扫描失败: {e}", exc_info=True)
 
     async def _scan_folder(self):
         """扫描文件夹中的现有文件。
@@ -511,6 +668,9 @@ class FolderWatcher:
 
         if not self.handler:
             return
+
+        # 先回收过期的已处理记录，让冷却期结束的文件这一轮就能重新入候选
+        self.purge_expired_processed()
 
         archive_candidates, orphan_candidates = await asyncio.to_thread(
             self._collect_scan_candidates_sync, watch_path
@@ -525,7 +685,7 @@ class FolderWatcher:
                 for t in engine.get_all_tasks()
             )
 
-            if not existing and file_path not in self.pending_files and file_path not in self._processed_files:
+            if not existing and file_path not in self.pending_files and not self._is_file_processed(file_path):
                 self._on_archive_detected(file_path)
 
         for file_path in orphan_candidates:
