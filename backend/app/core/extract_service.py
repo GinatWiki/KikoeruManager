@@ -4460,8 +4460,15 @@ class ExtractService:
         filename = Path(file_path).name
         current_ext = Path(file_path).suffix.lower()
 
-        if self._find_embedded_archive_offset_sync(file_path) is not None:
-            logger.info(f"[Extract] 检测到带前缀伪装 ZIP，跳过后缀修复: {file_path}")
+        # 同样放到工作线程：探测要读文件，同步执行会卡住事件循环
+        embedded_offset = await asyncio.to_thread(
+            self._find_embedded_archive_offset_sync, file_path
+        )
+        if embedded_offset is not None:
+            logger.info(
+                "[Extract] 检测到带前缀伪装压缩包（偏移 %s），跳过后缀修复: %s",
+                embedded_offset, file_path,
+            )
             return file_path
 
         # 跳过自解压文件（.exe）
@@ -4601,8 +4608,15 @@ class ExtractService:
         filename = path.name
         current_ext = path.suffix.lower()
 
-        if self._find_embedded_archive_offset_sync(file_path) is not None:
-            logger.info(f"[Normalize] 检测到带前缀伪装 ZIP，保持原始文件名: {file_path}")
+        # 探测要真实读文件，GB 级文件同步执行会把事件循环卡住，放到工作线程
+        embedded_offset = await asyncio.to_thread(
+            self._find_embedded_archive_offset_sync, file_path
+        )
+        if embedded_offset is not None:
+            logger.info(
+                "[Normalize] 检测到带前缀伪装压缩包（偏移 %s），保持原始文件名: %s",
+                embedded_offset, file_path,
+            )
             return file_path
 
         # 检查是否是分卷压缩文件

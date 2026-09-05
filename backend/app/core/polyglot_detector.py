@@ -47,6 +47,17 @@ def find_embedded_archive(file_path: str) -> Optional[Tuple[str, int]]:
         return None
 
     with open(file_path, 'rb') as f:
+        # 0. 文件头就是压缩包签名 → 普通压缩包而非 polyglot，直接排除。
+        #    没有这一步的话，每个普通 RAR/7z/ZIP 都要白读一大块做顺序扫描，
+        #    GB 级文件上这笔开销会直接卡在事件循环里。
+        head = f.read(8)
+        if (
+            head.startswith(RAR_SIG)
+            or head.startswith(SEVENZ_SIG)
+            or head.startswith(ZIP_LOCAL_SIG)
+        ):
+            return None
+
         # 1. ZIP 快速路径：通过尾部 EOCD 精确定位
         zip_offset = _find_zip_start_via_eocd(f, file_size)
         if zip_offset is not None:
@@ -57,9 +68,14 @@ def find_embedded_archive(file_path: str) -> Optional[Tuple[str, int]]:
 
         # 2. 顺序流式扫描 RAR/7z 签名及 ZIP 兜底
         result = _sequential_scan(f, file_size)
-        if result:
+        if result and result[1] > 0:
             logger.info(f"[Polyglot] 顺序扫描找到嵌入 {result[0].upper()}: {file_path} (偏移: {result[1]})")
-        return result
+            return result
+        # 偏移为 0 说明压缩包就在文件头，是普通压缩包而不是 polyglot，
+        # 与上面 ZIP 的 `zip_offset == 0 → None` 保持一致。
+        # 不这样处理的话，每个普通 RAR 都会被误报成"带前缀伪装"，
+        # 而且 _sequential_scan 会先白读一大块数据。
+        return None
 
 
 def _find_zip_start_via_eocd(f, file_size: int) -> Optional[int]:
