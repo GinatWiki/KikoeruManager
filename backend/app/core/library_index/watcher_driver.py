@@ -22,14 +22,54 @@ logger = logging.getLogger(__name__)
 QUIET_SECONDS = 0.75
 MAX_WAIT_SECONDS = 5.0
 MAX_DIRTY_PATHS = 20000
+# 同一父目录下积压多少条 dirty 才折叠成父目录做一次子树扫描。
+# 解压 / 下载会在短时间内批量写盘，不折叠的话每个文件各派发一次
+# 单文件 reconcile，外加父目录整树重扫，全是重复劳动。
+_DIRTY_SIBLING_COLLAPSE_THRESHOLD = 8
 SCRUB_INTERVAL_SECONDS = 300.0
 SCRUB_MAX_DIRECTORIES = 200
 SCRUB_MAX_SECONDS = 2.0
 GENERATION_RECOVERY_DEBOUNCE_SECONDS = 5.0
+# 下载抑制：路径带活跃 aria2 控制文件（*.aria2）时说明文件仍在写入，
+# 此时 reconcile 拿到的大小立刻就过期，只会白扫一遍 + 刷屏日志。
+# 跳过即可——aria2 下载完成会删掉 .aria2，那个 delete 事件会重新触发
+# 一次 mark_dirty，届时索引拿到的才是最终大小。
+#
+# "活跃"必须按 mtime 判定而不是"存在"：aria2 下载中会周期性重写控制文件
+# （--save-interval 默认 60s）。若 aria2 异常退出留下孤儿 .aria2，
+# 按"存在"判定会把那个目录永久静默、索引再也不更新。
+_ARIA2_SIDECAR_SUFFIX = ".aria2"
+_ARIA2_SIDECAR_ACTIVE_SECONDS = 600.0
 _INOTIFY_LIMIT_PATHS = {
     "max_user_watches": "/proc/sys/fs/inotify/max_user_watches",
     "max_user_instances": "/proc/sys/fs/inotify/max_user_instances",
 }
+
+
+def _sidecar_is_active(sidecar_path: str) -> bool:
+    """控制文件存在且最近仍被改写过，才算下载仍在进行。"""
+    try:
+        return (time.time() - os.path.getmtime(sidecar_path)) <= _ARIA2_SIDECAR_ACTIVE_SECONDS
+    except OSError:
+        return False
+
+
+def _has_active_aria2_sidecar(absolute_path: str) -> bool:
+    """路径自身或其所在目录里是否存在活跃的 aria2 控制文件。"""
+    try:
+        if os.path.isfile(f"{absolute_path}{_ARIA2_SIDECAR_SUFFIX}"):
+            return _sidecar_is_active(f"{absolute_path}{_ARIA2_SIDECAR_SUFFIX}")
+        # 目录：里面任何一个文件仍在下载，整棵子树这轮都先不扫
+        if os.path.isdir(absolute_path):
+            with os.scandir(absolute_path) as entries:
+                for entry in entries:
+                    if not entry.is_file() or not entry.name.endswith(_ARIA2_SIDECAR_SUFFIX):
+                        continue
+                    if _sidecar_is_active(entry.path):
+                        return True
+    except OSError:
+        return False
+    return False
 
 
 @dataclass(slots=True)
@@ -39,13 +79,29 @@ class _DirtyPath:
 
 
 def _compress_paths(paths: list[str]) -> list[str]:
+    unique = sorted(set(paths), key=lambda value: (len(value), value.casefold()))
+    # 同一父目录积压过多时折叠成父目录：一次子树扫描覆盖全部子项，
+    # 把解压/下载这类批量写盘的成本封顶，而不是线性涨到几百次单文件扫描。
+    if len(unique) >= _DIRTY_SIBLING_COLLAPSE_THRESHOLD:
+        by_parent: dict[str, int] = {}
+        for path in unique:
+            parent = os.path.dirname(path.rstrip("\\/"))
+            if parent:
+                by_parent[parent] = by_parent.get(parent, 0) + 1
+        promoted = {
+            parent
+            for parent, count in by_parent.items()
+            if count >= _DIRTY_SIBLING_COLLAPSE_THRESHOLD
+        }
+        if promoted:
+            unique = sorted(set(unique) | promoted, key=lambda value: (len(value), value.casefold()))
     result: list[str] = []
-    for path in sorted(set(paths), key=lambda value: (len(value), value.casefold())):
+    for path in unique:
         normalized = path.rstrip("\\/")
         if any(
-            normalized == parent
-            or normalized.startswith(parent + os.sep)
-            for parent in result
+            normalized == kept
+            or normalized.startswith(kept + os.sep)
+            for kept in result
         ):
             continue
         result.append(normalized)
@@ -456,6 +512,18 @@ class LibraryIndexWatcherDriver:
         root_path = self._roots.get(library_id)
         if not root_path:
             return
+        # 下载中的路径先跳过：文件大小一直在变，扫了也马上过期。
+        # 等 aria2 删掉 .aria2 的那一刻会重新产生事件，届时再 reconcile。
+        suppressed = [path for path in absolute_paths if _has_active_aria2_sidecar(path)]
+        if suppressed:
+            logger.debug(
+                "[索引 watcher] 跳过仍在下载中的路径 library=%s count=%s",
+                library_id,
+                len(suppressed),
+            )
+            absolute_paths = [path for path in absolute_paths if path not in suppressed]
+            if not absolute_paths:
+                return
         effects = []
         for absolute_path in absolute_paths:
             try:

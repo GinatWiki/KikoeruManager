@@ -6032,11 +6032,62 @@ class TaskEngine:
                     final_path = os.path.join(library_path, f"{os.path.basename(renamed_path)}_{counter}")
                     counter += 1
 
-                await asyncio.to_thread(shutil.move, renamed_path, final_path)
+                # 索引同步：禁用 classify 的兜底链路里没有 library 上下文，
+                # 用按路径反查的 helper 让索引也能跟上。
+                # 移动前先注册 prepared scope：temp 与库存跨盘时 shutil.move 是
+                # 逐文件 copy+delete，会刷一整段 watchdog 事件；抑制住，
+                # 移动完成后由下面的 notify 一次性 reconcile（与 classifier 一致）。
+                prepared_operation_id = ""
+                prepared_effects: dict = {}
+                try:
+                    from .library_index import get_library_index_mutation_service
+                    from .library_manager import get_library_manager
+
+                    manager = get_library_manager()
+                    move_library = manager.find_local_library_for_path(final_path)
+                    if move_library is not None:
+                        relative_dir = manager._index_relative_path(
+                            move_library, os.path.dirname(final_path)
+                        )
+                        if relative_dir is not None:
+                            prepared_effects = {move_library.id: [{
+                                "kind": "reconcile",
+                                "relative_path": relative_dir,
+                                "scope": "subtree",
+                            }]}
+                            mutation_service = get_library_index_mutation_service()
+                            prepared = mutation_service.prepare(
+                                kind="asmr_sync_move_without_classify",
+                                effects_by_library=prepared_effects,
+                                idempotency_key=f"asmr-sync-move:{task.id}:{uuid.uuid4()}",
+                            )
+                            prepared_operation_id = prepared.operation_id
+                            mutation_service.mark_filesystem_started(prepared_operation_id)
+                except Exception:
+                    logger.debug(
+                        "[索引] ASMRSync 兜底移动注册 prepared scope 失败，退回逐事件 reconcile path=%s",
+                        final_path, exc_info=True,
+                    )
+
+                try:
+                    await asyncio.to_thread(shutil.move, renamed_path, final_path)
+                finally:
+                    if prepared_operation_id:
+                        try:
+                            get_library_index_mutation_service().finalize(
+                                prepared_operation_id,
+                                actual_effects_by_library=prepared_effects,
+                                actual_result={"source": "asmr_sync_move"},
+                            )
+                        except Exception:
+                            logger.debug(
+                                "[索引] ASMRSync 兜底移动 finalize 失败 op=%s",
+                                prepared_operation_id, exc_info=True,
+                            )
+                            prepared_operation_id = ""
+
                 task.output_path = final_path
                 logger.info(f"[{rjcode}] 移动到: {final_path}")
-                # 索引同步：禁用 classify 的兜底链路里没有 library 上下文，
-                # 用按路径反查的 helper 让索引也能跟上
                 try:
                     from .library_manager import get_library_manager
                     get_library_manager().notify_index_upsert_by_path(final_path)
