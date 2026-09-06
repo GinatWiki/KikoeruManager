@@ -242,6 +242,7 @@
               <span>文件</span>
               <span>大小</span>
               <span>最后修改</span>
+              <span>操作</span>
             </div>
             <div class="max-h-[260px] overflow-auto">
               <div v-if="logInfoLoading" class="px-4 py-8 text-center text-[13px] text-slate-400">加载中…</div>
@@ -260,6 +261,19 @@
                 </div>
                 <div class="text-right font-semibold text-slate-700">{{ formatLogBytes(file.size_bytes) }}</div>
                 <div class="text-right text-slate-500">{{ formatLogTime(file.modified_ts) }}</div>
+                <div class="flex justify-end">
+                  <button
+                    type="button"
+                    class="log-file-download-btn"
+                    :disabled="downloadingLogName === file.name"
+                    :title="`下载 ${file.name}`"
+                    @click="downloadLogFile(file)"
+                  >
+                    <LoaderCircle v-if="downloadingLogName === file.name" class="is-spinning" :size="13" />
+                    <Download v-else :size="13" />
+                    {{ downloadingLogName === file.name ? '下载中' : '下载' }}
+                  </button>
+                </div>
               </div>
               <div v-if="!logInfoLoading && !(logInfo?.files || []).length" class="px-4 py-8 text-center text-[13px] text-slate-400">暂无日志文件</div>
             </div>
@@ -341,6 +355,7 @@ import {
   Download,
   FileSearch,
   HardDrive,
+  LoaderCircle,
   PauseCircle,
   Play,
   RefreshCw,
@@ -1562,6 +1577,7 @@ async function toggleFullSearch() {
 const logManagerVisible = ref(false)
 const logInfo = ref(null)
 const logInfoLoading = ref(false)
+const downloadingLogName = ref('')
 const cleanupLoading = ref(false)
 
 function formatLogBytes(bytes) {
@@ -1600,6 +1616,21 @@ async function loadLogInfo() {
 async function openLogManager() {
   logManagerVisible.value = true
   await loadLogInfo()
+}
+
+async function downloadLogFile(file) {
+  const name = String(file?.name || '').trim()
+  if (!name || downloadingLogName.value) return
+  downloadingLogName.value = name
+  try {
+    await logApi.download(name, name)
+    ElMessage.success(`已开始下载 ${name}`)
+  } catch (err) {
+    redirectIfSecurityGateExpired(err)
+    ElMessage.error(`下载日志失败：${err?.response?.data?.detail || err.message || '未知错误'}`)
+  } finally {
+    downloadingLogName.value = ''
+  }
 }
 
 async function runLogCleanup(action) {
@@ -2094,7 +2125,7 @@ onUnmounted(() => {
 .log-file-head,
 .log-file-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 104px 172px;
+  grid-template-columns: minmax(0, 1fr) 104px 172px 84px;
   align-items: center;
   gap: 12px;
 }
@@ -2112,8 +2143,43 @@ onUnmounted(() => {
 }
 
 .log-file-head span:nth-child(2),
-.log-file-head span:nth-child(3) {
+.log-file-head span:nth-child(3),
+.log-file-head span:nth-child(4) {
   text-align: right;
+}
+
+.log-file-download-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.34);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #334155;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease;
+}
+
+.log-file-download-btn:hover:not(:disabled) {
+  border-color: rgba(37, 99, 235, 0.45);
+  background: rgba(37, 99, 235, 0.08);
+  color: #1d4ed8;
+}
+
+.log-file-download-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.log-file-download-btn .is-spinning {
+  animation: log-download-spin 0.9s linear infinite;
+}
+
+@keyframes log-download-spin {
+  to { transform: rotate(360deg); }
 }
 
 .log-file-row {

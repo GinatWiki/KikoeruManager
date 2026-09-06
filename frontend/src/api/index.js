@@ -633,6 +633,41 @@ export const logApi = {
     const response = await apiClient.get('/logs/info')
     return response.data
   },
+  // 下载日志文件（主日志或任一备份）。后端只接受文件名、不接受路径。
+  download: async (name, filename = '') => {
+    try {
+      const response = await apiClient.get('/logs/download', {
+        params: { name },
+        responseType: 'blob',
+      })
+      const data = response.data
+      const blob = data instanceof Blob
+        ? data
+        : new Blob([data], { type: 'text/plain;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename || name || 'app.log'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      // 立即 revoke 可能打断大文件下载，延后释放
+      setTimeout(() => URL.revokeObjectURL(url), 2000)
+      return { ok: true, name }
+    } catch (err) {
+      // blob 响应下错误体也是 Blob，转成可读的 { detail } 再抛，便于上层提示
+      const data = err?.response?.data
+      if (data instanceof Blob) {
+        try {
+          const parsed = JSON.parse(await data.text())
+          if (err.response) err.response.data = parsed
+        } catch {
+          // 非 JSON 错误体保持原样
+        }
+      }
+      throw err
+    }
+  },
   cleanup: async ({ purgeBackups = false, truncateMain = false, keepTailMb = 2, rotate = false } = {}) => {
     const response = await apiClient.post('/logs/cleanup', {
       purge_backups: purgeBackups,

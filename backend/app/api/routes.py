@@ -7068,6 +7068,35 @@ async def get_logs_info():
     return await _run_log_io(_collect)
 
 
+@app.get("/api/logs/download")
+async def download_log_file(name: str = ""):
+    """下载指定日志文件（主日志或任一备份）。
+
+    只接受 `list_log_files()` 列出的文件名，按名字精确匹配后映射回真实路径，
+    不接受任何路径输入——避免被利用做任意文件读取。
+    """
+    from ..core.app_logging import list_log_files
+
+    def _resolve():
+        wanted = os.path.basename(str(name or "").strip())
+        if not wanted:
+            raise HTTPException(status_code=400, detail="缺少日志文件名")
+        for info in list_log_files():
+            if info.name != wanted:
+                continue
+            if os.path.isfile(info.path):
+                return info
+            break
+        raise HTTPException(status_code=404, detail=f"日志文件不存在: {wanted}")
+
+    info = await _run_log_io(_resolve)
+    return FileResponse(
+        info.path,
+        media_type="text/plain; charset=utf-8",
+        filename=info.name,
+    )
+
+
 @app.get("/api/logs/stream/status")
 async def get_log_stream_status():
     """返回系统日志流运行态，不扫描历史日志。"""
