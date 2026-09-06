@@ -974,6 +974,35 @@ class HttpDownloadService:
                     "filename": "Transfer.it 已选文件",
                     "reason": "Transfer.it 分享文件标识已变化，无法安全恢复原选择，请重试整个任务以重新解析",
                 })
+        if not items and any(
+            isinstance(item, dict) and item.get("ok")
+            and str(item.get("source") or "").strip().lower() == "pikpak"
+            for item in list(out.get("items") or [])
+        ):
+            # PikPak 与 Transfer.it 同理：原选择已无法恢复时必须给出可读原因，
+            # 不能让上层拿到空列表后报出没有任何明细的「没有通过校验的下载项」。
+            dropped = [
+                item for item in list(out.get("items") or [])
+                if isinstance(item, dict) and item.get("ok")
+                and str(item.get("source") or "").strip().lower() == "pikpak"
+            ]
+            logger.warning(
+                "[PikPak] 已选文件无法与重新解析出的分享匹配，原选择已丢弃 "
+                "expected_keys=%s available_keys=%s files=%s",
+                sorted(keys),
+                sorted({
+                    self._preview_item_selection_key(item)
+                    for item in dropped
+                    if self._preview_item_selection_key(item)
+                }),
+                [str(item.get("filename") or item.get("name") or "") for item in dropped],
+            )
+            items.append({
+                "ok": False,
+                "source": "pikpak",
+                "filename": "PikPak 已选文件",
+                "reason": "PikPak 分享文件标识已变化，无法恢复原选择，请重试该任务以重新解析整份分享",
+            })
         out["items"] = items
         ok_count = sum(1 for item in items if item.get("ok"))
         out["ok_count"] = ok_count
@@ -4342,6 +4371,15 @@ class HttpDownloadService:
                                 if self._share_item_matches_selection("pikpak", item, selection_filter)
                             ]
                             if not files:
+                                # 不能静默 continue：那会让上层拿到空列表，
+                                # 报出没有任何明细的「没有通过校验的下载项」。
+                                failed.append({
+                                    "ok": False,
+                                    "url": raw_url,
+                                    "masked_url": self._mask_url(raw_url),
+                                    "reason": "分享里的文件与任务已选文件匹配不上（分享可能已更新或选择标识已漂移），请重试任务重新解析",
+                                    "source": "pikpak",
+                                })
                                 continue
                         file_ids = []
                         for item in files:
@@ -5955,6 +5993,22 @@ class HttpDownloadService:
         retry_rebuild_share = bool(metadata.get("pikpak_retry_rebuild_share"))
         if retry_rebuild_share and any(self._is_pikpak_url(url) for url in raw_urls):
             selected_items = []
+            task.task_metadata["selected_keys"] = []
+        # 只有 selected_keys（哈希串）而没有 selected_items 时，开始下载阶段
+        # 无法可靠匹配：创建任务与开始下载两次预览走的是不同代码路径
+        # （创建时走 preview_only 分支、下载时走带直链的主分支），生成的
+        # item 字段有差异，selection_key 哈希会漂移，过滤结果为空就报出
+        # 没有任何明细的「没有通过校验的下载项」。PikPak 分卷本来就必须
+        # 整份分享一起下载，此时直接清空选择整份重解析。
+        elif (
+            not selected_items
+            and list(metadata.get("selected_keys") or [])
+            and any(self._is_pikpak_url(url) for url in raw_urls)
+        ):
+            logger.warning(
+                "[PikPak] 任务只带 selected_keys 而无 selected_items，无法按选择匹配，改为整份分享重新解析 task=%s",
+                task_id,
+            )
             task.task_metadata["selected_keys"] = []
         preview = await self.preview_urls(
             raw_urls,
