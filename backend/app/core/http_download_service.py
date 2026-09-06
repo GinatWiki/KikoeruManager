@@ -6231,9 +6231,13 @@ class HttpDownloadService:
             task.task_metadata["download_files"] = download_files
             task.task_metadata["download_runtime"] = runtime
             task.current_step = runtime.get("current_file_name") or "下载中"
-            total = max(1, int(runtime.get("total_bytes") or total_bytes or 0))
+            total = int(runtime.get("total_bytes") or total_bytes or 0)
             transferred = int(runtime.get("transferred_bytes") or 0)
-            task.progress = max(task.progress, 95 if total <= 1 else min(99, int(transferred / total * 100)))
+            if total > 1:
+                task.progress = max(task.progress, min(99, int(transferred / total * 100)))
+            else:
+                # 总大小未知时不硬凑 95%，避免卡片停在 95% 一动不动
+                task.progress = max(task.progress, 5)
             return runtime
 
         google_last_log_at = 0.0
@@ -6381,14 +6385,28 @@ class HttpDownloadService:
                 task.task_metadata["download_files"] = download_files
                 task.task_metadata["download_runtime"] = runtime
                 task.current_step = runtime.get("current_file_name") or "下载中"
-                total = max(1, int(runtime.get("total_bytes") or total_bytes or 0))
+                total = int(runtime.get("total_bytes") or total_bytes or 0)
                 transferred = int(runtime.get("transferred_bytes") or 0)
-                progress = 95 if total <= 1 else min(99, int(transferred / total * 100))
-                task.progress = max(task.progress, progress)
+                if total > 1:
+                    progress = min(99, int(transferred / total * 100))
+                    size_known = True
+                else:
+                    # 总大小未知（源不返回 Content-Length）时不硬凑 95%：
+                    # 那会让卡片开局就停在 95% 一动不动，看起来像没进度。
+                    progress = max(task.progress, 5)
+                    size_known = False
                 now = time.monotonic()
                 if now - last_log_at > 5:
                     last_log_at = now
-                    task.update_progress(task.progress, f"下载中 {runtime.get('completed_files', 0)}/{len(download_files)}")
+                    step = f"下载中 {runtime.get('completed_files', 0)}/{len(download_files)}"
+                    if not size_known:
+                        step += f"，已传 {self._format_bytes_for_error(transferred)}"
+                    task.update_progress(progress, step)
+                else:
+                    # 进度事件按轮询节奏（1s）推送，日志仍按 5s 节流不刷屏。
+                    # 直接赋值 task.progress 不会触发事件，必须显式 mark_changed。
+                    task.progress = max(task.progress, progress)
+                    task.mark_changed("progress")
                 if done:
                     break
                 await asyncio.sleep(1.0)
