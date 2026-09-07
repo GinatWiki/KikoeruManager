@@ -201,6 +201,18 @@ export const defaultConfig = {
     retry_count: 3,
     retry_delay: 1.0
   },
+  kikoeru_db: {
+    enabled: false,
+    db_path: '',
+    backup_dir: '',
+    backup_interval_hours: 24.0,
+    backup_retention: 7,
+    snapshot_retention: 20,
+    scan_listen_enabled: false,
+    scan_poll_interval_minutes: 30,
+    scan_checkpoint: '',
+    last_scan_finished_at: ''
+  },
   asmr_sync: {
     enabled: true,
     api_base_url: 'https://api.asmr-200.com/api',
@@ -585,6 +597,7 @@ function hydrateConfig(data = {}) {
     path_mappings: data?.path_mapping?.rules || defaultConfig.path_mappings,
     path_mapping_enabled: data?.path_mapping?.enabled ?? defaultConfig.path_mapping_enabled,
     kikoeru_server: { ...defaultConfig.kikoeru_server, ...(data?.kikoeru_server || {}) },
+    kikoeru_db: { ...defaultConfig.kikoeru_db, ...(data?.kikoeru_db || {}) },
     asmr_sync: { ...defaultConfig.asmr_sync, ...(data?.asmr_sync || {}), lrc_clean_patterns: data?.asmr_sync?.lrc_clean_patterns || defaultConfig.asmr_sync.lrc_clean_patterns },
     http_downloader: { ...defaultConfig.http_downloader, ...(data?.http_downloader || {}) },
     baidu_netdisk: { ...defaultConfig.baidu_netdisk, ...(data?.baidu_netdisk || {}) },
@@ -642,6 +655,7 @@ function serializeConfig(config) {
       }))
     },
     kikoeru_server: payload.kikoeru_server,
+    kikoeru_db: payload.kikoeru_db,
     asmr_sync: payload.asmr_sync,
     http_downloader: payload.http_downloader,
     baidu_netdisk: payload.baidu_netdisk,
