@@ -21,7 +21,8 @@
 - preview（名单）：纯 SQL 筛选 0 分/满分目标，秒出，零 DLsite 请求；
 - run（执行）：用户确认名单后才启动后台任务，逐个抓取 DLsite 并**分批写库**
   （每 40 行一个快照事务），全程实时进度（done/total、applied/none/error 计数、
-  逐行结果）与取消支持。
+  逐行结果）与取消支持。批次写入遇 Kikoeru 占用自动重试，最终失败的行标记
+  write_failed（前端显示「写入失败」），任务继续处理后续行，重跑可补上。
 
 回填字段：rate_count / rate_average_2dp / rate_count_detail / rank / review_count / dl_count / price。
 写入走 KikoeruDbService 快照写事务；不自动改 is_custom_meta
@@ -44,6 +45,11 @@ logger = logging.getLogger(__name__)
 
 _VJ_OFFSET = 2000000000000
 _RATING_FIELDS = ("rate_count", "rate_average_2dp", "rate_count_detail", "rank", "review_count", "dl_count", "price")
+
+# 批次写入重试：Kikoeru 容器可能与本服务争抢 SQLite 锁（尤其 SMB 场景），
+# BEGIN IMMEDIATE 内层已有 5 次退避，这里再做批级重试兜底。
+_FLUSH_ATTEMPTS = 3
+_FLUSH_RETRY_DELAY = 2.0
 
 
 def workno_candidates_from_work_id(work_id: int) -> List[str]:
@@ -231,7 +237,7 @@ class KikoeruRatingFixService:
     def get_run_status(self) -> Dict[str, Any]:
         if not self._run_state:
             return {"running": False, "phase": "idle", "total": 0, "done": 0,
-                    "applied": 0, "none": 0, "error": 0, "results": []}
+                    "applied": 0, "none": 0, "error": 0, "write_failed": 0, "results": []}
         return dict(self._run_state)
 
     def request_cancel(self) -> bool:
@@ -249,6 +255,7 @@ class KikoeruRatingFixService:
         state: Dict[str, Any] = {
             "running": True, "cancel": False, "phase": "fetching",
             "total": 0, "done": 0, "applied": 0, "none": 0, "error": 0,
+            "write_failed": 0,
             "results": [],
             "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "finished_at": "",
@@ -318,8 +325,9 @@ class KikoeruRatingFixService:
             await self._flush_batch(state, batch)
             state["phase"] = "done"
             logger.info(
-                "[KIKOERU-DB] 评分修复任务完成: done=%s applied=%s none=%s error=%s cancel=%s",
-                state["done"], state["applied"], state["none"], state["error"], state["cancel"],
+                "[KIKOERU-DB] 评分修复任务完成: done=%s applied=%s none=%s error=%s write_failed=%s cancel=%s",
+                state["done"], state["applied"], state["none"], state["error"],
+                state.get("write_failed", 0), state["cancel"],
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("[KIKOERU-DB] 评分修复任务异常: %s", exc, exc_info=True)
@@ -330,7 +338,14 @@ class KikoeruRatingFixService:
             state["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     async def _flush_batch(self, state: Dict[str, Any], batch: List[Dict[str, Any]]) -> None:
-        """把一批待回填行写入数据库（单事务 + 写前快照）。"""
+        """把一批待回填行写入数据库（单事务 + 写前快照 + 批级自动重试）。
+
+        写入失败（如 Kikoeru 占用、网络文件系统抖动）**不终止任务**：
+        - 自动重试 _FLUSH_ATTEMPTS 次；
+        - 最终失败时该批行标记 write_error 并计入 write_failed（前端显示「写入失败」，
+          与正常「跳过」明确区分）；
+        - 失败行仍留在 0 分/满分名单里，下次重跑评分修复自动补上（幂等）。
+        """
         if not batch:
             return
         state["phase"] = "writing"
@@ -357,19 +372,43 @@ class KikoeruRatingFixService:
                 applied += 1
             return applied
 
-        try:
-            applied = 0
-            applied = await asyncio.to_thread(self._db._write_with_snapshot, _do)
+        applied = 0
+        last_exc: Optional[Exception] = None
+        for attempt in range(_FLUSH_ATTEMPTS):
+            try:
+                applied = await asyncio.to_thread(self._db._write_with_snapshot, _do)
+                last_exc = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                logger.warning(
+                    "[KIKOERU-DB] 评分修复批次写入失败（第 %s/%s 次）: %s",
+                    attempt + 1, _FLUSH_ATTEMPTS, exc,
+                )
+                if attempt < _FLUSH_ATTEMPTS - 1:
+                    await asyncio.sleep(_FLUSH_RETRY_DELAY)
+
+        if last_exc is None:
             state["applied"] += applied
-            logger.info("[KIKOERU-DB] 评分修复批次写入完成: %s 行", applied)
-        finally:
-            # 无论成功与否，本批结果都已计入统计；写入失败时快照兜底可恢复
             for item in batch:
                 for row in state["results"]:
                     if row["id"] == item["id"]:
-                        row["applied"] = applied > 0
+                        row["applied"] = True
                         break
-            batch.clear()
+            logger.info("[KIKOERU-DB] 评分修复批次写入完成: %s 行", applied)
+        else:
+            state["write_failed"] = state.get("write_failed", 0) + len(batch)
+            message = f"数据库写入失败（已自动重试 {_FLUSH_ATTEMPTS} 次）：{last_exc}"
+            for item in batch:
+                for row in state["results"]:
+                    if row["id"] == item["id"]:
+                        row["write_error"] = message
+                        break
+            logger.error(
+                "[KIKOERU-DB] 评分修复批次最终写入失败，%s 行未回填（重跑评分修复可补上）: %s",
+                len(batch), last_exc,
+            )
+        batch.clear()
         state["phase"] = "fetching"
 
     @staticmethod

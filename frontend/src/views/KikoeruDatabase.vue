@@ -315,7 +315,7 @@
     <!-- 评分修复向导（两段式：名单确认 → 后台处理） -->
     <el-dialog v-model="ratingFixVisible" title="评分修复" width="1000px" destroy-on-close @closed="stopRunPolling">
       <el-alert type="info" :closable="false" class="mb-3" show-icon
-                title="第一步只列出待处理名单（不访问网络）。你确认后点「开始处理」，才逐个查询 DLsite（本体重抓 → 满分用日文原版校验 → 无评分时套用关联版本评分，优先日文原版），每 40 行一批写入并全程显示进度，可随时取消。" />
+                title="第一步只列出待处理名单（不访问网络）。你确认后点「开始处理」，才逐个查询 DLsite（本体重抓 → 满分用日文原版校验 → 无评分时套用关联版本评分，优先日文原版），每 40 行一批写入并全程显示进度，可随时取消。写入若遇 Kikoeru 占用会自动重试 3 次；仍失败的行会标为「写入失败」，重跑评分修复即可补上。" />
 
       <!-- 第一段：待处理名单（零网络请求） -->
       <template v-if="!ratingFixRunStarted">
@@ -364,6 +364,9 @@
             <template v-if="ratingFixRunStatus.error > 0">
               <b class="text-red-500">网络失败 {{ ratingFixRunStatus.error }}</b>（下次重跑自动重试），
             </template>
+            <template v-if="ratingFixRunStatus.write_failed > 0">
+              <b class="text-red-500">写入失败 {{ ratingFixRunStatus.write_failed }}</b>（重跑评分修复可补上），
+            </template>
             <span v-if="ratingFixRunStatus.finished_at" class="ml-1 text-xs text-slate-400">完成于 {{ ratingFixRunStatus.finished_at }}</span>
           </div>
         </div>
@@ -393,11 +396,15 @@
               <span v-if="row.applied" class="text-emerald-600 font-medium">
                 {{ row.new_rate_average_2dp }}（{{ row.new_rate_count }} 评）
               </span>
+              <span v-else-if="row.write_error" class="text-red-500 text-xs">写入失败</span>
               <span v-else-if="row.plan === 'error'" class="text-red-400 text-xs">未写入</span>
               <span v-else class="text-slate-400 text-xs">跳过</span>
             </template>
           </el-table-column>
-          <el-table-column prop="reason" label="说明" min-width="160" show-overflow-tooltip />
+          <el-table-column min-width="160" show-overflow-tooltip>
+            <template #header>说明</template>
+            <template #default="{ row }">{{ row.write_error || row.reason }}</template>
+          </el-table-column>
         </el-table>
       </template>
 
@@ -501,7 +508,7 @@ const ratingFixPreviewing = ref(false)
 const ratingFixScopedToSelection = ref(false)
 const ratingFixLimit = ref(300)
 const ratingFixRunStarted = ref(false)
-const ratingFixRunStatus = ref({ running: false, phase: 'idle', total: 0, done: 0, applied: 0, none: 0, error: 0, results: [] })
+const ratingFixRunStatus = ref({ running: false, phase: 'idle', total: 0, done: 0, applied: 0, none: 0, error: 0, write_failed: 0, results: [] })
 const ratingFixPollTimer = ref(null)
 
 const runPhase = computed(() => {
@@ -587,7 +594,7 @@ async function startRatingFixRun() {
     ratingFixRunStarted.value = true
     ratingFixRunStatus.value = {
       running: true, phase: 'fetching', total,
-      done: 0, applied: 0, none: 0, error: 0, results: []
+      done: 0, applied: 0, none: 0, error: 0, write_failed: 0, results: []
     }
     startRunPolling()
   } catch (error) {
@@ -616,7 +623,9 @@ async function pollRunStatus() {
       if (s.phase === 'failed') {
         ElMessage.error(`评分修复任务异常：${s.error_detail || '未知错误'}`)
       } else {
-        ElMessage.success(`评分修复结束：套用 ${s.applied} 行，无评分 ${s.none} 行，失败 ${s.error} 行`)
+        const parts = [`套用 ${s.applied} 行`, `无评分 ${s.none} 行`, `失败 ${s.error} 行`]
+        if (s.write_failed > 0) parts.push(`写入失败 ${s.write_failed} 行（重跑评分修复可补上）`)
+        ElMessage.success(`评分修复结束：${parts.join('，')}`)
       }
       await Promise.all([loadRows(), loadBackups()])
     }

@@ -279,3 +279,64 @@ async def test_run_skip_when_nothing_fixable(env, monkeypatch):
     status = env.service.get_run_status()
     assert status["applied"] == 0
     assert status["none"] == 1
+
+
+# ------------------------------------------------------------ 写入失败（v2.6.4 用户实测：Kikoeru 占用导致全部"跳过"）
+@pytest.mark.asyncio
+async def test_flush_write_failure_marks_rows_and_continues(env, monkeypatch):
+    """批次写入最终失败 → 行标 write_error 而非误报"跳过"，任务不终止，库不被改动。
+
+    用户实测场景：Kikoeru 容器占用 SQLite 锁（SMB），写入 423 后旧代码把
+    全部已抓到评分的行标 applied=False，前端显示"跳过"，且任务整体 failed。
+    """
+    _mock_dlsite(monkeypatch, {"RJ126662": _rating(5, 4.5, "RJ126662"),
+                               "RJ234567": _rating(9, 4.2, "RJ234567")}, {})
+    monkeypatch.setattr(rfs, "_FLUSH_RETRY_DELAY", 0)
+    attempts = {"n": 0}
+
+    def failing_write(self, fn):
+        attempts["n"] += 1
+        raise kdb.KikoeruDbError("数据库被占用（Kikoeru 可能在写入）: database is locked", 423)
+
+    monkeypatch.setattr(kdb.KikoeruDbService, "_write_with_snapshot", failing_write)
+    await env.service.start_run(ids=[126662, 234567])
+    await env.service._run_task
+    status = env.service.get_run_status()
+    # 任务正常收尾（不再 failed），失败行有明确标记
+    assert status["phase"] == "done"
+    assert attempts["n"] == 3  # 批级自动重试 3 次
+    assert status["applied"] == 0
+    assert status["write_failed"] == 2
+    for r in status["results"]:
+        assert "数据库写入失败" in r["write_error"]
+    # 库未被改动（失败行保留 0 分，重跑评分修复会重新进入名单）
+    row = kdb.KikoeruDbService().query_table("t_work", search="作品A")["rows"][0]
+    assert row["rate_average_2dp"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_flush_retry_then_succeeds(env, monkeypatch):
+    """第一次写入被占用、第二次成功 → 正常套用，不计 write_failed。"""
+    _mock_dlsite(monkeypatch, {"RJ126662": _rating(5, 4.5, "RJ126662")}, {})
+    monkeypatch.setattr(rfs, "_FLUSH_RETRY_DELAY", 0)
+    calls = {"n": 0}
+    real_write = kdb.KikoeruDbService._write_with_snapshot
+
+    def flaky_write(self, fn):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise kdb.KikoeruDbError("数据库被占用: database is locked", 423)
+        return real_write(self, fn)
+
+    monkeypatch.setattr(kdb.KikoeruDbService, "_write_with_snapshot", flaky_write)
+    await env.service.start_run(ids=[126662])
+    await env.service._run_task
+    status = env.service.get_run_status()
+    assert calls["n"] == 2
+    assert status["applied"] == 1
+    assert status["write_failed"] == 0
+    result_row = status["results"][0]
+    assert result_row["applied"] is True
+    assert not result_row.get("write_error")
+    row = kdb.KikoeruDbService().query_table("t_work", search="作品A")["rows"][0]
+    assert row["rate_average_2dp"] == 4.5
