@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import sqlite3
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -37,6 +38,12 @@ TABLE_HIDDEN = {"t_user", "knex_migrations"}
 TABLE_EXPECTED = TABLE_EDITABLE | TABLE_READONLY | TABLE_HIDDEN  # 共 11 张
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+# 进程内 DB 操作互斥：真实 Kikoeru 库为 rollback-journal 模式，同进程的并发
+# 备份（长读持 SHARED 锁）与写事务（COMMIT 需 EXCLUSIVE）会互相制造
+# "database is locked"。所有备份/写/恢复操作在此锁上串行化；
+# 用 RLock 是因为 _write_with_snapshot 内部要重入 create_backup（同线程）。
+_DB_OP_LOCK = threading.RLock()
 
 # t_work 中可走 Kikoeru 官方编辑 API（POST /api/edit/work/{id}）的字段映射
 # （t_work 列名 → API payload 字段名；API 为整体替换语义，调用方必须带全四项）
@@ -147,42 +154,43 @@ class KikoeruDbService:
         """对当前数据库做一致性备份（sqlite3 backup API，可安全在 Kikoeru 运行时执行）。"""
         if kind not in ("activate", "auto", "manual", "pre-restore", "snapshot"):
             raise KikoeruDbError(f"非法备份类型: {kind}", 400)
-        config = get_config()
-        if not str(config.kikoeru_db.db_path or "").strip():
-            raise KikoeruDbError("尚未配置 Kikoeru 数据库路径（db_path）", 400)
-        backup_dir = KikoeruDbService._resolve_backup_dir()
-        db_path = KikoeruDbService._resolve_db_path()
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        target = backup_dir / f"{db_path.stem}_{stamp}_{kind}.sqlite3"
-        # 先做抢锁探测（sqlite3 backup API 遇 BUSY 会无限重试，必须先快速失败）
-        probe = KikoeruDbService._connect(db_path, readonly=False, busy_timeout_ms=2000)
-        probe.isolation_level = None
-        try:
-            probe.execute("BEGIN IMMEDIATE")
-            probe.execute("COMMIT")
-        except sqlite3.OperationalError as exc:
-            raise KikoeruDbError(f"数据库被占用，无法备份（Kikoeru 可能在写入）: {exc}", 423)
-        finally:
-            probe.close()
-        src = KikoeruDbService._connect(db_path, readonly=True)
-        try:
-            dst = sqlite3.connect(str(target))
+        with _DB_OP_LOCK:
+            config = get_config()
+            if not str(config.kikoeru_db.db_path or "").strip():
+                raise KikoeruDbError("尚未配置 Kikoeru 数据库路径（db_path）", 400)
+            backup_dir = KikoeruDbService._resolve_backup_dir()
+            db_path = KikoeruDbService._resolve_db_path()
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            target = backup_dir / f"{db_path.stem}_{stamp}_{kind}.sqlite3"
+            # 先做抢锁探测（sqlite3 backup API 遇 BUSY 会无限重试，必须先快速失败）
+            probe = KikoeruDbService._connect(db_path, readonly=False, busy_timeout_ms=2000)
+            probe.isolation_level = None
             try:
-                src.backup(dst)
+                probe.execute("BEGIN IMMEDIATE")
+                probe.execute("COMMIT")
+            except sqlite3.OperationalError as exc:
+                raise KikoeruDbError(f"数据库被占用，无法备份（Kikoeru 可能在写入）: {exc}", 423)
             finally:
-                dst.close()
-        finally:
-            src.close()
-        # activate 原始备份只保留 1 份：删除更早的 activate
-        if kind == "activate":
-            for old in sorted(backup_dir.glob(f"{db_path.stem}_*_activate.sqlite3"))[:-1]:
+                probe.close()
+            src = KikoeruDbService._connect(db_path, readonly=True)
+            try:
+                dst = sqlite3.connect(str(target))
                 try:
-                    old.unlink()
-                except OSError:
-                    logger.warning("[KIKOERU-DB] 清理旧 activate 备份失败: %s", old)
-        logger.info("[KIKOERU-DB] 备份完成 kind=%s -> %s", kind, target)
-        return {"filename": target.name, "kind": kind, "size": target.stat().st_size,
-                "created_at": datetime.fromtimestamp(target.stat().st_mtime).isoformat(timespec="seconds")}
+                    src.backup(dst)
+                finally:
+                    dst.close()
+            finally:
+                src.close()
+            # activate 原始备份只保留 1 份：删除更早的 activate
+            if kind == "activate":
+                for old in sorted(backup_dir.glob(f"{db_path.stem}_*_activate.sqlite3"))[:-1]:
+                    try:
+                        old.unlink()
+                    except OSError:
+                        logger.warning("[KIKOERU-DB] 清理旧 activate 备份失败: %s", old)
+            logger.info("[KIKOERU-DB] 备份完成 kind=%s -> %s", kind, target)
+            return {"filename": target.name, "kind": kind, "size": target.stat().st_size,
+                    "created_at": datetime.fromtimestamp(target.stat().st_mtime).isoformat(timespec="seconds")}
 
     @staticmethod
     def list_backups(kind: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -240,50 +248,51 @@ class KikoeruDbService:
     @staticmethod
     def restore_backup(filename: str) -> Dict[str, Any]:
         """用指定备份整文件替换当前库。恢复前自动做 pre-restore 备份。"""
-        backup_dir = KikoeruDbService._resolve_backup_dir()
-        db_path = KikoeruDbService._resolve_db_path()
+        with _DB_OP_LOCK:
+            backup_dir = KikoeruDbService._resolve_backup_dir()
+            db_path = KikoeruDbService._resolve_db_path()
 
-        safe_name = Path(str(filename or "")).name
-        if not re.match(rf"^{re.escape(db_path.stem)}_\d{{8}}_\d{{6}}_[a-z\-]+\.sqlite3$", safe_name):
-            raise KikoeruDbError(f"非法备份文件名: {filename}", 400)
-        source = backup_dir / safe_name
-        if not source.is_file():
-            raise KikoeruDbError(f"备份文件不存在: {safe_name}", 404)
+            safe_name = Path(str(filename or "")).name
+            if not re.match(rf"^{re.escape(db_path.stem)}_\d{{8}}_\d{{6}}_[a-z\-]+\.sqlite3$", safe_name):
+                raise KikoeruDbError(f"非法备份文件名: {filename}", 400)
+            source = backup_dir / safe_name
+            if not source.is_file():
+                raise KikoeruDbError(f"备份文件不存在: {safe_name}", 404)
 
-        # 恢复前先备份当前状态
-        KikoeruDbService.create_backup("pre-restore")
+            # 恢复前先备份当前状态
+            KikoeruDbService.create_backup("pre-restore")
 
-        # 校验备份文件本身可用
-        check = sqlite3.connect(str(source))
-        try:
-            result = check.execute("PRAGMA integrity_check").fetchone()
-            if not result or str(result[0]).lower() != "ok":
-                raise KikoeruDbError(f"备份文件损坏（integrity_check={result[0] if result else 'n/a'}），已中止恢复", 500)
-        finally:
-            check.close()
-
-        # 写入临时文件后原子替换；一并清掉旧 -wal/-shm，防止旧 WAL 污染新主库
-        tmp = db_path.with_suffix(".sqlite3.restore_tmp")
-        shutil.copy2(source, tmp)
-        os.replace(tmp, db_path)
-        for suffix in ("-wal", "-shm"):
-            stale = Path(str(db_path) + suffix)
+            # 校验备份文件本身可用
+            check = sqlite3.connect(str(source))
             try:
-                if stale.exists():
-                    stale.unlink()
-            except OSError:
-                logger.warning("[KIKOERU-DB] 清理旧 %s 失败（建议确认 Kikoeru 状态）", stale.name)
+                result = check.execute("PRAGMA integrity_check").fetchone()
+                if not result or str(result[0]).lower() != "ok":
+                    raise KikoeruDbError(f"备份文件损坏（integrity_check={result[0] if result else 'n/a'}），已中止恢复", 500)
+            finally:
+                check.close()
 
-        verify = KikoeruDbService._connect(readonly=True)
-        try:
-            row = verify.execute("PRAGMA integrity_check").fetchone()
-            ok = bool(row) and str(row[0]).lower() == "ok"
-        finally:
-            verify.close()
-        if not ok:
-            raise KikoeruDbError("恢复后 integrity_check 未通过", 500)
-        logger.info("[KIKOERU-DB] 恢复完成: %s -> %s", safe_name, db_path)
-        return {"restored": safe_name, "integrity": "ok"}
+            # 写入临时文件后原子替换；一并清掉旧 -wal/-shm，防止旧 WAL 污染新主库
+            tmp = db_path.with_suffix(".sqlite3.restore_tmp")
+            shutil.copy2(source, tmp)
+            os.replace(tmp, db_path)
+            for suffix in ("-wal", "-shm"):
+                stale = Path(str(db_path) + suffix)
+                try:
+                    if stale.exists():
+                        stale.unlink()
+                except OSError:
+                    logger.warning("[KIKOERU-DB] 清理旧 %s 失败（建议确认 Kikoeru 状态）", stale.name)
+
+            verify = KikoeruDbService._connect(readonly=True)
+            try:
+                row = verify.execute("PRAGMA integrity_check").fetchone()
+                ok = bool(row) and str(row[0]).lower() == "ok"
+            finally:
+                verify.close()
+            if not ok:
+                raise KikoeruDbError("恢复后 integrity_check 未通过", 500)
+            logger.info("[KIKOERU-DB] 恢复完成: %s -> %s", safe_name, db_path)
+            return {"restored": safe_name, "integrity": "ok"}
 
     # ------------------------------------------------------------------ 只读查询
     def query_table(self, table: str, page: int = 1, size: int = 50,
@@ -357,53 +366,56 @@ class KikoeruDbService:
         """写前拍 snapshot 备份 → BEGIN IMMEDIATE 重试 → 写后 integrity_check 校验。
 
         fn(conn) 在 BEGIN IMMEDIATE 之后的同一连接/事务内执行，异常时 ROLLBACK。
+        全程持有进程内 _DB_OP_LOCK：与定时备份/恢复/其它写操作串行，避免
+        rollback-journal 模式下同进程读锁挡 COMMIT 的自锁。
         """
-        import asyncio as _asyncio
+        with _DB_OP_LOCK:
+            import asyncio as _asyncio
 
-        db_path = self._resolve_db_path()
-        # 写前一致性快照（backup API 生成独立完整副本）
-        snapshot = self.create_backup("snapshot")
+            db_path = self._resolve_db_path()
+            # 写前一致性快照（backup API 生成独立完整副本）
+            snapshot = self.create_backup("snapshot")
 
-        conn = self._connect(db_path, readonly=False, busy_timeout_ms=5000)
-        conn.isolation_level = None  # 手动事务
-        try:
-            last_err: Optional[Exception] = None
-            import time
-            for attempt in range(5):
-                try:
-                    conn.execute("BEGIN IMMEDIATE")
-                    last_err = None
-                    break
-                except sqlite3.OperationalError as exc:
-                    last_err = exc
-                    time.sleep(min(0.2 * (2 ** attempt), 2.0))
-            if last_err is not None:
-                raise KikoeruDbError(
-                    f"数据库被占用（Kikoeru 可能在写入），请稍后重试或先停止 Kikoeru: {last_err}", 423
-                )
+            conn = self._connect(db_path, readonly=False, busy_timeout_ms=5000)
+            conn.isolation_level = None  # 手动事务
             try:
-                result = fn(conn)
-                row = conn.execute("PRAGMA integrity_check").fetchone()
-                if not row or str(row[0]).lower() != "ok":
-                    raise KikoeruDbError(f"写入后完整性校验失败: {row[0] if row else 'n/a'}", 500)
-                conn.execute("COMMIT")
-                return result
-            except Exception:
+                last_err: Optional[Exception] = None
+                import time
+                for attempt in range(5):
+                    try:
+                        conn.execute("BEGIN IMMEDIATE")
+                        last_err = None
+                        break
+                    except sqlite3.OperationalError as exc:
+                        last_err = exc
+                        time.sleep(min(0.2 * (2 ** attempt), 2.0))
+                if last_err is not None:
+                    raise KikoeruDbError(
+                        f"数据库被占用（Kikoeru 可能在写入），请稍后重试或先停止 Kikoeru: {last_err}", 423
+                    )
                 try:
-                    conn.execute("ROLLBACK")
-                except sqlite3.Error:
-                    pass
+                    result = fn(conn)
+                    row = conn.execute("PRAGMA integrity_check").fetchone()
+                    if not row or str(row[0]).lower() != "ok":
+                        raise KikoeruDbError(f"写入后完整性校验失败: {row[0] if row else 'n/a'}", 500)
+                    conn.execute("COMMIT")
+                    return result
+                except Exception:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+                    raise
+            except KikoeruDbError:
                 raise
-        except KikoeruDbError:
-            raise
-        except sqlite3.Error as exc:
-            raise KikoeruDbError(f"数据库写入失败: {exc}", 500)
-        finally:
-            conn.close()
-            try:
-                self.cleanup_retention()
-            except Exception:  # noqa: BLE001 - 清理失败不影响写入结果
-                logger.debug("[KIKOERU-DB] 快照清理失败", exc_info=True)
+            except sqlite3.Error as exc:
+                raise KikoeruDbError(f"数据库写入失败: {exc}", 500)
+            finally:
+                conn.close()
+                try:
+                    self.cleanup_retention()
+                except Exception:  # noqa: BLE001 - 清理失败不影响写入结果
+                    logger.debug("[KIKOERU-DB] 快照清理失败", exc_info=True)
 
     # ---- 行级写操作（含组合主键支持） ----
     @staticmethod
