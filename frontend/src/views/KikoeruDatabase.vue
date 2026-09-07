@@ -529,9 +529,11 @@ watch(renameMode, () => {
 })
 
 // 示例正则由程序直接填入输入框——从网页/聊天复制时 \[ \] 会被 LaTeX 渲染转成 $$
+// 注意：编号用 \d{6,8}(?!\d) 贪婪取最长并防截断；写成 (?:\d{6}|\d{8}) 有序分支
+// 会先匹配 6 位，8 位号的剩余数字会被卷进标题（v2.6.8 用户实测）
 const REGEX_EXAMPLES = {
-  multi: '\\[?RJ(?:\\d{6}|\\d{8})\\]?\\s*(?:\\[([^\\[\\]]+)\\]\\s*$|(.+))',
-  simple: '^RJ\\d+\\s+(.+)$'
+  multi: '\\b\\[?RJ\\d{6,8}(?!\\d)\\]?\\s*(?:\\[([^\\[\\]]+)\\]\\s*$|(.+))',
+  simple: '\\b\\[?RJ\\d{6,8}(?!\\d)\\]?\\s*(.+)$'
 }
 function insertRegexExample(key) {
   renameRegex.value = REGEX_EXAMPLES[key] || ''

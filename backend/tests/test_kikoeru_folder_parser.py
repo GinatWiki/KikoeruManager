@@ -230,23 +230,32 @@ def test_compile_user_regex_dollar_dollar_hint():
 def test_parse_work_name_by_regex_multi_branch():
     """用户的多分支正则（(?: 等价写法）：取首个参与匹配的捕获组。
 
-    \\[?RJ(?:\\d{6}|\\d{8})\\]?\\s*(?:\\[([^\\[\\]]+)\\]\\s*$|(.+))
-    - RJ 号后的括号段不在行尾 → 分支 A 不参与，分支 B 取整段（保留社团/CV）；
-    - 括号段恰在行尾 → 分支 A 取括号内内容。
+    编号必须用 \\d{6,8}(?!\\d) 贪婪取最长——写成 (?:\\d{6}|\\d{8}) 有序分支
+    会先匹配 6 位，8 位号（RJ01693368）的剩余「68]」会被卷进标题
+    （v2.6.8 用户实测：新标题变成「68][將一切收入囊中的最強」）。
     """
-    rx = compile_user_regex(r"\[?RJ(?:\d{6}|\d{8})\]?\s*(?:\[([^\[\]]+)\]\s*$|(.+))")
+    rx = compile_user_regex(r"\b\[?RJ\d{6,8}(?!\d)\]?\s*(?:\[([^\[\]]+)\]\s*$|(.+))")
 
+    # 8 位号 + [RJ][标题] 双括号形态（用户实测案例）
     r = parse_work_name_by_regex(
-        "RJ192588 [ベレス解部]新生代风格婴儿游戏 小夜子(CV ゆづきひな。)", rx
+        "[RJ01693368][將一切收入囊中的最強魔王，被作為奴○帶來的戰敗國下級淫魔用不可思議的道具徹底銘刻快樂的故事]", rx
     )
     assert r["matched"] is True
-    assert r["work_name"] == "[ベレス解部]新生代风格婴儿游戏 小夜子(CV ゆづきひな。)"
-    assert r["rjcode"] == "RJ192588"
+    assert r["work_name"] == "將一切收入囊中的最強魔王，被作為奴○帶來的戰敗國下級淫魔用不可思議的道具徹底銘刻快樂的故事"
+    assert r["rjcode"] == "RJ01693368"
 
-    r2 = parse_work_name_by_regex("[RJ123456] [标题]", rx)
-    assert r2["matched"] is True
-    assert r2["work_name"] == "标题"  # 分支 A：行尾括号段取内芯
+    # RJ 号后的括号段不在行尾 → 分支 B 取整段（保留社团/CV）
+    r_own = parse_work_name_by_regex(
+        "RJ192588 [ベレス解部]新生代风格婴儿游戏 小夜子(CV ゆづきひな。)", rx
+    )
+    assert r_own["matched"] is True
+    assert r_own["work_name"] == "[ベレス解部]新生代风格婴儿游戏 小夜子(CV ゆづきひな。)"
 
-    r3 = parse_work_name_by_regex("[RJ123456] 名字", rx)
-    assert r3["matched"] is True
-    assert r3["work_name"] == "名字"
+    # 括号段恰在行尾 → 分支 A 取括号内内容
+    r_tail = parse_work_name_by_regex("[RJ123456] [标题]", rx)
+    assert r_tail["matched"] is True
+    assert r_tail["work_name"] == "标题"
+
+    r_rest = parse_work_name_by_regex("[RJ123456] 名字", rx)
+    assert r_rest["matched"] is True
+    assert r_rest["work_name"] == "名字"
