@@ -28,6 +28,13 @@ services:
       - /volume1/ASMR:/existing
       # 已处理的原始压缩包归档目录（处理完的 zip 会移动到这里）
       - /volume1/ASMR/processed:/processed
+
+      # --- 可选：Kikoeru 数据库管理（v2.6）---
+      # 想在「Kikoeru 数据库」页面直接编辑远程 Kikoeru 的 SQLite 库时，
+      # 把 Kikoeru 容器的库文件以单文件 bind mount 进本容器（路径按你的实际 appdata 调整），
+      # 然后在设置里把「Kikoeru 数据库管理 → 数据库路径」填容器内路径 /kikoeru-db/db.sqlite3。
+      # 同主机 bind mount 不走网络，SQLite 锁语义最可靠；EXE 版则直接填 UNC 路径。
+      # - /volume1/docker/kikoeru/appdata/kikoeru/db.sqlite3:/kikoeru-db/db.sqlite3
     environment:
       - CONFIG_PATH=/app/config/config.yaml
       - DATA_PATH=/app/data
