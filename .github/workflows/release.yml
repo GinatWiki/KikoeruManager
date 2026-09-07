@@ -1,17 +1,19 @@
 name: Build Windows EXE / Installer and Release
 
+# EXE 发布策略（2026-09-07 起生效）：tag 推送只构建 GHCR Docker 镜像（ghcr.yml）。
+# Windows EXE / 安装包的构建与发布必须在维护者明确要求后，通过 workflow_dispatch
+# 手动触发（推荐直接在目标 tag ref 上触发，tag 输入留空即可）。
 on:
   push:
     branches: [ 'main' ]
-    tags: [ 'v*' ]
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v2.3.14, optional when triggered by tag push)'
+        description: '要构建 EXE 的发布 tag（如 v2.6.5）；在 tag ref 上触发时留空'
         required: false
         type: string
       build_only:
-        description: 'Only build EXEs, skip release (for branch pushes)'
+        description: '仅构建不发布（勾选后不上传 Release）'
         required: false
         default: false
         type: boolean
