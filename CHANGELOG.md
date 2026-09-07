@@ -2,6 +2,16 @@
 
 本文件记录 KikoeruManager 的版本变化、功能更新与问题修复。更早的历史版本可通过 GitHub Tags 与提交历史查看。
 
+## v2.6.2
+
+- 修复：v2.6.0/v2.6.1 中「Kikoeru 数据库管理」**设置保存成功但界面永远显示默认值**（表现为"刷新后设置丢失"），且页面「一键套用文件命名」「评分修复」等按钮点击无反应。
+  - **根因**：后端 `GET /api/config` 的响应由 `ConfigResponse` 白名单手工构造，缺 `kikoeru_db` 字段——保存实际已落盘（`config.yaml` 里 enabled/db_path 均正确），但前端永远读不到，显示层回落默认值，功能开关被前端判为未启用导致页头按钮处于禁用态。
+  - **修复**：`ConfigResponse` 与响应构造补上 `kikoeru_db`，加载/保存/显示链路闭环。
+- 修复：Kikoeru 数据库页面编辑行时报「数据库写入失败: Error binding parameter N: type 'dict' is not supported」。
+  - **根因**：`t_work.memo` 等列的声明类型为 `json`（SQLite 实际以 TEXT 存 JSON 字符串），前端编辑框把字符串 parse 回 dict 后直接交给 sqlite 绑定。
+  - **修复**：前端对 JSON 列只做合法性校验并保留字符串绑定；后端 `update_row` / `insert_row` 对 dict/list 值自动 `json.dumps` 兜底，并新增回归用例。
+- 优化：Kikoeru 数据库页面页头按钮补上规范样式（描边/hover/禁用态，对齐库存打包页），功能未启用时禁用按钮悬停显示「功能未启用，请先在设置中开启并保存」提示。
+
 ## v2.6.1
 
 - 修复：v2.6.0 新增的「Kikoeru 数据库管理」设置项**无法保存**——在设置里填好数据库路径、开关后既不弹出保存提示，点保存后刷新界面配置又回落默认值，页面点「检测数据库」报 403「Kikoeru 数据库管理功能未启用」。

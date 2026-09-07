@@ -6,13 +6,13 @@
       title="Kikoeru 数据库"
       subtitle="直接管理远程 Kikoeru 的 SQLite 数据库：浏览、编辑、备份恢复与一键套用文件命名。"
     >
-      <button class="page-head-btn ghost btn-diagnose" type="button" :disabled="diagnosing" @click="runDiagnose">
+      <button class="page-head-btn ghost btn-diagnose" type="button" :disabled="diagnosing" :title="featureEnabled ? '' : '功能未启用，请先在设置中开启并保存'" @click="runDiagnose">
         <Loader2 v-if="diagnosing" :size="13" :stroke-width="2.4" class="animate-spin" />
         <Stethoscope v-else :size="13" :stroke-width="2.4" class="page-head-btn-icon" />
         <span class="page-head-btn-label">{{ diagnosing ? '检测中…' : '检测数据库' }}</span>
       </button>
 
-      <button class="page-head-btn ghost btn-backup" type="button" :disabled="backingUp" @click="doBackup">
+      <button class="page-head-btn ghost btn-backup" type="button" :disabled="backingUp" :title="featureEnabled ? '' : '功能未启用，请先在设置中开启并保存'" @click="doBackup">
         <Loader2 v-if="backingUp" :size="13" :stroke-width="2.4" class="animate-spin" />
         <Save v-else :size="13" :stroke-width="2.4" class="page-head-btn-icon" />
         <span class="page-head-btn-label">{{ backingUp ? '备份中…' : '立即备份' }}</span>
@@ -22,6 +22,7 @@
         class="page-head-btn ghost is-blue btn-rename"
         type="button"
         :disabled="!featureEnabled"
+        :title="featureEnabled ? '' : '功能未启用，请先在设置中开启并保存'"
         @click="openRenameWizard(false)"
       >
         <Wand2 :size="13" :stroke-width="2.6" class="page-head-btn-icon" />
@@ -32,6 +33,7 @@
         class="page-head-btn ghost is-blue btn-rating-fix"
         type="button"
         :disabled="!featureEnabled"
+        :title="featureEnabled ? '' : '功能未启用，请先在设置中开启并保存'"
         @click="openRatingFixWizard(false)"
       >
         <Star :size="13" :stroke-width="2.6" class="page-head-btn-icon" />
@@ -671,11 +673,14 @@ function openCreateDialog() {
 function parseMaybeJson(col, value) {
   if (value === '' || value === null || value === undefined) return null
   if (/JSON/i.test(col.type || '')) {
+    // sqlite 无原生 JSON 类型：Kikoeru 的 memo 等列就是 TEXT 存 JSON 字符串，
+    // 这里只做合法性校验后原样绑定字符串（parse 成 dict 会导致 sqlite 绑定报错）
     try {
-      return JSON.parse(value)
+      JSON.parse(value)
     } catch {
-      return value
+      throw new Error(`字段 ${col.name} 不是合法 JSON，请修正后再保存`)
     }
+    return value
   }
   return value
 }
@@ -937,6 +942,96 @@ onActivated(() => {
 </script>
 
 <style scoped>
+button:not(:disabled) { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+
+/* ==============================================================
+ * 页头按钮：page-head-btn 规范（对齐 LibraryBackup.vue / ASMRSync.vue，
+ * 该规范样式定义在各页面 scoped 内，新页面需自带一份）
+ * ============================================================ */
+.page-head-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  background: #fff;
+  color: #1e293b;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  transition:
+    transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1),
+    box-shadow 0.3s cubic-bezier(0.34, 1.56, 0.64, 1),
+    background 0.35s ease,
+    border-color 0.25s ease,
+    color 0.25s ease,
+    opacity 0.25s ease;
+  will-change: transform, opacity;
+}
+.page-head-btn :deep(.page-head-btn-icon) {
+  flex-shrink: 0;
+  transition: transform 0.45s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.3s ease;
+}
+.page-head-btn :deep(svg) { flex-shrink: 0; }
+.page-head-btn:hover {
+  transform: translateY(-2px) scale(1.02);
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.08);
+}
+.page-head-btn:active:not(:disabled) {
+  transform: scale(0.96);
+  transition: transform 0.12s ease;
+}
+.page-head-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+.page-head-btn.primary {
+  background: linear-gradient(135deg, #111827, #1e293b);
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.18);
+}
+.page-head-btn.primary:hover {
+  background: linear-gradient(135deg, #1e293b, #334155);
+  box-shadow: 0 14px 28px rgba(15, 23, 42, 0.28);
+}
+.page-head-btn.ghost { background-color: #fff; }
+.page-head-btn.ghost:hover {
+  background-color: #f8fafc;
+  border-color: rgba(15, 23, 42, 0.2);
+}
+/* === Ghost 蓝色变体（评分修复/备份） === */
+.page-head-btn.ghost.is-blue {
+  color: #1d4ed8;
+  border-color: rgba(59, 130, 246, 0.35);
+  background: linear-gradient(180deg, #eff6ff 0%, #dbeafe 100%);
+}
+.page-head-btn.ghost.is-blue:hover {
+  background: linear-gradient(180deg, #dbeafe 0%, #bfdbfe 100%);
+  border-color: rgba(37, 99, 235, 0.55);
+  color: #1e40af;
+  box-shadow: 0 10px 22px rgba(37, 99, 235, 0.16);
+}
+.page-head-btn.icon-only {
+  padding: 0;
+  width: 36px;
+  justify-content: center;
+}
+.page-head-btn-label {
+  display: inline-block;
+  text-align: center;
+  transition: opacity 0.2s ease, letter-spacing 0.3s ease;
+}
+.page-head-btn.primary .page-head-btn-label { min-width: 70px; }
+.page-head-btn.ghost .page-head-btn-label { min-width: 56px; }
+.page-head-btn:hover .page-head-btn-label { letter-spacing: 0.04em; }
+
 .kikoeru-db-page :deep(.el-table .cell) {
   font-variant-numeric: tabular-nums;
 }

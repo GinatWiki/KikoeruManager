@@ -16,6 +16,7 @@
 编码约定：方法内需要配置时显式 ``config = get_config()``。
 """
 import logging
+import json
 import os
 import re
 import shutil
@@ -405,6 +406,13 @@ class KikoeruDbService:
                 logger.debug("[KIKOERU-DB] 快照清理失败", exc_info=True)
 
     # ---- 行级写操作（含组合主键支持） ----
+    @staticmethod
+    def _normalize_bind_value(value: Any) -> Any:
+        """sqlite3 不支持 dict/list 绑定：JSON 语义的复合值序列化为字符串兜底。"""
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False)
+        return value
+
     def _pk_where(self, conn: sqlite3.Connection, table: str, row_id: Any) -> tuple:
         pk_cols = self._pk_columns(conn, table)
         if isinstance(row_id, dict):
@@ -431,9 +439,10 @@ class KikoeruDbService:
                 raise KikoeruDbError(f"未知字段: {unknown}", 400)
             where, values = self._pk_where(conn, table, row_id)
             set_sql = ", ".join([f'"{k}" = ?' for k in patch])
+            bind_values = [self._normalize_bind_value(v) for v in patch.values()]
             cur = conn.execute(
                 f'UPDATE "{table}" SET {set_sql} WHERE {where}',
-                [*patch.values(), *values],
+                [*bind_values, *values],
             )
             if cur.rowcount == 0:
                 raise KikoeruDbError("未找到目标行", 404)
@@ -455,7 +464,7 @@ class KikoeruDbService:
             marks = ", ".join(["?"] * len(payload))
             cur = conn.execute(
                 f'INSERT INTO "{table}" ({cols}) VALUES ({marks})',
-                list(payload.values()),
+                [self._normalize_bind_value(v) for v in payload.values()],
             )
             return {"table": table, "lastrowid": cur.lastrowid, "inserted": cur.rowcount}
 

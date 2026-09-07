@@ -132,6 +132,15 @@ def test_write_rollback_on_failure(env):
     assert title == "日文标题A"
 
 
+def test_update_row_dict_value_serialized(env):
+    """JSON 语义列传 dict/list → 自动序列化为字符串（sqlite 不支持 dict 绑定）"""
+    env.service.update_row("t_work", 1, {"memo": {"duration": 3600, "files": ["a.wav"]}})
+    row = env.service.query_table("t_work", search="日文标题A")["rows"][0]
+    import json as _json
+    assert isinstance(row["memo"], str)
+    assert _json.loads(row["memo"]) == {"duration": 3600, "files": ["a.wav"]}
+
+
 def test_backup_restore_roundtrip(env):
     env.service.create_backup("manual")
     env.service.update_row("t_work", 1, {"title": "改动后的标题"})

@@ -2939,6 +2939,7 @@ class ConfigResponse(BaseModel):
     processed_archive_cleanup: Optional[dict] = None
     path_mapping: Optional[dict] = None
     kikoeru_server: Optional[dict] = None
+    kikoeru_db: Optional[dict] = None
     asmr_sync: Optional[dict] = None
     http_downloader: Optional[dict] = None
     baidu_netdisk: Optional[dict] = None
@@ -3929,6 +3930,7 @@ def get_configuration():
         processed_archive_cleanup=config.processed_archive_cleanup.model_dump(),
         path_mapping=config.path_mapping.model_dump(),
         kikoeru_server=config.kikoeru_server.model_dump() if hasattr(config, 'kikoeru_server') else None,
+        kikoeru_db=config.kikoeru_db.model_dump() if hasattr(config, 'kikoeru_db') else None,
         asmr_sync=config.asmr_sync.model_dump() if hasattr(config, 'asmr_sync') else None,
         http_downloader=_mask_http_downloader_config(config),
         baidu_netdisk=_mask_baidu_netdisk_config(config),
