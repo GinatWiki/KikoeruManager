@@ -2897,7 +2897,7 @@ export const kikoeruDbApi = {
     return response.data
   },
 
-  ratingFixPreview: async ({ ids = null, limit = 200 } = {}) => {
+  ratingFixPreview: async ({ ids = null, limit = 300 } = {}) => {
     const response = await apiClient.post('/kikoeru-db/rating-fix/preview', {
       ...(ids ? { ids } : {}),
       limit
@@ -2905,11 +2905,21 @@ export const kikoeruDbApi = {
     return response.data
   },
 
-  ratingFixApply: async ({ ids = null, limit = 200 } = {}) => {
-    const response = await apiClient.post('/kikoeru-db/rating-fix/apply', {
+  ratingFixRun: async ({ ids = null, limit = 300 } = {}) => {
+    const response = await apiClient.post('/kikoeru-db/rating-fix/run', {
       ...(ids ? { ids } : {}),
       limit
     })
+    return response.data
+  },
+
+  ratingFixRunStatus: async () => {
+    const response = await apiClient.get('/kikoeru-db/rating-fix/run/status')
+    return response.data
+  },
+
+  ratingFixCancel: async () => {
+    const response = await apiClient.post('/kikoeru-db/rating-fix/run/cancel')
     return response.data
   },
 

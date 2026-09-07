@@ -15,8 +15,13 @@
 重试层次：
 1. 请求级：dlsite_service._guarded_get 每次HTTP自动重试3次（2s/4s/8s）+ 一次性客户端兜底 + 熔断器 + 限流抖动；
 2. 作品级：DLsiteNetworkError 后自动重试 2 轮（1s/2s 退避）；
-3. 手动级：前端「重试失败项」对 error 行精准重新预览并原位替换；apply 自动跳过 error 行；
-   评分修复幂等，修好的行下次不再进名单，error/none 行下次重跑自然重试。
+3. 手动级：任务结束后 error 行下次重跑自然重试（幂等，修好的行不再进名单）。
+
+**两段式交互（用户要求：确认前零网络请求）**：
+- preview（名单）：纯 SQL 筛选 0 分/满分目标，秒出，零 DLsite 请求；
+- run（执行）：用户确认名单后才启动后台任务，逐个抓取 DLsite 并**分批写库**
+  （每 40 行一个快照事务），全程实时进度（done/total、applied/none/error 计数、
+  逐行结果）与取消支持。
 
 回填字段：rate_count / rate_average_2dp / rate_count_detail / rank / review_count / dl_count / price。
 写入走 KikoeruDbService 快照写事务；不自动改 is_custom_meta
@@ -28,6 +33,7 @@ t_work.id → workno：id >= 2000000000000 为 VJ 作品（数值 = id - 偏移�
 import asyncio
 import json
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from .dlsite_service import DLsiteNetworkError, get_dlsite_service
@@ -72,6 +78,8 @@ class KikoeruRatingFixService:
 
     def __init__(self, db_service: Optional[KikoeruDbService] = None):
         self._db = db_service or KikoeruDbService()
+        self._run_state: Optional[Dict[str, Any]] = None
+        self._run_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------ workno 反解
     def _resolve_workno_candidates(self, work_id: int, dir_name: str) -> List[str]:
@@ -132,109 +140,237 @@ class KikoeruRatingFixService:
         raise DLsiteNetworkError(str(last_exc or "未知网络错误"))
 
     # ------------------------------------------------------------ 预览
-    async def preview_fix(self, ids: Optional[List[Any]] = None,
-                          limit: int = 300) -> Dict[str, Any]:
-        """逐作品生成修复计划。
+    async def _plan_one_work(self, dlsite, row: Dict[str, Any],
+                             work_id: Any, dir_name: str) -> Dict[str, Any]:
+        candidates = self._resolve_workno_candidates(work_id, dir_name)
+        item = {
+            "id": work_id,
+            "dir": dir_name,
+            "title": row["title"],
+            "target_kind": row["target_kind"],
+            "current_rate_count": row["rate_count"],
+            "current_rate_average_2dp": row["rate_average_2dp"],
+            "plan": "none",
+            "source_rjcode": "",
+            "source_lang": "",
+            "source_work_type": "",
+            "reason": "",
+            "fix": None,
+        }
 
-        plan 取值：
-        - own    本体重抓评分可信（满分已经过原版校验）；
-        - linked 本体无评分/满分存疑，套用其他版本（日文原版优先）；
-        - none   确认无人评分（网络正常前提下的全版本 0 分/无数据），不写库；
-        - error  网络失败（已自动重试穷尽），不写库，等待手动重试。
-        """
-        targets = self.find_fix_targets(ids=ids, limit=max(int(limit or 300), 1))
-        dlsite = get_dlsite_service()
-        semaphore = asyncio.Semaphore(5)
+        # ① 本体重抓（网络失败直接 error，不再试关联——网络都不通了）
+        own_rating: Optional[Dict[str, Any]] = None
+        try:
+            for workno in candidates:
+                own_rating = await self._fetch_rating_with_retry(dlsite, workno)
+                if own_rating is not None:
+                    break
+        except DLsiteNetworkError as exc:
+            item["plan"] = "error"
+            item["reason"] = f"网络失败（已自动重试）：{exc}"
+            return item
 
-        async def plan_one(row: Dict[str, Any]) -> Dict[str, Any]:
-            work_id = row["id"]
-            dir_name = row["dir"] or ""
-            async with semaphore:
-                candidates = self._resolve_workno_candidates(work_id, dir_name)
-                item = {
-                    "id": work_id,
-                    "dir": dir_name,
-                    "title": row["title"],
-                    "target_kind": row["target_kind"],
-                    "current_rate_count": row["rate_count"],
-                    "current_rate_average_2dp": row["rate_average_2dp"],
-                    "plan": "none",
-                    "source_rjcode": "",
-                    "source_lang": "",
-                    "source_work_type": "",
-                    "reason": "",
-                    "fix": None,
-                }
+        # ② 本体有有效评分（rate_count > 0；None 或 0 都视为"本体无有效评分"→走③）
+        if own_rating and (own_rating.get("rate_count") or 0) > 0:
+            own_avg = float(own_rating.get("rate_average_2dp") or 0)
+            if own_avg >= 5.0:
+                # 满分（含 0 分作品重抓得满分 / 满分复核）→ 原版校验
+                return await self._resolve_perfect_score(dlsite, item, candidates, own_rating)
+            if row["target_kind"] == "perfect":
+                item["plan"] = "own"
+                item["fix"] = own_rating
+                item["reason"] = (
+                    f"满分复核：现评分 {own_avg}（{own_rating.get('rate_count')} 评），"
+                    "原 5 分为小样本偏差"
+                )
+                return item
+            item["plan"] = "own"
+            item["fix"] = own_rating
+            return item
 
-                # ① 本体重抓（网络失败直接 error，不再试关联——网络都不通了）
-                own_rating: Optional[Dict[str, Any]] = None
+        # ③ 本体确认无数据（404/无评分字段）→ 关联版本，日文原版优先
+        linked_error = ""
+        workno = candidates[0] if candidates else ""
+        if workno:
+            try:
+                linked = await dlsite.get_linked_works(workno)
+            except Exception as exc:  # noqa: BLE001
+                linked_error = str(exc)
+                linked = {}
+            ordered = self._order_linked_candidates(linked, own_workno=workno)
+            for cand_workno, info in ordered:
                 try:
-                    for workno in candidates:
-                        own_rating = await self._fetch_rating_with_retry(dlsite, workno)
-                        if own_rating is not None:
-                            break
+                    rating = await self._fetch_rating_with_retry(dlsite, cand_workno)
                 except DLsiteNetworkError as exc:
                     item["plan"] = "error"
-                    item["reason"] = f"网络失败（已自动重试）：{exc}"
+                    item["reason"] = f"关联版本 {cand_workno} 抓取失败（已自动重试）：{exc}"
                     return item
-
-                # ② 本体有有效评分（rate_count > 0；None 或 0 都视为"本体无有效评分"→走③）
-                if own_rating and (own_rating.get("rate_count") or 0) > 0:
-                    own_avg = float(own_rating.get("rate_average_2dp") or 0)
-                    if own_avg >= 5.0:
-                        # 满分（含 0 分作品重抓得满分 / 满分复核）→ 原版校验
-                        return await self._resolve_perfect_score(dlsite, item, candidates, own_rating)
-                    if row["target_kind"] == "perfect":
-                        item["plan"] = "own"
-                        item["fix"] = own_rating
-                        item["reason"] = (
-                            f"满分复核：现评分 {own_avg}（{own_rating.get('rate_count')} 评），"
-                            "原 5 分为小样本偏差"
-                        )
-                        return item
-                    item["plan"] = "own"
-                    item["fix"] = own_rating
+                if rating and (rating.get("rate_count") or 0) > 0:
+                    item["plan"] = "linked"
+                    item["fix"] = rating
+                    item["source_rjcode"] = cand_workno
+                    item["source_lang"] = getattr(info, "lang", "") or ""
+                    item["source_work_type"] = getattr(info, "work_type", "") or ""
+                    item["reason"] = "本体无评分数据，套用关联版本评分"
                     return item
+        item["reason"] = linked_error or "本体与其他版本均确认无评分数据（网络正常）"
+        return item
 
-                # ③ 本体确认无数据（404/无评分字段）→ 关联版本，日文原版优先
-                linked_error = ""
-                workno = candidates[0] if candidates else ""
-                if workno:
-                    try:
-                        linked = await dlsite.get_linked_works(workno)
-                    except Exception as exc:  # noqa: BLE001
-                        linked_error = str(exc)
-                        linked = {}
-                    ordered = self._order_linked_candidates(linked, own_workno=workno)
-                    for cand_workno, info in ordered:
-                        try:
-                            rating = await self._fetch_rating_with_retry(dlsite, cand_workno)
-                        except DLsiteNetworkError as exc:
-                            item["plan"] = "error"
-                            item["reason"] = f"关联版本 {cand_workno} 抓取失败（已自动重试）：{exc}"
-                            return item
-                        if rating and (rating.get("rate_count") or 0) > 0:
-                            item["plan"] = "linked"
-                            item["fix"] = rating
-                            item["source_rjcode"] = cand_workno
-                            item["source_lang"] = getattr(info, "lang", "") or ""
-                            item["source_work_type"] = getattr(info, "work_type", "") or ""
-                            item["reason"] = "本体无评分数据，套用关联版本评分"
-                            return item
-                item["reason"] = linked_error or "本体与其他版本均确认无评分数据（网络正常）"
-                return item
+    async def list_fix_targets(self, ids: Optional[List[Any]] = None,
+                               limit: int = 300) -> Dict[str, Any]:
+        """第一步（轻量）：纯 SQL 名单，零 DLsite 请求，秒出。
 
-        items = await asyncio.gather(*(plan_one(row) for row in targets))
-        changed_items = [i for i in items if self._fix_differs(i)]
-        counts = {
-            "total": len(items),
-            "fixable": len(changed_items),
-            "own": sum(1 for i in items if i["plan"] == "own"),
-            "linked": sum(1 for i in items if i["plan"] == "linked"),
-            "none": sum(1 for i in items if i["plan"] == "none"),
-            "error": sum(1 for i in items if i["plan"] == "error"),
+        返回 0 分/满分目标清单（含当前评分），供用户确认后再启动处理任务。
+        """
+        targets = self.find_fix_targets(ids=ids, limit=max(int(limit or 300), 1))
+        zero = sum(1 for t in targets if t["target_kind"] == "zero")
+        perfect = sum(1 for t in targets if t["target_kind"] == "perfect")
+        return {"total": len(targets), "zero": zero, "perfect": perfect, "targets": targets}
+
+    # ------------------------------------------------------------ 执行（后台任务，确认后才抓取）
+    def get_run_status(self) -> Dict[str, Any]:
+        if not self._run_state:
+            return {"running": False, "phase": "idle", "total": 0, "done": 0,
+                    "applied": 0, "none": 0, "error": 0, "results": []}
+        return dict(self._run_state)
+
+    def request_cancel(self) -> bool:
+        if self._run_state and self._run_state.get("running"):
+            self._run_state["cancel"] = True
+            logger.info("[KIKOERU-DB] 评分修复任务收到取消请求")
+            return True
+        return False
+
+    async def start_run(self, ids: Optional[List[Any]] = None,
+                        limit: int = 300) -> Dict[str, Any]:
+        """启动后台修复任务（用户确认名单后调用）。同一时刻只允许一个任务。"""
+        if self._run_state and self._run_state.get("running"):
+            return {"started": False, "reason": "已有评分修复任务在运行"}
+        state: Dict[str, Any] = {
+            "running": True, "cancel": False, "phase": "fetching",
+            "total": 0, "done": 0, "applied": 0, "none": 0, "error": 0,
+            "results": [],
+            "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "finished_at": "",
         }
-        return {**counts, "items": items}
+        self._run_state = state
+        self._run_task = asyncio.create_task(self._run_fix_impl(state, ids, limit))
+        logger.info("[KIKOERU-DB] 评分修复任务已启动 limit=%s", limit)
+        return {"started": True, "total_hint": limit}
+
+    async def _run_fix_impl(self, state: Dict[str, Any],
+                            ids: Optional[List[Any]], limit: int) -> None:
+        """逐作品：本地模板/候选解析 → 抓 DLsite → 分批（40 行/事务）写库。"""
+        BATCH_SIZE = 40
+        batch: List[Dict[str, Any]] = []
+        try:
+            targets = await asyncio.to_thread(
+                self.find_fix_targets, ids, max(int(limit or 300), 1)
+            )
+            state["total"] = len(targets)
+            if not targets:
+                state["phase"] = "done"
+                state["running"] = False
+                state["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                return
+
+            dlsite = get_dlsite_service()
+            semaphore = asyncio.Semaphore(3)  # 执行阶段温和限流
+
+            async def process_one(row: Dict[str, Any]) -> None:
+                if state["cancel"]:
+                    return
+                async with semaphore:
+                    item = await self._plan_one_work(dlsite, row, row["id"], row["dir"] or "")
+                state["done"] += 1
+                plan = item["plan"]
+                result_row = {
+                    "id": item["id"], "dir": item["dir"], "title": item["title"],
+                    "target_kind": item["target_kind"],
+                    "current_rate_average_2dp": item["current_rate_average_2dp"],
+                    "plan": plan,
+                    "source_rjcode": item["source_rjcode"],
+                    "source_lang": item["source_lang"],
+                    "source_work_type": item["source_work_type"],
+                    "reason": item["reason"],
+                    "new_rate_average_2dp": (item["fix"] or {}).get("rate_average_2dp"),
+                    "new_rate_count": (item["fix"] or {}).get("rate_count"),
+                    "applied": False,
+                }
+                if plan == "error":
+                    state["error"] += 1
+                    state["results"].append(result_row)
+                    return
+                if plan == "none" or not self._fix_differs(item):
+                    state["none"] += 1
+                    state["results"].append(result_row)
+                    return
+                state["results"].append(result_row)
+                batch.append(item)
+                if len(batch) >= BATCH_SIZE:
+                    await self._flush_batch(state, batch)
+
+            for row in targets:
+                await process_one(row)
+                if state["cancel"]:
+                    break
+
+            await self._flush_batch(state, batch)
+            state["phase"] = "done"
+            logger.info(
+                "[KIKOERU-DB] 评分修复任务完成: done=%s applied=%s none=%s error=%s cancel=%s",
+                state["done"], state["applied"], state["none"], state["error"], state["cancel"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[KIKOERU-DB] 评分修复任务异常: %s", exc, exc_info=True)
+            state["phase"] = "failed"
+            state["error_detail"] = str(exc)
+        finally:
+            state["running"] = False
+            state["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    async def _flush_batch(self, state: Dict[str, Any], batch: List[Dict[str, Any]]) -> None:
+        """把一批待回填行写入数据库（单事务 + 写前快照）。"""
+        if not batch:
+            return
+        state["phase"] = "writing"
+
+        def _do(conn) -> int:
+            applied = 0
+            for item in batch:
+                fix = item["fix"]
+                conn.execute(
+                    'UPDATE "t_work" SET "rate_count" = ?, "rate_average_2dp" = ?, '
+                    '"rate_count_detail" = ?, "rank" = ?, "review_count" = ?, '
+                    '"dl_count" = ?, "price" = ? WHERE "id" = ?',
+                    (
+                        fix.get("rate_count") or 0,
+                        fix.get("rate_average_2dp") or 0,
+                        _json_text(fix.get("rate_count_detail")),
+                        _json_text(fix.get("rank")),
+                        fix.get("review_count") or 0,
+                        fix.get("dl_count") or 0,
+                        fix.get("price"),
+                        item["id"],
+                    ),
+                )
+                applied += 1
+            return applied
+
+        try:
+            applied = 0
+            applied = await asyncio.to_thread(self._db._write_with_snapshot, _do)
+            state["applied"] += applied
+            logger.info("[KIKOERU-DB] 评分修复批次写入完成: %s 行", applied)
+        finally:
+            # 无论成功与否，本批结果都已计入统计；写入失败时快照兜底可恢复
+            for item in batch:
+                for row in state["results"]:
+                    if row["id"] == item["id"]:
+                        row["applied"] = applied > 0
+                        break
+            batch.clear()
+        state["phase"] = "fetching"
 
     @staticmethod
     def _fix_differs(item: Dict[str, Any]) -> bool:
@@ -313,56 +449,6 @@ class KikoeruRatingFixService:
         item["fix"] = own_rating
         item["reason"] = "满分 5 未验证（日文原版不可达或无评分）"
         return item
-
-    # ------------------------------------------------------------ 执行
-    async def apply_fix(self, ids: Optional[List[Any]] = None,
-                        limit: int = 300) -> Dict[str, Any]:
-        """按预览计划回填评分字段（单事务 + 写前快照）。
-
-        只写 fix 与当前值有差异的行；error/none/满分确认有效（值相同）行自动跳过。
-        """
-        preview = await self.preview_fix(ids=ids, limit=limit)
-        targets = [i for i in preview["items"] if self._fix_differs(i)]
-
-        if not targets:
-            return {"applied": 0, "total": preview["total"],
-                    "skipped": preview["none"] + preview["error"],
-                    "error": preview["error"], "failed": 0}
-
-        def _do(conn) -> Dict[str, Any]:
-            applied = 0
-            for item in targets:
-                fix = item["fix"]
-                conn.execute(
-                    'UPDATE "t_work" SET "rate_count" = ?, "rate_average_2dp" = ?, '
-                    '"rate_count_detail" = ?, "rank" = ?, "review_count" = ?, '
-                    '"dl_count" = ?, "price" = ? WHERE "id" = ?',
-                    (
-                        fix.get("rate_count") or 0,
-                        fix.get("rate_average_2dp") or 0,
-                        _json_text(fix.get("rate_count_detail")),
-                        _json_text(fix.get("rank")),
-                        fix.get("review_count") or 0,
-                        fix.get("dl_count") or 0,
-                        fix.get("price"),
-                        item["id"],
-                    ),
-                )
-                applied += 1
-            return {"applied": applied, "total": preview["total"],
-                    "skipped": preview["none"] + preview["error"],
-                    "error": preview["error"], "failed": 0}
-
-        result = await asyncio.to_thread(self._db._write_with_snapshot, _do)
-        logger.info(
-            "[KIKOERU-DB] 评分修复完成: applied=%s own=%s linked=%s none=%s error=%s",
-            result["applied"], preview["own"], preview["linked"], preview["none"], preview["error"],
-        )
-        return result
-
-
-_service: Optional[KikoeruRatingFixService] = None
-
 
 def get_kikoeru_rating_fix_service() -> KikoeruRatingFixService:
     global _service

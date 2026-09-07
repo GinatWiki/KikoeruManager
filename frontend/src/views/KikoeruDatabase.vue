@@ -312,82 +312,113 @@
       </template>
     </el-dialog>
 
-    <!-- 评分修复向导 -->
-    <el-dialog v-model="ratingFixVisible" title="评分修复" width="1000px" destroy-on-close>
+    <!-- 评分修复向导（两段式：名单确认 → 后台处理） -->
+    <el-dialog v-model="ratingFixVisible" title="评分修复" width="1000px" destroy-on-close @closed="stopRunPolling">
       <el-alert type="info" :closable="false" class="mb-3" show-icon
-                title="对评分为 0 的作品用本项目 DLsite 元数据重抓一次；仍为 0 时自动抓取其他版本评分（优先日文原版，其次其他翻译版）。回填字段：评分、评分人数、评分分布、销量、评价数、价格。" />
-      <div v-if="ratingFixPreview" class="mb-3 text-sm text-slate-600">
-        共 <b>{{ ratingFixPreview.total }}</b> 行（0 分 + 满分复核）：可修复
-        <b class="text-emerald-600">{{ ratingFixPreview.fixable }}</b>
-        （本体重抓 {{ ratingFixPreview.own }}，其他版本 {{ ratingFixPreview.linked }}），
-        确实无评分 <b class="text-slate-500">{{ ratingFixPreview.none }}</b>，
-        <template v-if="ratingFixPreview.error > 0">
-          <b class="text-red-500">网络失败 {{ ratingFixPreview.error }}</b>（可点下方「重试失败项」）
-        </template>
-      </div>
-      <el-table v-if="ratingFixPreview" :data="ratingFixPreview.items" size="small" border max-height="420">
-        <el-table-column prop="id" label="RJ/VJ" width="110" />
-        <el-table-column label="目标" width="90">
-          <template #default="{ row }">
-            <el-tag :type="row.target_kind === 'perfect' ? 'warning' : 'info'" size="small" effect="plain">
-              {{ row.target_kind === 'perfect' ? '满分复核' : '0 分' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="title" label="标题" min-width="180" show-overflow-tooltip />
-        <el-table-column label="当前" width="90">
-          <template #default="{ row }">{{ row.current_rate_average_2dp ?? 'NULL' }}</template>
-        </el-table-column>
-        <el-table-column label="修复来源" width="200">
-          <template #default="{ row }">
-            <template v-if="row.plan === 'own'">
-              <el-tag type="success" size="small" effect="plain">本体重抓</el-tag>
+                title="第一步只列出待处理名单（不访问网络）。你确认后点「开始处理」，才逐个查询 DLsite（本体重抓 → 满分用日文原版校验 → 无评分时套用关联版本评分，优先日文原版），每 40 行一批写入并全程显示进度，可随时取消。" />
+
+      <!-- 第一段：待处理名单（零网络请求） -->
+      <template v-if="!ratingFixRunStarted">
+        <div v-if="ratingFixPreview" class="mb-3 text-sm text-slate-600">
+          共 <b>{{ ratingFixPreview.total }}</b> 行待处理：
+          0 分 <b class="text-amber-600">{{ ratingFixPreview.zero }}</b>，
+          满分复核 <b class="text-amber-600">{{ ratingFixPreview.perfect }}</b>
+        </div>
+        <el-empty
+          v-if="ratingFixPreview && ratingFixPreview.total === 0"
+          description="未找到评分为 0 或满分 5 分的作品——已修复过的作品不会再出现（幂等）。"
+        />
+        <el-table v-else-if="ratingFixPreview" :data="ratingFixPreview.targets" size="small" border max-height="420">
+          <el-table-column prop="id" label="RJ/VJ" width="120" />
+          <el-table-column label="目标" width="100">
+            <template #default="{ row }">
+              <el-tag :type="row.target_kind === 'perfect' ? 'warning' : 'info'" size="small" effect="plain">
+                {{ row.target_kind === 'perfect' ? '满分复核' : '0 分' }}
+              </el-tag>
             </template>
-            <template v-else-if="row.plan === 'linked'">
-              <el-tag type="primary" size="small" effect="plain">{{ row.source_lang || '其他版本' }}</el-tag>
-              <span class="ml-1 text-xs">{{ row.source_rjcode }}</span>
-              <span v-if="row.source_work_type === 'original'" class="ml-1 text-xs text-slate-400">(原版)</span>
+          </el-table-column>
+          <el-table-column prop="title" label="标题" min-width="220" show-overflow-tooltip />
+          <el-table-column prop="dir" label="文件夹名" min-width="220" show-overflow-tooltip />
+          <el-table-column label="当前评分" width="100">
+            <template #default="{ row }">{{ row.rate_average_2dp ?? 'NULL' }}</template>
+          </el-table-column>
+        </el-table>
+        <div class="mt-3">
+          <el-input-number v-model="ratingFixLimit" :min="10" :max="2000" :step="50" size="small" />
+          <span class="ml-2 text-xs text-slate-500">单次处理上限（0 分/满分作品较多时按 id 顺序分批）</span>
+        </div>
+      </template>
+
+      <!-- 第二段：处理进度与结果 -->
+      <template v-else>
+        <div class="mb-3">
+          <el-progress
+            :percentage="ratingFixRunPercent"
+            :status="runPhase === 'failed' ? 'exception' : (runPhase === 'done' ? 'success' : undefined)"
+          />
+          <div class="mt-2 text-sm text-slate-600">
+            阶段：<b>{{ runPhaseLabel }}</b>
+            已处理 <b>{{ ratingFixRunStatus.done }}</b> / {{ ratingFixRunStatus.total }}：
+            套用 <b class="text-emerald-600">{{ ratingFixRunStatus.applied }}</b>，
+            无评分 <b class="text-slate-500">{{ ratingFixRunStatus.none }}</b>，
+            <template v-if="ratingFixRunStatus.error > 0">
+              <b class="text-red-500">网络失败 {{ ratingFixRunStatus.error }}</b>（下次重跑自动重试），
             </template>
-            <template v-else-if="row.plan === 'error'">
-              <el-tag type="danger" size="small" effect="plain">网络失败</el-tag>
+            <span v-if="ratingFixRunStatus.finished_at" class="ml-1 text-xs text-slate-400">完成于 {{ ratingFixRunStatus.finished_at }}</span>
+          </div>
+        </div>
+        <el-table v-if="ratingFixRunStatus.results.length" :data="ratingFixRunStatus.results" size="small" border max-height="380">
+          <el-table-column prop="id" label="RJ/VJ" width="110" />
+          <el-table-column prop="title" label="标题" min-width="180" show-overflow-tooltip />
+          <el-table-column label="当前" width="80">
+            <template #default="{ row }">{{ row.current_rate_average_2dp ?? 'NULL' }}</template>
+          </el-table-column>
+          <el-table-column label="来源" width="190">
+            <template #default="{ row }">
+              <template v-if="row.plan === 'own'">
+                <el-tag type="success" size="small" effect="plain">本体重抓</el-tag>
+              </template>
+              <template v-else-if="row.plan === 'linked'">
+                <el-tag type="primary" size="small" effect="plain">{{ row.source_lang || '其他版本' }}</el-tag>
+                <span class="ml-1 text-xs">{{ row.source_rjcode }}</span>
+              </template>
+              <template v-else-if="row.plan === 'error'">
+                <el-tag type="danger" size="small" effect="plain">网络失败</el-tag>
+              </template>
+              <span v-else class="text-xs text-slate-400">-</span>
             </template>
-            <span v-else class="text-xs text-slate-400">-</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="新评分" width="130">
-          <template #default="{ row }">
-            <span v-if="row.fix" class="text-emerald-600 font-medium">
-              {{ row.fix.rate_average_2dp }}（{{ row.fix.rate_count }} 评）
-            </span>
-            <span v-else-if="row.plan === 'error'" class="text-red-400 text-xs">待重试</span>
-            <span v-else class="text-slate-400 text-xs">不可修复</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="reason" label="说明" min-width="170" show-overflow-tooltip />
-      </el-table>
-      <div class="mt-3">
-        <el-input-number v-model="ratingFixLimit" :min="10" :max="2000" :step="50" size="small" />
-        <span class="ml-2 text-xs text-slate-500">单次处理上限（0 分作品较多时按 id 顺序分批）</span>
-      </div>
+          </el-table-column>
+          <el-table-column label="新评分" width="120">
+            <template #default="{ row }">
+              <span v-if="row.applied" class="text-emerald-600 font-medium">
+                {{ row.new_rate_average_2dp }}（{{ row.new_rate_count }} 评）
+              </span>
+              <span v-else-if="row.plan === 'error'" class="text-red-400 text-xs">未写入</span>
+              <span v-else class="text-slate-400 text-xs">跳过</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="reason" label="说明" min-width="160" show-overflow-tooltip />
+        </el-table>
+      </template>
+
       <template #footer>
-        <el-button @click="ratingFixVisible = false">取消</el-button>
-        <el-button :loading="ratingFixPreviewing" @click="loadRatingFixPreview">刷新预览</el-button>
-        <el-button
-          v-if="ratingFixErrorIds.length > 0"
-          type="warning" plain
-          :loading="ratingFixRetrying"
-          @click="retryRatingFixErrors"
-        >
-          重试失败项（{{ ratingFixErrorIds.length }}）
-        </el-button>
-        <el-button
-          type="primary"
-          :disabled="!ratingFixPreview || ratingFixPreview.fixable === 0"
-          :loading="ratingFixApplying"
-          @click="doApplyRatingFix"
-        >
-          执行（{{ ratingFixPreview?.fixable || 0 }} 行）
-        </el-button>
+        <template v-if="!ratingFixRunStarted">
+          <el-button @click="ratingFixVisible = false">取消</el-button>
+          <el-button :loading="ratingFixPreviewing" @click="loadRatingFixPreview">刷新名单</el-button>
+          <el-button
+            type="primary"
+            :disabled="!ratingFixPreview || ratingFixPreview.total === 0"
+            @click="startRatingFixRun"
+          >
+            开始处理（{{ ratingFixPreview?.total || 0 }} 行）
+          </el-button>
+        </template>
+        <template v-else>
+          <el-button v-if="runPhase === 'running'" type="danger" plain @click="cancelRatingFixRun">取消任务</el-button>
+          <el-button type="primary" @click="ratingFixVisible = false">
+            {{ runPhase === 'running' ? '后台运行，关闭窗口' : '关闭' }}
+          </el-button>
+        </template>
       </template>
     </el-dialog>
 
@@ -408,7 +439,7 @@
 </template>
 
 <script setup>
-import { computed, onActivated, onMounted, ref, watch } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   CheckCircle2,
@@ -463,54 +494,141 @@ const renameApplying = ref(false)
 const renameScopedToSelection = ref(false)
 const previewLimit = 300
 
-// ---- 评分修复 ----
+// ---- 评分修复（两段式：名单零请求，确认后后台处理） ----
 const ratingFixVisible = ref(false)
 const ratingFixPreview = ref(null)
 const ratingFixPreviewing = ref(false)
-const ratingFixApplying = ref(false)
-const ratingFixRetrying = ref(false)
 const ratingFixScopedToSelection = ref(false)
 const ratingFixLimit = ref(300)
+const ratingFixRunStarted = ref(false)
+const ratingFixRunStatus = ref({ running: false, phase: 'idle', total: 0, done: 0, applied: 0, none: 0, error: 0, results: [] })
+const ratingFixPollTimer = ref(null)
 
-const ratingFixErrorIds = computed(() =>
-  (ratingFixPreview.value?.items || []).filter(i => i.plan === 'error').map(i => i.id)
-)
+const runPhase = computed(() => {
+  const s = ratingFixRunStatus.value
+  if (!ratingFixRunStarted.value) return 'idle'
+  if (s.phase === 'failed') return 'failed'
+  if (s.running) return 'running'
+  return 'done'
+})
+const runPhaseLabel = computed(() => ({
+  idle: '',
+  running: ratingFixRunStatus.value.phase === 'writing' ? '写入数据库中' : '抓取 DLsite 元数据中',
+  done: '已完成',
+  failed: '任务异常'
+}[runPhase.value] || ''))
+const ratingFixRunPercent = computed(() => {
+  const s = ratingFixRunStatus.value
+  if (!s.total) return 0
+  return Math.min(100, Math.round((s.done / s.total) * 100))
+})
 
-function mergeRatingFixItems(newItems) {
-  // 原位替换重试成功的行（重试结果可能是 error→own/linked/none 的任意转换）
-  const byId = new Map((ratingFixPreview.value?.items || []).map(i => [i.id, i]))
-  for (const item of newItems || []) byId.set(item.id, item)
-  const items = [...byId.values()]
-  ratingFixPreview.value = {
-    total: items.length,
-    fixable: items.filter(i => i.plan !== 'none' && i.plan !== 'error' && i.fix).length,
-    own: items.filter(i => i.plan === 'own').length,
-    linked: items.filter(i => i.plan === 'linked').length,
-    none: items.filter(i => i.plan === 'none').length,
-    error: items.filter(i => i.plan === 'error').length,
-    items
+async function openRatingFixWizard(scoped) {
+  ratingFixScopedToSelection.value = scoped
+  ratingFixRunStarted.value = false
+  // 若后台任务仍在跑，直接进入进度视图
+  try {
+    const status = await kikoeruDbApi.ratingFixRunStatus()
+    if (status.running) {
+      ratingFixRunStarted.value = true
+      ratingFixRunStatus.value = status
+      ratingFixVisible.value = true
+      startRunPolling()
+      return
+    }
+  } catch { /* 忽略，走名单流程 */ }
+  ratingFixVisible.value = true
+  await loadRatingFixPreview()
+}
+
+async function loadRatingFixPreview() {
+  ratingFixPreviewing.value = true
+  try {
+    let ids = null
+    if (ratingFixScopedToSelection.value) {
+      ids = selectedRows.value.map(r => r.id).filter(v => v !== undefined)
+      if (!ids.length) {
+        ElMessage.warning('当前选择不支持按行处理（无 id 列），改为全库 0 分/满分名单')
+        ratingFixScopedToSelection.value = false
+      }
+    }
+    ratingFixPreview.value = await kikoeruDbApi.ratingFixPreview({
+      ids: ratingFixScopedToSelection.value ? ids : null,
+      limit: ratingFixLimit.value
+    })
+  } catch (error) {
+    ElMessage.error(apiErrorDetail(error, '获取待处理名单失败'))
+  } finally {
+    ratingFixPreviewing.value = false
   }
 }
 
-async function retryRatingFixErrors() {
-  if (ratingFixErrorIds.value.length === 0) return
-  ratingFixRetrying.value = true
+async function startRatingFixRun() {
+  const total = ratingFixPreview.value?.total || 0
   try {
-    const result = await kikoeruDbApi.ratingFixPreview({
-      ids: ratingFixErrorIds.value,
-      limit: ratingFixErrorIds.value.length
-    })
-    mergeRatingFixItems(result.items || [])
-    const remaining = (result.items || []).filter(i => i.plan === 'error').length
-    if (remaining === 0) {
-      ElMessage.success('全部失败项已重试成功')
-    } else {
-      ElMessage.warning(`重试完成，仍有 ${remaining} 行网络失败，可再次重试`)
+    await ElMessageBox.confirm(
+      `确定开始处理 ${total} 行？处理阶段才会访问 DLsite，每 40 行一批写入（自动生成回滚快照），可随时取消。`,
+      '开始处理',
+      { type: 'warning', confirmButtonText: '开始处理', cancelButtonText: '再想想' }
+    )
+  } catch {
+    return
+  }
+  try {
+    let ids = null
+    if (ratingFixScopedToSelection.value) {
+      ids = selectedRows.value.map(r => r.id).filter(v => v !== undefined)
     }
+    const res = await kikoeruDbApi.ratingFixRun({ ids, limit: ratingFixLimit.value })
+    if (!res.started) {
+      ElMessage.warning(res.reason || '任务未能启动')
+      return
+    }
+    ratingFixRunStarted.value = true
+    ratingFixRunStatus.value = {
+      running: true, phase: 'fetching', total,
+      done: 0, applied: 0, none: 0, error: 0, results: []
+    }
+    startRunPolling()
   } catch (error) {
-    ElMessage.error(apiErrorDetail(error, '重试失败'))
-  } finally {
-    ratingFixRetrying.value = false
+    ElMessage.error(apiErrorDetail(error, '任务启动失败'))
+  }
+}
+
+function startRunPolling() {
+  stopRunPolling()
+  ratingFixPollTimer.value = setInterval(pollRunStatus, 1500)
+}
+
+function stopRunPolling() {
+  if (ratingFixPollTimer.value) {
+    clearInterval(ratingFixPollTimer.value)
+    ratingFixPollTimer.value = null
+  }
+}
+
+async function pollRunStatus() {
+  try {
+    const s = await kikoeruDbApi.ratingFixRunStatus()
+    ratingFixRunStatus.value = s
+    if (!s.running) {
+      stopRunPolling()
+      if (s.phase === 'failed') {
+        ElMessage.error(`评分修复任务异常：${s.error_detail || '未知错误'}`)
+      } else {
+        ElMessage.success(`评分修复结束：套用 ${s.applied} 行，无评分 ${s.none} 行，失败 ${s.error} 行`)
+      }
+      await Promise.all([loadRows(), loadBackups()])
+    }
+  } catch { /* 轮询失败静默，下轮再试 */ }
+}
+
+async function cancelRatingFixRun() {
+  try {
+    await kikoeruDbApi.ratingFixCancel()
+    ElMessage.info('已发送取消请求，正在等待当前作品处理完成')
+  } catch (error) {
+    ElMessage.error(apiErrorDetail(error, '取消失败'))
   }
 }
 
@@ -856,63 +974,6 @@ async function doApplyRename() {
   }
 }
 
-// ---- 评分修复 ----
-async function openRatingFixWizard(scoped) {
-  ratingFixScopedToSelection.value = scoped
-  ratingFixVisible.value = true
-  await loadRatingFixPreview()
-}
-
-async function loadRatingFixPreview() {
-  ratingFixPreviewing.value = true
-  try {
-    let ids = null
-    if (ratingFixScopedToSelection.value) {
-      ids = selectedRows.value.map(r => r.id).filter(v => v !== undefined)
-      if (!ids.length) {
-        ElMessage.warning('当前选择不支持按行处理（无 id 列），改为全库 0 分作品')
-        ratingFixScopedToSelection.value = false
-      }
-    }
-    ratingFixPreview.value = await kikoeruDbApi.ratingFixPreview({
-      ids: ratingFixScopedToSelection.value ? ids : null,
-      limit: ratingFixLimit.value
-    })
-  } catch (error) {
-    ElMessage.error(apiErrorDetail(error, '生成评分修复预览失败'))
-  } finally {
-    ratingFixPreviewing.value = false
-  }
-}
-
-async function doApplyRatingFix() {
-  try {
-    await ElMessageBox.confirm(
-      `确定回填 ${ratingFixPreview.value.fixable} 行评分？执行前会自动生成回滚快照。`,
-      '执行确认',
-      { type: 'warning', confirmButtonText: '执行', cancelButtonText: '取消' }
-    )
-  } catch {
-    return
-  }
-  ratingFixApplying.value = true
-  try {
-    const result = await kikoeruDbApi.ratingFixApply({
-      ids: ratingFixScopedToSelection.value && selectedRows.value.length
-        ? selectedRows.value.map(r => r.id).filter(v => v !== undefined)
-        : null,
-      limit: ratingFixLimit.value
-    })
-    ElMessage.success(`已回填 ${result.applied} 行评分（无评分 ${result.skipped} 行保持不变）`)
-    ratingFixVisible.value = false
-    await Promise.all([loadRows(), loadBackups()])
-  } catch (error) {
-    ElMessage.error(apiErrorDetail(error, '评分修复执行失败'))
-  } finally {
-    ratingFixApplying.value = false
-  }
-}
-
 // ---- 检测 ----
 async function runDiagnose() {
   diagnosing.value = true
@@ -939,6 +1000,8 @@ onActivated(() => {
   loadConfig()
   loadScanStatus()
 })
+onBeforeUnmount(stopRunPolling)
+onBeforeUnmount(stopRunPolling)
 </script>
 
 <style scoped>

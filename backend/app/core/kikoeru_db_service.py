@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from ..config.settings import get_config
-from .kikoeru_folder_parser import parse_work_name_from_dir
+from .kikoeru_folder_parser import parse_work_name_by_template
 
 logger = logging.getLogger(__name__)
 
@@ -483,6 +483,15 @@ class KikoeruDbService:
         return self._write_with_snapshot(_do)
 
     # ------------------------------------------------------------------ 功能2：套用文件命名
+    def _parse_dir_for_rename(self, dir_name: str) -> Dict[str, Any]:
+        """按用户当前重命名模板反解文件夹名（唯一可信路径）。
+
+        文件夹名不符合模板结构时直接 skipped——绝不靠启发式猜标题，
+        避免把「RJ号 [社团]【副标题】正标题」里的社团名当成标题。
+        """
+        config = get_config()
+        return parse_work_name_by_template(dir_name, config.rename.template)
+
     def preview_rename(self, ids: Optional[List[Any]] = None) -> Dict[str, Any]:
         conn = self._connect(readonly=True)
         try:
@@ -498,7 +507,7 @@ class KikoeruDbService:
 
         items = []
         for r in rows:
-            parsed = parse_work_name_from_dir(r["dir"])
+            parsed = self._parse_dir_for_rename(r["dir"])
             changed = bool(parsed["matched"] and parsed["work_name"] and parsed["work_name"] != r["title"])
             items.append({
                 "id": r["id"],
@@ -534,7 +543,7 @@ class KikoeruDbService:
         return result
 
     def apply_rename_single(self, work_id: Any) -> bool:
-        """单条套用（功能3 复用）：仅在能解析出 work_name 时更新。"""
+        """单条套用（功能3 复用）：仅在模板反解出 work_name 时更新。"""
         conn = self._connect(readonly=True)
         try:
             row = conn.execute('SELECT id, dir, title FROM "t_work" WHERE id = ?', (work_id,)).fetchone()
@@ -542,7 +551,7 @@ class KikoeruDbService:
             conn.close()
         if not row:
             return False
-        parsed = parse_work_name_from_dir(row["dir"])
+        parsed = self._parse_dir_for_rename(row["dir"])
         if not (parsed["matched"] and parsed["work_name"]) or parsed["work_name"] == row["title"]:
             return False
         self.update_row("t_work", work_id, {"title": parsed["work_name"], "is_custom_meta": 1})

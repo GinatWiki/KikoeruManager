@@ -257,43 +257,58 @@ async def rename_apply(body: Dict[str, Any] = Body(default={})):
         raise HTTPException(status_code=exc.status, detail=str(exc))
 
 
-# ---------------------------------------------------------------- 评分修复（v2.6）
+# ---------------------------------------------------------------- 评分修复（v2.6，两段式：名单零请求 / 执行才抓取）
 @router.post("/rating-fix/preview")
 async def rating_fix_preview(body: Dict[str, Any] = Body(default={})):
-    """对评分为 0 的作品生成修复计划：本体重抓 → 其他版本（日文原版优先）。"""
+    """第一步（轻量）：纯 SQL 筛选 0 分/满分名单，零 DLsite 请求，秒出。"""
     _require_enabled()
     ids = (body or {}).get("ids")
-    limit = int((body or {}).get("limit") or 200)
+    limit = int((body or {}).get("limit") or 300)
     if ids is not None and not isinstance(ids, list):
-        raise HTTPException(status_code=400, detail="ids 需为数组或省略（省略=全库 0 分作品）")
+        raise HTTPException(status_code=400, detail="ids 需为数组或省略（省略=全库 0 分+满分作品）")
     from ..core.kikoeru_rating_fix_service import get_kikoeru_rating_fix_service
 
     service = get_kikoeru_rating_fix_service()
     try:
-        return await service.preview_fix(ids=ids, limit=limit)
+        return await service.list_fix_targets(ids=ids, limit=limit)
     except KikoeruDbError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"评分修复预览失败: {exc}")
+        raise HTTPException(status_code=500, detail=f"评分修复名单获取失败: {exc}")
 
 
-@router.post("/rating-fix/apply")
-async def rating_fix_apply(body: Dict[str, Any] = Body(default={})):
-    """按修复计划回填评分字段（单事务 + 写前快照）。"""
+@router.post("/rating-fix/run")
+async def rating_fix_run(body: Dict[str, Any] = Body(default={})):
+    """第二步（用户确认后）：启动后台任务，逐个抓取 DLsite 并分批写库，带实时进度。"""
     _require_enabled()
     ids = (body or {}).get("ids")
-    limit = int((body or {}).get("limit") or 200)
+    limit = int((body or {}).get("limit") or 300)
     if ids is not None and not isinstance(ids, list):
         raise HTTPException(status_code=400, detail="ids 需为数组或省略")
     from ..core.kikoeru_rating_fix_service import get_kikoeru_rating_fix_service
 
     service = get_kikoeru_rating_fix_service()
     try:
-        return await service.apply_fix(ids=ids, limit=limit)
-    except KikoeruDbError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc))
+        return await service.start_run(ids=ids, limit=limit)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"评分修复执行失败: {exc}")
+        raise HTTPException(status_code=500, detail=f"评分修复任务启动失败: {exc}")
+
+
+@router.get("/rating-fix/run/status")
+async def rating_fix_status():
+    """后台修复任务实时进度：done/total、applied/none/error 计数与逐行结果。"""
+    _require_enabled()
+    from ..core.kikoeru_rating_fix_service import get_kikoeru_rating_fix_service
+
+    return get_kikoeru_rating_fix_service().get_run_status()
+
+
+@router.post("/rating-fix/run/cancel")
+async def rating_fix_cancel():
+    _require_enabled()
+    from ..core.kikoeru_rating_fix_service import get_kikoeru_rating_fix_service
+
+    return {"cancelled": get_kikoeru_rating_fix_service().request_cancel()}
 
 
 @router.post("/diagnose")

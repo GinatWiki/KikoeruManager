@@ -29,6 +29,109 @@ _LEADING_SEP_RE = re.compile(r"^[\s_\-–—·•.、]+")
 # 括号配对（全角/半角）
 _BRACKET_CLOSER = {"【": "】", "[": "]", "（": "）", "(": ")"}
 
+# 重命名模板变量 → 正则片段（work_name 位置特殊：末尾贪婪/中间非贪婪，单独处理）
+_TEMPLATE_VAR_PATTERNS = {
+    "rjcode": r"[RVB]J\d{6,8}",
+    "maker_id": r".+?",
+    "maker_name": r".+?",
+    "original_maker_name": r".+?",
+    "translator_name": r".+?",
+    "release_date": r".+?",
+    "cvs": r".+?",
+    "tags": r".+?",
+}
+
+_TEMPLATE_VAR_TOKEN_RE = re.compile(r"\{([a-z_]+)\}")
+
+
+def _date_format_to_regex(date_format: str) -> str:
+    """把 date_format（如 %y%m%d）翻译成正则片段，未知占位用非贪婪兜底。"""
+    mapping = {"%y": r"\d{2}", "%Y": r"\d{4}", "%m": r"\d{2}", "%d": r"\d{2}",
+               "%H": r"\d{2}", "%M": r"\d{2}", "%S": r"\d{2}"}
+    out, i = [], 0
+    while i < len(date_format):
+        two = date_format[i:i + 2]
+        if two in mapping:
+            out.append(mapping[two])
+            i += 2
+        else:
+            out.append(re.escape(date_format[i]))
+            i += 1
+    return "".join(out)
+
+
+def build_template_regex(template: str):
+    """把重命名模板编译成「结构匹配正则 + work_name 捕获组号」。
+
+    模板里每个 {var} 变成一个捕获组：字面量部分 re.escape；rjcode 用精确
+    编号模式；release_date 按 date_format 翻译；其余变量非贪婪；
+    work_name 若是模板最后一个变量则贪婪到行尾，否则非贪婪。
+
+    Returns:
+        (compiled_regex, work_name_group_index) 或 (None, 原因)。
+        模板里没有 {work_name} 变量时无法反解标题，返回 None。
+    """
+    if not template or "{work_name}" not in template:
+        return None, "模板中不含 {work_name} 变量，无法反解"
+
+    parts = _TEMPLATE_VAR_TOKEN_RE.split(str(template))
+    # split（带捕获组）输出：[literal, var名, literal, var名, ...]——奇数索引是变量名
+    pattern = ["^"]
+    group_index = 0
+    work_name_group: Optional[int] = None
+    # 预扫描确定 work_name 是否是最后一个变量
+    var_names = [m.group(1) for m in _TEMPLATE_VAR_TOKEN_RE.finditer(str(template))]
+    work_name_is_last = bool(var_names) and var_names[-1] == "work_name"
+
+    for idx, part in enumerate(parts):
+        if idx % 2 == 1:
+            name = part
+            group_index += 1
+            if name == "work_name":
+                work_name_group = group_index
+                pattern.append(r"(.+)" if work_name_is_last else r"(.+?)")
+            elif name == "rjcode":
+                pattern.append(f"({_TEMPLATE_VAR_PATTERNS['rjcode']})")
+            else:
+                pattern.append(f"({_TEMPLATE_VAR_PATTERNS.get(name, r'.+?')})")
+        elif part:
+            pattern.append(re.escape(part))
+
+    pattern.append(r"\s*$")
+    try:
+        compiled = re.compile("".join(pattern), re.IGNORECASE)
+    except re.error as exc:
+        return None, f"模板正则编译失败: {exc}"
+    return compiled, work_name_group
+
+
+def parse_work_name_by_template(dir_name: str, template: str) -> dict:
+    """按重命名模板结构反解文件夹名（可信路径）。
+
+    dir 必须整体匹配模板结构（含 {rjcode}/{work_name} 等变量的排列与字面量），
+    匹配成功才返回 work_name——不匹配说明文件夹不是按当前模板命名的，
+    调用方应跳过而不是靠启发式猜。
+    """
+    compiled, work_name_group = build_template_regex(template)
+    if compiled is None:
+        return {"work_name": "", "matched": False, "skipped": True,
+                "reason": work_name_group or "template_unsupported", "rjcode": None}
+    text = str(dir_name or "").strip()
+    if not text:
+        return {"work_name": "", "matched": False, "skipped": True,
+                "reason": "empty_dir", "rjcode": None}
+    match = compiled.match(text)
+    if not match:
+        return {"work_name": "", "matched": False, "skipped": True,
+                "reason": "not_matching_template", "rjcode": None}
+    work_name = (match.group(work_name_group) or "").strip()
+    rj_match = _DIR_RJ_RE.search(text)
+    if not work_name:
+        return {"work_name": "", "matched": False, "skipped": True,
+                "reason": "empty_work_name", "rjcode": rj_match.group(0).upper() if rj_match else None}
+    return {"work_name": work_name, "matched": True, "skipped": False,
+            "reason": "", "rjcode": rj_match.group(0).upper() if rj_match else None}
+
 
 def parse_work_name_from_dir(dir_name: str) -> dict:
     """从文件夹名反解 work_name。

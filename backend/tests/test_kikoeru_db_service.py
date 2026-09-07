@@ -42,7 +42,7 @@ def env(tmp_path, monkeypatch):
         INSERT INTO t_tag (name) VALUES (' tag1');
         INSERT INTO t_work (title, dir, circle_id) VALUES
             ('日文标题A', 'RJ123456 中文名A', 1),
-            ('日文标题B', '[社团][RJ234567][中文名B]', 1),
+            ('日文标题B', 'RJ234567 中文名B', 1),
             ('无编号目录', '普通文件夹名', 1),
             ('titleD', '', 1);
         """
@@ -50,7 +50,9 @@ def env(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
 
-    fake_cfg = SimpleNamespace(kikoeru_db=SimpleNamespace(
+    fake_cfg = SimpleNamespace(
+        rename=SimpleNamespace(template="{rjcode} {work_name}"),
+        kikoeru_db=SimpleNamespace(
         enabled=True, db_path=str(db_path), backup_dir=str(backup_dir),
         backup_interval_hours=24.0, backup_retention=2, snapshot_retention=3,
         scan_listen_enabled=False, scan_poll_interval_minutes=30,

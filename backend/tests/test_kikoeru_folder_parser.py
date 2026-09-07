@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.core.kikoeru_folder_parser import parse_work_name_from_dir  # noqa: E402
+from app.core.kikoeru_folder_parser import parse_work_name_by_template, parse_work_name_from_dir  # noqa: E402
 
 
 def test_parse_bracket_form():
@@ -81,3 +81,56 @@ def test_parse_empty_bracket_falls_back_to_tail():
     r = parse_work_name_from_dir("[社团][RJ123456][]尾巴名字")
     assert r["work_name"] == "尾巴名字"
     assert r["matched"] is True
+
+
+# ============================================================
+# 模板结构反解（可信路径）：parse_work_name_by_template
+# ============================================================
+
+def test_template_simple_form():
+    """用户实际模板 {rjcode} {work_name}：work_name 贪婪取整段"""
+    r = parse_work_name_by_template("RJ126662 把儿子培养成自己喜欢的样子", "{rjcode} {work_name}")
+    assert r["work_name"] == "把儿子培养成自己喜欢的样子"
+    assert r["matched"] is True
+    assert r["rjcode"] == "RJ126662"
+
+
+def test_template_work_name_with_brackets_keeps_whole_segment():
+    """真实案例：work_name 天然含 [社团]/【系列】/(CV) 段 → 必须整段保留，不得只取社团名"""
+    d = "RJ249730 [Whisp]【采耳·戏水】妖异乡愁谭~荷叶小人·帕罗波罗篇· 初夏~【薄毛毯、陪睡】(CV 浅見ゆい)"
+    r = parse_work_name_by_template(d, "{rjcode} {work_name}")
+    assert r["work_name"] == "[Whisp]【采耳·戏水】妖异乡愁谭~荷叶小人·帕罗波罗篇· 初夏~【薄毛毯、陪睡】(CV 浅見ゆい)"
+    assert r["matched"] is True
+
+
+def test_template_work_name_leading_zips():
+    """7 位 id 的 8 位补零号"""
+    r = parse_work_name_by_template("RJ01712000 某个作品", "{rjcode} {work_name}")
+    assert r["work_name"] == "某个作品"
+    assert r["rjcode"] == "RJ01712000"
+
+
+def test_template_bracketed_form():
+    """带 [] 包裹的模板也能反解"""
+    t = "[{original_maker_name}][{rjcode}][{work_name}]"
+    r = parse_work_name_by_template("[サークル][RJ123456][中文名]", t)
+    assert r["work_name"] == "中文名"
+    assert r["matched"] is True
+
+
+def test_template_not_matching_skipped():
+    """文件夹名不符合当前模板结构 → skipped（绝不靠启发式猜标题）"""
+    r = parse_work_name_by_template("RJ126662 名字", "[{original_maker_name}][{rjcode}][{work_name}]")
+    assert r["skipped"] is True
+    assert r["reason"] == "not_matching_template"
+
+
+def test_template_without_work_name_unsupported():
+    r = parse_work_name_by_template("RJ126662 名字", "{rjcode}")
+    assert r["skipped"] is True
+    assert "work_name" in r["reason"]
+
+
+def test_template_empty_dir():
+    r = parse_work_name_by_template("", "{rjcode} {work_name}")
+    assert r["skipped"] is True
