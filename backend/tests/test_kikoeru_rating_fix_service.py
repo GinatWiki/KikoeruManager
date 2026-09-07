@@ -69,6 +69,10 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(kdb, "get_config", lambda: fake_cfg)
 
     service = KikoeruRatingFixService()
+    # 回归：v2.6.3 误删模块级 _service 单例变量导致 get_run_status 抛 NameError
+    monkeypatch.setattr(rfs, "_service", None)
+    singleton = rfs.get_kikoeru_rating_fix_service()
+    assert singleton.get_run_status()["running"] is False
     return SimpleNamespace(service=service, db_path=db_path, backup_dir=backup_dir)
 
 

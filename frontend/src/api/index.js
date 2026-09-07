@@ -819,11 +819,14 @@ export const deferredArchiveApi = {
 }
 
 function mutationRequestConfig (options = {}) {
-  const idempotencyKey = String(options.idempotencyKey || '').trim() || (
+  const rawKey = String(options.idempotencyKey || '').trim() || (
     typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
       ? crypto.randomUUID()
       : `mutation-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
   )
+  // XHR header 值只允许 ISO-8859-1：库存 ID 可能是中文（如「字幕文件夹」），
+  // 组合出的幂等键必须把非 ASCII 字符编码掉，否则 setRequestHeader 直接抛错。
+  const idempotencyKey = rawKey.replace(/[^\x20-\x7E]/g, ch => encodeURIComponent(ch))
   return {
     ...(options.config || {}),
     ...(options.signal ? { signal: options.signal } : {}),

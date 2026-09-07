@@ -2,6 +2,15 @@
 
 本文件记录 KikoeruManager 的版本变化、功能更新与问题修复。更早的历史版本可通过 GitHub Tags 与提交历史查看。
 
+## v2.6.4
+
+- 修复：「Kikoeru 数据库 → 评分修复」访问 `/rating-fix/run/status` 报 `NameError: name '_service' is not defined`（v2.6.3 引入）。
+  - **根因**：清理重复代码段时误删了模块级单例变量 `_service`，查询单例的接口全部抛 NameError。
+  - **修复**：补回变量定义，并新增单例回归测试。
+- 修复：库存管理**多选 API 重命名**报 `Failed to execute 'setRequestHeader': String contains non ISO-8859-1 code point`（中文库存 ID 的老版本遗留问题）。
+  - **根因**：批量 API 重命名的幂等键由 `批次号:库存ID` 组成，库存 ID 为中文（如「字幕文件夹」）时，`Idempotency-Key` 请求头包含非 ISO-8859-1 字符，浏览器 XHR 直接拒绝。
+  - **修复**：幂等键统一把非 ASCII 字符按 URL 编码转成安全形式（唯一性不变），并附前端测试用例。
+
 ## v2.6.3
 
 - 修复：「一键套用文件命名」对 `RJ号 [社团]【副标题】正标题 (CV)` 这类文件夹名会把**社团名错当标题**（如 `[Whisp]【采耳·戏水】妖异乡愁谭~…` 被改成 `Whisp`）。

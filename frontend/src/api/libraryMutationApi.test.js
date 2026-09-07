@@ -52,6 +52,17 @@ describe('库存确认型 API 幂等协议', () => {
     expect(apiClient.post.mock.calls[1][2].headers['Idempotency-Key']).toBe('api-rename-key')
   })
 
+  it('幂等键中的非 ASCII 字符（中文库存 ID）被编码为 ISO-8859-1 安全形式', async () => {
+    await libraryApi.apiRename('old-rj', '字幕文件夹', {
+      idempotencyKey: 'api-rename-1757200000-abc:字幕文件夹',
+    })
+
+    const key = apiClient.post.mock.calls[0][2].headers['Idempotency-Key']
+    expect(key).toBe('api-rename-1757200000-abc:%E5%AD%97%E5%B9%95%E6%96%87%E4%BB%B6%E5%A4%B9')
+    // 不含任何超出 ISO-8859-1 的字符（可安全通过 XHR setRequestHeader）
+    expect(/^[\x20-\x7E]*$/.test(key)).toBe(true)
+  })
+
   it('最终索引移动通知也使用稳定 key', async () => {
     await libraryApi.browserNotifyIndexMoves('A', [
       { source: 'temp.txt', destination: 'final.txt' },

@@ -450,6 +450,9 @@ class KikoeruRatingFixService:
         item["reason"] = "满分 5 未验证（日文原版不可达或无评分）"
         return item
 
+_service: Optional[KikoeruRatingFixService] = None
+
+
 def get_kikoeru_rating_fix_service() -> KikoeruRatingFixService:
     global _service
     if _service is None:
