@@ -149,6 +149,9 @@ def compile_user_regex(pattern: str):
         return re.compile(text)
     except re.error as exc:
         hints = []
+        if "$$" in text:
+            hints.append("正则里含有 $$：大概率是从网页/聊天复制时 \\[ 和 \\] 被 LaTeX 渲染转成了 $$，"
+                         "请把 $$ 对应位置改回 \\[ 或 \\]，或点「插入示例」按钮直接填入")
         if "(?|" in text:
             hints.append("Python 正则不支持 PCRE 的 (?|…) 分支重置语法，"
                          "请把 (?| 改成 (?: ，并把每个分支的标题各自放进捕获组")

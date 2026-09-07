@@ -217,6 +217,16 @@ def test_compile_user_regex_zero_width_assertion_hint():
     assert "b?RJ" in message  # repr 中反斜杠会翻倍，但片段可见
 
 
+def test_compile_user_regex_dollar_dollar_hint():
+    """网页/聊天复制把 \\[ \\] 转成 $$ → 报错附还原提示（v2.6.7 用户实测案例）。"""
+    with pytest.raises(ValueError) as exc_info:
+        compile_user_regex(r"\b$$?RJ(?:\d{6}|\d{8})$$?\s*(?:$$([^\[$$]+)\]\s*$|(.+))")
+    message = str(exc_info.value)
+    assert "nothing to repeat" in message  # $? 给锚点加量词 → 出错位置 4
+    assert "$$" in message
+    assert "复制" in message
+
+
 def test_parse_work_name_by_regex_multi_branch():
     """用户的多分支正则（(?: 等价写法）：取首个参与匹配的捕获组。
 

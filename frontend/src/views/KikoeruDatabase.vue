@@ -292,8 +292,11 @@
       </div>
       <div v-if="renameMode === 'regex'" class="mb-3 text-xs text-slate-500 leading-5">
         用法：正则匹配文件夹名后，标题取<b>首个参与匹配的捕获组</b>（多分支正则中未参与匹配的分支自动跳过）；不写括号则用整个匹配结果；不匹配的行自动跳过。
-        例：<code>RJ192588 [ベレス解部]新生代风格婴儿游戏 小夜子(CV ゆづきひな。)</code> 用 <code>\[?RJ(?:\d{6}|\d{8})\]?\s*(?:\[([^\[\]]+)\]\s*$|(.+))</code>
-        → 新标题 <code>[ベレス解部]新生代风格婴儿游戏 小夜子(CV ゆづきひな。)</code>。注意 Python 正则不支持 PCRE 的 <code>(?|…)</code> 分支重置，请写 <code>(?:…)</code>。修改正则后请点「刷新预览」。
+        注意从网页复制正则时 <code>\[</code> 可能被渲染成 <code>$$</code>，建议直接用下面的「插入示例」按钮。
+        <div class="mt-1 flex flex-wrap gap-2">
+          <el-button size="small" @click="insertRegexExample('multi')">插入示例（保留 [社团]/(CV) 段）</el-button>
+          <el-button size="small" @click="insertRegexExample('simple')">插入示例（RJ号后取整段）</el-button>
+        </div>
       </div>
       <div v-if="renamePreview" class="mb-3 text-sm text-slate-600">
         共 <b>{{ renamePreview.total }}</b> 行：可改名 <b class="text-emerald-600">{{ renamePreview.changed }}</b>，
@@ -524,6 +527,16 @@ const renameRegex = ref('')
 watch(renameMode, () => {
   if (renameWizardVisible.value) loadRenamePreview()
 })
+
+// 示例正则由程序直接填入输入框——从网页/聊天复制时 \[ \] 会被 LaTeX 渲染转成 $$
+const REGEX_EXAMPLES = {
+  multi: '\\[?RJ(?:\\d{6}|\\d{8})\\]?\\s*(?:\\[([^\\[\\]]+)\\]\\s*$|(.+))',
+  simple: '^RJ\\d+\\s+(.+)$'
+}
+function insertRegexExample(key) {
+  renameRegex.value = REGEX_EXAMPLES[key] || ''
+  loadRenamePreview()
+}
 const renameApplying = ref(false)
 const renameScopedToSelection = ref(false)
 const previewLimit = 300
