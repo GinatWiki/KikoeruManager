@@ -91,6 +91,14 @@ if not _BROTLI_AVAILABLE:
     )
 
 
+class DLsiteNetworkError(Exception):
+    """DLsite 网络层失败（超时/连接失败/非 200/JSON 解析失败/熔断中）。
+
+    与「服务端确认无数据（404/无评分字段 → 返回 None）」严格区分，
+    供调用方决定自动重试 / 标记 error 等手动重试。
+    """
+
+
 @dataclass
 class TranslationInfo:
     """翻译信息"""
@@ -3339,6 +3347,80 @@ class DLsiteApiService:
             }
         return found, parse_status
     
+    async def get_product_rating(self, rjcode: str, locale: Optional[str] = None) -> Optional[Dict]:
+        """获取 DLsite 评分/销量元数据（product-info AJAX）。
+
+        字段名与 Kikoeru t_work 的评分列一一对应（rate_average_2dp / rate_count /
+        rate_count_detail / rank / review_count / dl_count / price），
+        供 v2.6「Kikoeru 数据库评分修复」功能回填使用。
+
+        与其他抓取方法不同，本方法**不吞网络异常**：
+        - 返回 None  = 确认无数据（404 / 响应里没有评分字段）；
+        - 抛 DLsiteNetworkError = 网络层失败（超时/连接失败/非 200），
+          由调用方做作品级重试或标记后手动重试。
+        底层仍复用 ``_guarded_get`` 的 3 次指数退避重试、熔断器与并发限流；
+        评分数据带短 TTL（10 分钟）缓存，preview → apply 重复调用近乎免费。
+
+        Returns:
+            dict: 评分字段集合；确认无数据时返回 None。
+        """
+        workno = self._normalize_workno(rjcode)
+        if not workno:
+            return None
+        url = self._build_product_info_ajax_url(workno, locale=locale)
+
+        cache_key = f"rating:{workno}:{locale or ''}"
+        cached = self.cache.get(cache_key)
+        if cached and (datetime.now() - cached["timestamp"]).total_seconds() < cached.get("ttl_seconds", 600):
+            return cached["data"]
+
+        try:
+            response = await self._guarded_get(url, headers=self._get_api_headers())
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.ProtocolError, httpx.HTTPStatusError) as exc:
+            raise DLsiteNetworkError(f"DLsite 请求失败: {self._format_exc(exc)}") from exc
+        except RuntimeError as exc:
+            # _guarded_get 熔断期直接抛 ConnectError，这里兜非 httpx 的运行时错误
+            raise DLsiteNetworkError(f"DLsite 请求失败: {self._format_exc(exc)}") from exc
+
+        if response.status_code == 404:
+            self.cache[cache_key] = {"data": None, "timestamp": datetime.now(), "ttl_seconds": 600}
+            return None
+        if response.status_code != 200:
+            raise DLsiteNetworkError(f"DLsite 返回非 200 状态码: {response.status_code}")
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise DLsiteNetworkError(f"DLsite 响应 JSON 解析失败: {exc}") from exc
+        if not isinstance(data, dict):
+            raise DLsiteNetworkError("DLsite 响应不是 JSON 对象")
+
+        payload = data.get(workno)
+        if not isinstance(payload, dict):
+            for key, value in data.items():
+                if self._normalize_workno(key) == workno and isinstance(value, dict):
+                    payload = value
+                    break
+        if not isinstance(payload, dict) or (
+            "rate_count" not in payload and "rate_average_2dp" not in payload
+        ):
+            # 接口可达但无评分字段：视为确认无数据
+            self.cache[cache_key] = {"data": None, "timestamp": datetime.now(), "ttl_seconds": 600}
+            return None
+
+        result = {
+            "rjcode": self._normalize_workno(payload.get("workno") or workno),
+            "dl_count": payload.get("dl_count") or 0,
+            "rank": payload.get("rank") or [],
+            "rate_count": payload.get("rate_count") or 0,
+            "rate_average_2dp": payload.get("rate_average_2dp") or 0,
+            "rate_count_detail": payload.get("rate_count_detail") or [],
+            "review_count": payload.get("review_count") or 0,
+            "price": payload.get("price"),
+        }
+        self.cache[cache_key] = {"data": result, "timestamp": datetime.now(), "ttl_seconds": 600}
+        return result
+
     async def get_work_info(self, rjcode: str) -> Optional[Dict]:
         """获取作品详细信息"""
         product_info = await self.get_product_info(rjcode)

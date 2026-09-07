@@ -282,6 +282,25 @@ class KikoeruServerConfig(BaseModel):
     retry_count: int = 3   # 网络请求重试次数
     retry_delay: float = 1.0  # 重试间隔(秒)
 
+class KikoeruDbConfig(BaseModel):
+    """Kikoeru 数据库管理配置（v2.6）
+
+    直接管理远程 Kikoeru（闭源新版）的 SQLite 数据库文件：
+    在线增删改查、一键套用文件命名、扫描完成后自动套用、备份与恢复。
+    """
+    enabled: bool = False                 # 功能总开关；激活（false→true）时自动做一次"原始库备份"
+    db_path: str = ""                     # db.sqlite3 路径。EXE 版填 UNC（\\NAS\...\db.sqlite3）或本地路径；
+                                          # Docker 版（与 Kikoeru 同主机）填容器内 bind mount 路径（如 /kikoeru-db/db.sqlite3）
+    backup_dir: str = ""                  # 备份存放目录；留空用默认（数据目录下 kikoeru_db_backups/）
+    backup_interval_hours: float = 24.0   # auto 滚动备份间隔（小时）
+    backup_retention: int = 7             # auto 滚动备份保留份数
+    snapshot_retention: int = 20          # 写前回滚快照保留份数（超过或超过 24h 清理）
+    scan_listen_enabled: bool = False     # 功能3：socket 监听 Kikoeru 扫描事件
+    scan_poll_interval_minutes: int = 30  # socket 断线时轮询兜底间隔（分钟）
+    scan_checkpoint: str = ""             # 上次已处理的 created_at 检查点（ISO8601，运行中持久化）
+    last_scan_finished_at: str = ""       # 最近一次 SCAN_FINISHED 时间（展示用）
+
+
 class ASMRSyncConfig(BaseModel):
     """ASMR 同步下载配置"""
     enabled: bool = True
@@ -826,6 +845,7 @@ class AppConfig(BaseModel):
     processed_archive_cleanup: ProcessedArchiveCleanupConfig = ProcessedArchiveCleanupConfig()
     path_mapping: PathMappingConfig = PathMappingConfig()
     kikoeru_server: KikoeruServerConfig = KikoeruServerConfig()
+    kikoeru_db: KikoeruDbConfig = KikoeruDbConfig()
     asmr_sync: ASMRSyncConfig = ASMRSyncConfig()
     http_downloader: HttpDownloaderConfig = HttpDownloaderConfig()
     baidu_netdisk: BaiduNetdiskConfig = BaiduNetdiskConfig()
@@ -1149,6 +1169,14 @@ def load_config(config_path: str = None) -> AppConfig:
                         for key, value in defaults.items():
                             if key not in config_data['backup_zip']:
                                 config_data['backup_zip'][key] = value
+
+                    if 'kikoeru_db' not in config_data or not config_data['kikoeru_db']:
+                        config_data['kikoeru_db'] = KikoeruDbConfig().model_dump()
+                    else:
+                        defaults = KikoeruDbConfig().model_dump()
+                        for key, value in defaults.items():
+                            if key not in config_data['kikoeru_db']:
+                                config_data['kikoeru_db'][key] = value
 
                     _config = AppConfig(**config_data)
                     _config_loaded_mtime = os.path.getmtime(config_path) if os.path.exists(config_path) else 0.0
