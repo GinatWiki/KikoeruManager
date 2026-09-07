@@ -137,7 +137,8 @@ def compile_user_regex(pattern: str):
     """编译用户自定义正则；非法时抛 ValueError（调用方转 400）。
 
     限制长度防极端回溯；正则来源是本机使用者本人，编译后按行使用。
-    Python re 不支持 PCRE 的 (?|…) 分支重置，给出改写提示。
+    报错回显收到的正则原文与出错位置——粘贴变形（丢反斜杠/混入全角字符/
+    断行等）一眼可辨；对常见误写（(?|…、给 \\b 等零宽断言加量词）附针对性提示。
     """
     text = str(pattern or "").strip()
     if not text:
@@ -147,13 +148,23 @@ def compile_user_regex(pattern: str):
     try:
         return re.compile(text)
     except re.error as exc:
+        hints = []
         if "(?|" in text:
-            raise ValueError(
-                f"正则无效: {exc}。Python 正则不支持 PCRE 的 (?|…) 分支重置语法，"
-                "请把 (?| 改成 (?: ，并把每个分支的标题各自放进捕获组——"
-                "标题会自动取第一个参与匹配的捕获组"
-            ) from exc
-        raise ValueError(f"正则无效: {exc}") from exc
+            hints.append("Python 正则不支持 PCRE 的 (?|…) 分支重置语法，"
+                         "请把 (?| 改成 (?: ，并把每个分支的标题各自放进捕获组")
+        message = str(exc)
+        position = getattr(exc, "pos", None)
+        if "nothing to repeat" in message and isinstance(position, int) \
+                and position >= 2 and text[position - 2:position] in (r"\b", r"\B", r"\A", r"\Z"):
+            hints.append("\\b 等是零宽断言（只表示位置，不消耗字符），不能加 ?/*/+/{n} 量词，"
+                         "直接写 \\bRJ 即可表达词边界")
+        message = f"正则无效: {message}"
+        for hint in hints:
+            message += f"。提示: {hint}"
+        if isinstance(position, int) and 0 <= position <= len(text):
+            shown = text if len(text) <= 120 else text[:117] + "..."
+            message += f"｜收到: {shown!r}（出错位置 {position}）"
+        raise ValueError(message) from exc
 
 
 def parse_work_name_by_regex(dir_name: str, compiled) -> dict:

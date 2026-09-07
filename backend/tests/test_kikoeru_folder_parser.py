@@ -206,6 +206,17 @@ def test_compile_user_regex_branch_reset_hint():
     assert "(?:" in str(exc_info.value)
 
 
+def test_compile_user_regex_zero_width_assertion_hint():
+    """\\b 等零宽断言加量词 → nothing to repeat，报错回显原文并附提示。"""
+    with pytest.raises(ValueError) as exc_info:
+        compile_user_regex(r"\b?RJ\d+")
+    message = str(exc_info.value)
+    assert "nothing to repeat" in message
+    assert "零宽断言" in message
+    assert "收到" in message
+    assert "b?RJ" in message  # repr 中反斜杠会翻倍，但片段可见
+
+
 def test_parse_work_name_by_regex_multi_branch():
     """用户的多分支正则（(?: 等价写法）：取首个参与匹配的捕获组。
 
