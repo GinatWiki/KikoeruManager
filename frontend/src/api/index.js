@@ -2838,6 +2838,102 @@ export const notificationApi = {
   }
 }
 
+export const kikoeruDbApi = {
+  // v2.6：Kikoeru 数据库管理
+  tables: async () => {
+    const response = await apiClient.get('/kikoeru-db/tables')
+    return response.data
+  },
+
+  rows: async (table, { page = 1, size = 50, search = '', sort = '' } = {}) => {
+    const response = await apiClient.get(`/kikoeru-db/${table}/rows`, {
+      params: { page, size, search, sort }
+    })
+    return response.data
+  },
+
+  updateRow: async (table, id, patch) => {
+    const response = await apiClient.put(`/kikoeru-db/${table}/row`, { id, patch })
+    return response.data
+  },
+
+  insertRow: async (table, payload) => {
+    const response = await apiClient.post(`/kikoeru-db/${table}/row`, payload)
+    return response.data
+  },
+
+  deleteRow: async (table, id) => {
+    const response = await apiClient.delete(`/kikoeru-db/${table}/row`, { data: { id } })
+    return response.data
+  },
+
+  backups: async (kind = null) => {
+    const response = await apiClient.get('/kikoeru-db/backups', { params: kind ? { kind } : {} })
+    return response.data
+  },
+
+  createBackup: async () => {
+    const response = await apiClient.post('/kikoeru-db/backup', { kind: 'manual' })
+    return response.data
+  },
+
+  restoreBackup: async (filename) => {
+    const response = await apiClient.post('/kikoeru-db/backup/restore', { filename })
+    return response.data
+  },
+
+  snapshots: async () => {
+    const response = await apiClient.get('/kikoeru-db/snapshots')
+    return response.data
+  },
+
+  renamePreview: async (ids = null) => {
+    const response = await apiClient.post('/kikoeru-db/rename/preview', ids ? { ids } : {})
+    return response.data
+  },
+
+  renameApply: async (ids = null) => {
+    const response = await apiClient.post('/kikoeru-db/rename/apply', ids ? { ids } : {})
+    return response.data
+  },
+
+  ratingFixPreview: async ({ ids = null, limit = 200 } = {}) => {
+    const response = await apiClient.post('/kikoeru-db/rating-fix/preview', {
+      ...(ids ? { ids } : {}),
+      limit
+    })
+    return response.data
+  },
+
+  ratingFixApply: async ({ ids = null, limit = 200 } = {}) => {
+    const response = await apiClient.post('/kikoeru-db/rating-fix/apply', {
+      ...(ids ? { ids } : {}),
+      limit
+    })
+    return response.data
+  },
+
+  scanStatus: async () => {
+    const response = await apiClient.get('/kikoeru-db/scan/status')
+    return response.data
+  },
+
+  scanStart: async () => {
+    const response = await apiClient.post('/kikoeru-db/scan/start')
+    return response.data
+  },
+
+  scanStop: async () => {
+    const response = await apiClient.post('/kikoeru-db/scan/stop')
+    return response.data
+  },
+
+  diagnose: async () => {
+    const response = await apiClient.post('/kikoeru-db/diagnose')
+    return response.data
+  }
+}
+
 export default {
   task: taskApi,
   config: configApi,

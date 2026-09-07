@@ -15,6 +15,7 @@ const SubtitleImport = () => import('../views/SubtitleImport.vue')
 const ActivityHistory = () => import('../views/ActivityHistory.vue')
 const CircleCompletion = () => import('../views/CircleCompletion.vue')
 const DuplicateCheck = () => import('../views/DuplicateCheck.vue')
+const KikoeruDatabase = () => import('../views/KikoeruDatabase.vue')
 const VerifyGate = () => import('../views/VerifyGate.vue')
 const BlockedGate = () => import('../views/BlockedGate.vue')
 
@@ -33,6 +34,7 @@ const routeComponentLoaders = {
   '/logs': Logs,
   '/circle-completion': CircleCompletion,
   '/duplicate-check': DuplicateCheck,
+  '/kikoeru-db': KikoeruDatabase,
   '/activity-history': ActivityHistory,
   '/verify': VerifyGate,
   '/blocked': BlockedGate,
@@ -188,6 +190,16 @@ const routes = [
     meta: {
       title: '仓库查重',
       icon: 'CopyCheck',
+      cache: true
+    }
+  },
+  {
+    path: '/kikoeru-db',
+    name: 'KikoeruDatabase',
+    component: KikoeruDatabase,
+    meta: {
+      title: 'Kikoeru 数据库',
+      icon: 'Coin',
       cache: true
     }
   },

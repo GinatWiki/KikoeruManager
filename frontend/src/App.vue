@@ -147,6 +147,11 @@
             <span>仓库查重</span>
           </el-menu-item>
 
+          <el-menu-item index="/kikoeru-db" title="Kikoeru 数据库" class="sidebar-nav-item sidebar-nav-kikoeru-db" data-route-path="/kikoeru-db">
+            <Database :size="18" :stroke-width="2.2" />
+            <span>Kikoeru 数据库</span>
+          </el-menu-item>
+
           <el-menu-item index="/library-backup" title="库存打包" class="sidebar-nav-item sidebar-nav-backup" data-route-path="/library-backup">
             <Archive :size="18" :stroke-width="2.2" />
             <span>库存打包</span>
@@ -235,6 +240,7 @@ import {
   ChevronsLeft,
   ArrowUpRight,
   ChevronsRight,
+  Database,
   Download,
   FolderTree,
   GitCompare,

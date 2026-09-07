@@ -99,6 +99,57 @@
         </div>
       </div>
 
+      <!-- Kikoeru 数据库管理 -->
+      <div class="settings-card">
+        <div class="card-title">Kikoeru 数据库管理</div>
+        <div class="field-stack">
+          <SettingsToggleRow v-model="kikoeruDbConfig.enabled" title="启用数据库管理" subtitle="在「Kikoeru 数据库」页面直接编辑 Kikoeru 数据；激活时自动做一次原始库备份。" />
+          <SettingsFieldCard
+            label="数据库路径 (db.sqlite3)"
+            hint="EXE 版填 UNC（\\NAS\...\db.sqlite3）或本地路径；Docker 版（与 Kikoeru 同主机）在 compose 里把库文件挂载进容器后填容器内路径，如 /kikoeru-db/db.sqlite3。"
+          >
+            <input v-model="kikoeruDbConfig.db_path" class="field-input" type="text" placeholder="\\NAS\appdata\kikoeru\db.sqlite3">
+          </SettingsFieldCard>
+          <div class="service-action-row">
+            <button type="button" class="ghost-inline-btn" :disabled="kikoeruDbBusy" @click="runKikoeruDbDiagnose">
+              <Loader2 v-if="kikoeruDbBusy" :size="14" :stroke-width="2.5" class="animate-spin" />
+              <Stethoscope v-else :size="14" :stroke-width="2.5" />
+              检测数据库
+            </button>
+          </div>
+          <div v-if="kikoeruDbDiagnoseSteps.length" class="service-result-card">
+            <div v-for="s in kikoeruDbDiagnoseSteps" :key="s.step" class="service-result-line kikoeru-db-diagnose-line">
+              <CheckCircle2 v-if="s.ok" :size="14" :stroke-width="2.5" class="kikoeru-db-ok" />
+              <AlertCircle v-else :size="14" :stroke-width="2.5" class="kikoeru-db-bad" />
+              <span><b>{{ s.step }}</b>：{{ s.detail }}</span>
+            </div>
+          </div>
+          <SettingsFieldCard label="备份目录" hint="留空使用默认（数据目录下 kikoeru_db_backups/）。Docker 部署请把该目录也挂载出来。">
+            <input v-model="kikoeruDbConfig.backup_dir" class="field-input" type="text" placeholder="留空使用默认目录">
+          </SettingsFieldCard>
+          <div class="mini-grid two">
+            <SettingsFieldCard label="自动备份间隔（小时）">
+              <SettingsNumberStepper v-model="kikoeruDbConfig.backup_interval_hours" :min="1" :max="720" />
+            </SettingsFieldCard>
+            <SettingsFieldCard label="自动备份保留份数">
+              <SettingsNumberStepper v-model="kikoeruDbConfig.backup_retention" :min="1" :max="90" />
+            </SettingsFieldCard>
+          </div>
+          <div class="mini-grid two">
+            <SettingsFieldCard label="回滚快照保留份数" hint="每次写入前自动生成的快照数量上限（超过或超过 24 小时自动清理）。">
+              <SettingsNumberStepper v-model="kikoeruDbConfig.snapshot_retention" :min="1" :max="200" />
+            </SettingsFieldCard>
+            <SettingsFieldCard label="断线轮询间隔（分钟）" hint="socket 断开时按此间隔轮询数据库增量。">
+              <SettingsNumberStepper v-model="kikoeruDbConfig.scan_poll_interval_minutes" :min="1" :max="1440" />
+            </SettingsFieldCard>
+          </div>
+          <SettingsToggleRow v-model="kikoeruDbConfig.scan_listen_enabled" title="监听 Kikoeru 扫描" subtitle="扫描完成后自动对新入库作品套用文件命名（个别扫描任务失败不阻断）。" />
+          <div v-if="!config.kikoeru_server?.server_url" class="service-result-line">
+            提示：监听与 API 写入依赖 Kikoeru 服务器，请先在上方「Kikoeru 服务器查重」中配置地址与账号。
+          </div>
+        </div>
+      </div>
+
       <!-- ASMR 同步下载 -->
       <div class="settings-card">
         <div class="card-title">ASMR 同步下载</div>
@@ -491,7 +542,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { AlertCircle, BookOpen, CheckCircle2, FolderOpen, Languages, Loader2, Mail, Plus, RefreshCw, SearchCheck, Trash2, Wifi, Zap } from 'lucide-vue-next'
+import { AlertCircle, BookOpen, CheckCircle2, FolderOpen, Languages, Loader2, Mail, Plus, RefreshCw, SearchCheck, Stethoscope, Trash2, Wifi, Zap } from 'lucide-vue-next'
 import SettingsFieldCard from './SettingsFieldCard.vue'
 import SettingsNumberStepper from './SettingsNumberStepper.vue'
 import SettingsToggleRow from './SettingsToggleRow.vue'
@@ -499,7 +550,7 @@ import SettingsToggleChip from './SettingsToggleChip.vue'
 import AppDropdown from '../common/AppDropdown.vue'
 import AnimatedPasswordInput from '../common/AnimatedPasswordInput.vue'
 import StatefulButton from '../ui/stateful-button.vue'
-import { circleCompletionApi, configApi, kikoeruApi, emailWatcherApi } from '../../api'
+import { circleCompletionApi, configApi, kikoeruApi, kikoeruDbApi, emailWatcherApi } from '../../api'
 
 const props = defineProps({
   config: { type: Object, required: true }
@@ -528,6 +579,51 @@ const southPlusTestBusy = ref(false)
 const southPlusTestMessage = ref('')
 const southPlusRevealedCookie = ref('')
 const southPlusCookieRevealLoading = ref(false)
+
+// ---- Kikoeru 数据库管理（v2.6）----
+const defaultKikoeruDbConfig = {
+  enabled: false,
+  db_path: '',
+  backup_dir: '',
+  backup_interval_hours: 24.0,
+  backup_retention: 7,
+  snapshot_retention: 20,
+  scan_listen_enabled: false,
+  scan_poll_interval_minutes: 30,
+  scan_checkpoint: '',
+  last_scan_finished_at: ''
+}
+
+const kikoeruDbConfig = computed(() => {
+  if (!props.config.kikoeru_db || typeof props.config.kikoeru_db !== 'object') {
+    props.config.kikoeru_db = { ...defaultKikoeruDbConfig }
+  }
+  for (const [key, value] of Object.entries(defaultKikoeruDbConfig)) {
+    if (props.config.kikoeru_db[key] == null) props.config.kikoeru_db[key] = value
+  }
+  return props.config.kikoeru_db
+})
+
+const kikoeruDbBusy = ref(false)
+const kikoeruDbDiagnoseSteps = ref([])
+
+async function runKikoeruDbDiagnose() {
+  kikoeruDbBusy.value = true
+  kikoeruDbDiagnoseSteps.value = []
+  try {
+    const result = await kikoeruDbApi.diagnose()
+    kikoeruDbDiagnoseSteps.value = result?.steps || []
+    if (result?.ok) {
+      ElMessage.success('Kikoeru 数据库检测全部通过')
+    } else {
+      ElMessage.warning('Kikoeru 数据库检测存在未通过项，详见下方报告')
+    }
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.detail || error?.message || '检测失败')
+  } finally {
+    kikoeruDbBusy.value = false
+  }
+}
 
 // ---- AppDropdown options ----
 const uploadModeOptions = [
