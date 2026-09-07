@@ -502,6 +502,11 @@ app = FastAPI(
 )
 app.add_middleware(MediaAwareGZipMiddleware, minimum_size=1024)
 
+# Kikoeru 数据库管理（v2.6）
+from .kikoeru_db import router as kikoeru_db_router  # noqa: E402
+
+app.include_router(kikoeru_db_router)
+
 # ========== 工具函数 ==========
 def _mask_url_credentials(value: str) -> str:
     text = str(value or "")
@@ -2588,6 +2593,22 @@ async def startup_event():
     # 启动已处理压缩包智能清理服务
     archive_cleanup_service = get_processed_archive_cleanup_service()
     await archive_cleanup_service.start()
+
+    # 启动 Kikoeru 数据库定时备份服务（v2.6，未启用时内部直接跳过）
+    try:
+        from ..core.kikoeru_db_backup_service import get_kikoeru_db_backup_service
+
+        await get_kikoeru_db_backup_service().start()
+    except Exception:
+        logger.warning("[启动] Kikoeru 数据库定时备份启动失败", exc_info=True)
+
+    # 启动 Kikoeru 扫描监听（v2.6 功能3，未启用时内部直接跳过）
+    try:
+        from ..core.kikoeru_scan_listener import get_kikoeru_scan_listener
+
+        await get_kikoeru_scan_listener().start()
+    except Exception:
+        logger.warning("[启动] Kikoeru 扫描监听启动失败", exc_info=True)
 
     # 扫描已处理压缩包目录，同步数据库（根据配置决定是否启用）
     config = get_config()
@@ -5461,6 +5482,11 @@ async def update_configuration(request: Request):
                 if (lib.get("type") or "local").lower() != "local":
                     raise HTTPException(status_code=400, detail="只有本地库存可以设置为一键移库目标")
 
+        # 记录 Kikoeru 数据库管理开关旧值（激活备份需要检测 false→true 翻转）
+        _pre_save_kikoeru_db_enabled = (
+            bool(get_config().kikoeru_db.enabled) if 'kikoeru_db' in config_data else None
+        )
+
         result = save_config(config_data)
         if _should_log_config_save_info(config_keys):
             logger.info(
@@ -5483,6 +5509,27 @@ async def update_configuration(request: Request):
                 )
             except Exception:
                 logger.warning("[KIKOERU] 刷新运行时配置失败", exc_info=True)
+
+        # Kikoeru 数据库管理（v2.6）：开关翻转时生成原始库备份，并重启备份/监听服务
+        if 'kikoeru_db' in config_data:
+            try:
+                from ..core.kikoeru_db_backup_service import get_kikoeru_db_backup_service
+
+                kb_backup_service = get_kikoeru_db_backup_service()
+                await kb_backup_service.restart()
+                if (
+                    _pre_save_kikoeru_db_enabled is False
+                    and bool(get_config().kikoeru_db.enabled)
+                ):
+                    await kb_backup_service.ensure_activation_backup()
+            except Exception:
+                logger.warning("[KIKOERU-DB] 激活备份/备份服务重启失败", exc_info=True)
+            try:
+                from ..core.kikoeru_scan_listener import get_kikoeru_scan_listener
+
+                await get_kikoeru_scan_listener().restart()
+            except Exception:
+                logger.warning("[KIKOERU-DB] 扫描监听重启失败", exc_info=True)
 
         # 重新读取配置文件确保数据已写入
         current_config = get_config()
