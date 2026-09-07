@@ -164,9 +164,17 @@ def test_parse_work_name_by_regex_no_group_uses_whole_match():
 
 
 def test_parse_work_name_by_regex_optional_group_not_participating():
-    """可选捕获组未参与匹配 → 捕获为空 → skipped。"""
+    """可选捕获组未参与匹配 → 自动落到下一个参与匹配的组（分支重置语义）。"""
     rx = compile_user_regex(r"^(RJ\d+)?\s*(.+)$")
     r = parse_work_name_by_regex("普通文件夹名", rx)
+    assert r["matched"] is True
+    assert r["work_name"] == "普通文件夹名"  # 组 1 未参与 → 取组 2
+
+
+def test_parse_work_name_by_regex_all_groups_empty_skipped():
+    """所有捕获组都为空/未参与 → skipped。"""
+    rx = compile_user_regex(r"^(RJ\d+)?x$")
+    r = parse_work_name_by_regex("x", rx)
     assert r["matched"] is False
     assert r["skipped"] is True
     assert r["reason"] == "empty_regex_group"
@@ -188,3 +196,36 @@ def test_compile_user_regex_rejects_bad_patterns():
         compile_user_regex("a" * 501)
     with pytest.raises(ValueError):
         compile_user_regex("")
+
+
+def test_compile_user_regex_branch_reset_hint():
+    """PCRE 的 (?|…) 分支重置不被 Python re 支持 → 报错附改写提示。"""
+    with pytest.raises(ValueError) as exc_info:
+        compile_user_regex(r"\[?RJ(?:\d{6}|\d{8})\]?\s*(?|\[([^\[\]]+)\]\s*$|(.+))")
+    assert "分支重置" in str(exc_info.value)
+    assert "(?:" in str(exc_info.value)
+
+
+def test_parse_work_name_by_regex_multi_branch():
+    """用户的多分支正则（(?: 等价写法）：取首个参与匹配的捕获组。
+
+    \\[?RJ(?:\\d{6}|\\d{8})\\]?\\s*(?:\\[([^\\[\\]]+)\\]\\s*$|(.+))
+    - RJ 号后的括号段不在行尾 → 分支 A 不参与，分支 B 取整段（保留社团/CV）；
+    - 括号段恰在行尾 → 分支 A 取括号内内容。
+    """
+    rx = compile_user_regex(r"\[?RJ(?:\d{6}|\d{8})\]?\s*(?:\[([^\[\]]+)\]\s*$|(.+))")
+
+    r = parse_work_name_by_regex(
+        "RJ192588 [ベレス解部]新生代风格婴儿游戏 小夜子(CV ゆづきひな。)", rx
+    )
+    assert r["matched"] is True
+    assert r["work_name"] == "[ベレス解部]新生代风格婴儿游戏 小夜子(CV ゆづきひな。)"
+    assert r["rjcode"] == "RJ192588"
+
+    r2 = parse_work_name_by_regex("[RJ123456] [标题]", rx)
+    assert r2["matched"] is True
+    assert r2["work_name"] == "标题"  # 分支 A：行尾括号段取内芯
+
+    r3 = parse_work_name_by_regex("[RJ123456] 名字", rx)
+    assert r3["matched"] is True
+    assert r3["work_name"] == "名字"

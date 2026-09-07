@@ -137,6 +137,7 @@ def compile_user_regex(pattern: str):
     """编译用户自定义正则；非法时抛 ValueError（调用方转 400）。
 
     限制长度防极端回溯；正则来源是本机使用者本人，编译后按行使用。
+    Python re 不支持 PCRE 的 (?|…) 分支重置，给出改写提示。
     """
     text = str(pattern or "").strip()
     if not text:
@@ -146,12 +147,20 @@ def compile_user_regex(pattern: str):
     try:
         return re.compile(text)
     except re.error as exc:
+        if "(?|" in text:
+            raise ValueError(
+                f"正则无效: {exc}。Python 正则不支持 PCRE 的 (?|…) 分支重置语法，"
+                "请把 (?| 改成 (?: ，并把每个分支的标题各自放进捕获组——"
+                "标题会自动取第一个参与匹配的捕获组"
+            ) from exc
         raise ValueError(f"正则无效: {exc}") from exc
 
 
 def parse_work_name_by_regex(dir_name: str, compiled) -> dict:
-    """按用户自定义正则反解文件夹名：第 1 个捕获组作为标题（无捕获组时用整体匹配）。
+    """按用户自定义正则反解文件夹名。
 
+    标题取**第一个参与匹配的捕获组**（多分支正则中未参与匹配的组自动跳过，
+    等价于 PCRE 的 (?|…) 分支重置语义）；无捕获组时用整体匹配。
     compiled 必须来自 compile_user_regex（预览阶段统一编译，非法正则直接报错
     而不是逐行静默跳过）。不匹配的行 skipped，与模板模式同样保守。
     """
@@ -165,8 +174,15 @@ def parse_work_name_by_regex(dir_name: str, compiled) -> dict:
     if not match:
         return {"work_name": "", "matched": False, "skipped": True,
                 "reason": "not_matching_regex", "rjcode": rjcode}
-    # 有捕获组时取 $1（可选组未参与匹配则为 None）；无捕获组用整体匹配
-    work_name = ((match.group(1) if compiled.groups else match.group(0)) or "").strip()
+    work_name = ""
+    if compiled.groups:
+        # 多分支正则（PCRE 分支重置的 Python 等价写法）：取首个参与匹配的组
+        for value in match.groups():
+            if value is not None and value.strip():
+                work_name = value.strip()
+                break
+    else:
+        work_name = (match.group(0) or "").strip()
     if not work_name:
         return {"work_name": "", "matched": False, "skipped": True,
                 "reason": "empty_regex_group", "rjcode": rjcode}

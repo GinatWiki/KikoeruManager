@@ -225,16 +225,18 @@ def test_rename_regex_mode_preview_and_apply(env):
 
 
 def test_rename_regex_mode_group_semantics(env):
-    """无捕获组用整体匹配；可选组未参与匹配 → skipped。"""
+    """无捕获组用整体匹配；可选组未参与时自动落到下一个参与匹配的组。"""
     preview = env.service.preview_rename(mode="regex", regex=r"RJ\d+")
     items = {i["id"]: i for i in preview["items"]}
     assert items[1]["new_title"] == "RJ123456"
 
     preview2 = env.service.preview_rename(mode="regex", regex=r"^(RJ\d+)?\s*(.+)$")
     items2 = {i["id"]: i for i in preview2["items"]}
-    # '普通文件夹名'：可选组 (RJ\d+)? 未参与 → 捕获为空 → skipped
-    assert items2[3]["skipped"] is True
-    assert items2[3]["reason"] == "empty_regex_group"
+    # '普通文件夹名'：组 1 (RJ\d+)? 未参与 → 取组 2 整段
+    assert items2[3]["skipped"] is False
+    assert items2[3]["new_title"] == "普通文件夹名"
+    # 'RJ123456 中文名A'：组 1 参与 → 取组 1
+    assert items2[1]["new_title"] == "RJ123456"
 
 
 def test_rename_regex_mode_invalid_pattern_rejected(env):

@@ -285,15 +285,15 @@
           class="flex-1"
           style="min-width: 320px"
           size="small"
-          placeholder="正则表达式，第 1 个括号捕获组作为新标题，如 ^RJ\d+\s+(.+)$"
+          placeholder="正则表达式，首个参与匹配的捕获组作为新标题，如 ^RJ\d+\s+(.+)$"
           clearable
           @keyup.enter="loadRenamePreview"
         />
       </div>
       <div v-if="renameMode === 'regex'" class="mb-3 text-xs text-slate-500 leading-5">
-        用法：正则匹配文件夹名后，<b>$1（第 1 个括号捕获组）</b>的内容成为新标题；不写括号则用整个匹配结果；不匹配的行自动跳过。
-        例：<code>RJ192588 [ベレス解部]新生代风格婴儿游戏 小夜子(CV ゆづきひな。)</code> 用 <code>^RJ\d+\s+(.+)$</code>
-        → 新标题 <code>[ベレス解部]新生代风格婴儿游戏 小夜子(CV ゆづきひな。)</code>。修改正则后请点「刷新预览」。
+        用法：正则匹配文件夹名后，标题取<b>首个参与匹配的捕获组</b>（多分支正则中未参与匹配的分支自动跳过）；不写括号则用整个匹配结果；不匹配的行自动跳过。
+        例：<code>RJ192588 [ベレス解部]新生代风格婴儿游戏 小夜子(CV ゆづきひな。)</code> 用 <code>\[?RJ(?:\d{6}|\d{8})\]?\s*(?:\[([^\[\]]+)\]\s*$|(.+))</code>
+        → 新标题 <code>[ベレス解部]新生代风格婴儿游戏 小夜子(CV ゆづきひな。)</code>。注意 Python 正则不支持 PCRE 的 <code>(?|…)</code> 分支重置，请写 <code>(?:…)</code>。修改正则后请点「刷新预览」。
       </div>
       <div v-if="renamePreview" class="mb-3 text-sm text-slate-600">
         共 <b>{{ renamePreview.total }}</b> 行：可改名 <b class="text-emerald-600">{{ renamePreview.changed }}</b>，
