@@ -133,6 +133,47 @@ def parse_work_name_by_template(dir_name: str, template: str) -> dict:
             "reason": "", "rjcode": rj_match.group(0).upper() if rj_match else None}
 
 
+def compile_user_regex(pattern: str):
+    """编译用户自定义正则；非法时抛 ValueError（调用方转 400）。
+
+    限制长度防极端回溯；正则来源是本机使用者本人，编译后按行使用。
+    """
+    text = str(pattern or "").strip()
+    if not text:
+        raise ValueError("正则为空")
+    if len(text) > 500:
+        raise ValueError("正则过长（上限 500 字符）")
+    try:
+        return re.compile(text)
+    except re.error as exc:
+        raise ValueError(f"正则无效: {exc}") from exc
+
+
+def parse_work_name_by_regex(dir_name: str, compiled) -> dict:
+    """按用户自定义正则反解文件夹名：第 1 个捕获组作为标题（无捕获组时用整体匹配）。
+
+    compiled 必须来自 compile_user_regex（预览阶段统一编译，非法正则直接报错
+    而不是逐行静默跳过）。不匹配的行 skipped，与模板模式同样保守。
+    """
+    text = str(dir_name or "")
+    rj_match = _DIR_RJ_RE.search(text)
+    rjcode = rj_match.group(0).upper() if rj_match else None
+    if not text.strip():
+        return {"work_name": "", "matched": False, "skipped": True,
+                "reason": "empty_dir", "rjcode": rjcode}
+    match = compiled.search(text)
+    if not match:
+        return {"work_name": "", "matched": False, "skipped": True,
+                "reason": "not_matching_regex", "rjcode": rjcode}
+    # 有捕获组时取 $1（可选组未参与匹配则为 None）；无捕获组用整体匹配
+    work_name = ((match.group(1) if compiled.groups else match.group(0)) or "").strip()
+    if not work_name:
+        return {"work_name": "", "matched": False, "skipped": True,
+                "reason": "empty_regex_group", "rjcode": rjcode}
+    return {"work_name": work_name, "matched": True, "skipped": False,
+            "reason": "", "rjcode": rjcode}
+
+
 def parse_work_name_from_dir(dir_name: str) -> dict:
     """从文件夹名反解 work_name。
 

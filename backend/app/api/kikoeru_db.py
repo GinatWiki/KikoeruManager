@@ -235,10 +235,14 @@ async def rename_preview(body: Dict[str, Any] = Body(default={})):
     ids = (body or {}).get("ids")
     if ids is not None and not isinstance(ids, list):
         raise HTTPException(status_code=400, detail="ids 需为数组或省略（省略=全量）")
+    mode = str((body or {}).get("mode") or "template")
+    regex = str((body or {}).get("regex") or "")
+    if mode not in ("template", "regex"):
+        raise HTTPException(status_code=400, detail="mode 仅支持 template / regex")
     import asyncio
 
     try:
-        return await asyncio.to_thread(_service().preview_rename, ids)
+        return await asyncio.to_thread(_service().preview_rename, ids, mode, regex)
     except KikoeruDbError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc))
 
@@ -249,10 +253,14 @@ async def rename_apply(body: Dict[str, Any] = Body(default={})):
     ids = (body or {}).get("ids")
     if ids is not None and not isinstance(ids, list):
         raise HTTPException(status_code=400, detail="ids 需为数组或省略（省略=全量）")
+    mode = str((body or {}).get("mode") or "template")
+    regex = str((body or {}).get("regex") or "")
+    if mode not in ("template", "regex"):
+        raise HTTPException(status_code=400, detail="mode 仅支持 template / regex")
     import asyncio
 
     try:
-        return await asyncio.to_thread(_service().apply_rename, ids)
+        return await asyncio.to_thread(_service().apply_rename, ids, mode, regex)
     except KikoeruDbError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc))
 

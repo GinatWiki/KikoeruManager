@@ -5,9 +5,16 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.core.kikoeru_folder_parser import parse_work_name_by_template, parse_work_name_from_dir  # noqa: E402
+from app.core.kikoeru_folder_parser import (  # noqa: E402
+    compile_user_regex,
+    parse_work_name_by_regex,
+    parse_work_name_by_template,
+    parse_work_name_from_dir,
+)
 
 
 def test_parse_bracket_form():
@@ -134,3 +141,50 @@ def test_template_without_work_name_unsupported():
 def test_template_empty_dir():
     r = parse_work_name_by_template("", "{rjcode} {work_name}")
     assert r["skipped"] is True
+
+
+# ------------------------------------------------------------ 自定义正则识别（v2.6 新增）
+def test_parse_work_name_by_regex_user_example():
+    """用户实例：RJ号 + 空格后整段作为 $1 → 新标题保留社团/CV 段。"""
+    rx = compile_user_regex(r"^RJ\d+\s+(.+)$")
+    r = parse_work_name_by_regex(
+        "RJ192588 [ベレス解部]新生代风格婴儿游戏 小夜子(CV ゆづきひな。)", rx
+    )
+    assert r["matched"] is True
+    assert r["work_name"] == "[ベレス解部]新生代风格婴儿游戏 小夜子(CV ゆづきひな。)"
+    assert r["rjcode"] == "RJ192588"
+
+
+def test_parse_work_name_by_regex_no_group_uses_whole_match():
+    """无捕获组 → 整体匹配结果作为标题。"""
+    rx = compile_user_regex(r"RJ\d+")
+    r = parse_work_name_by_regex("RJ123456 名字", rx)
+    assert r["matched"] is True
+    assert r["work_name"] == "RJ123456"
+
+
+def test_parse_work_name_by_regex_optional_group_not_participating():
+    """可选捕获组未参与匹配 → 捕获为空 → skipped。"""
+    rx = compile_user_regex(r"^(RJ\d+)?\s*(.+)$")
+    r = parse_work_name_by_regex("普通文件夹名", rx)
+    assert r["matched"] is False
+    assert r["skipped"] is True
+    assert r["reason"] == "empty_regex_group"
+
+
+def test_parse_work_name_by_regex_no_match_skipped():
+    rx = compile_user_regex(r"^RJ\d+\s+(.+)$")
+    r = parse_work_name_by_regex("普通文件夹名", rx)
+    assert r["matched"] is False
+    assert r["reason"] == "not_matching_regex"
+
+
+def test_compile_user_regex_rejects_bad_patterns():
+    with pytest.raises(ValueError):
+        compile_user_regex("(")
+    with pytest.raises(ValueError):
+        compile_user_regex("   ")
+    with pytest.raises(ValueError):
+        compile_user_regex("a" * 501)
+    with pytest.raises(ValueError):
+        compile_user_regex("")

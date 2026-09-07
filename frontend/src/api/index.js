@@ -2890,13 +2890,21 @@ export const kikoeruDbApi = {
     return response.data
   },
 
-  renamePreview: async (ids = null) => {
-    const response = await apiClient.post('/kikoeru-db/rename/preview', ids ? { ids } : {})
+  renamePreview: async ({ ids = null, mode = 'template', regex = '' } = {}) => {
+    const response = await apiClient.post('/kikoeru-db/rename/preview', {
+      ...(ids ? { ids } : {}),
+      mode,
+      ...(mode === 'regex' ? { regex } : {})
+    })
     return response.data
   },
 
-  renameApply: async (ids = null) => {
-    const response = await apiClient.post('/kikoeru-db/rename/apply', ids ? { ids } : {})
+  renameApply: async ({ ids = null, mode = 'template', regex = '' } = {}) => {
+    const response = await apiClient.post('/kikoeru-db/rename/apply', {
+      ...(ids ? { ids } : {}),
+      mode,
+      ...(mode === 'regex' ? { regex } : {})
+    })
     return response.data
   },
 

@@ -272,10 +272,32 @@
     <!-- 一键套用命名向导 -->
     <el-dialog v-model="renameWizardVisible" title="一键套用文件命名" width="980px" destroy-on-close>
       <el-alert type="info" :closable="false" class="mb-3" show-icon
-                title="将 t_work.title 重命名为文件夹名中的 work_name 内容（不含 [] 括号段），并置 is_custom_meta=1 防止 Kikoeru 重新抓取时覆盖。" />
+                title="把 t_work.title 重命名为文件夹名中识别出的标题，并置 is_custom_meta=1 防止 Kikoeru 重新抓取时覆盖。" />
+      <div class="mb-2 flex flex-wrap items-center gap-2">
+        <span class="text-sm text-slate-600">识别方式：</span>
+        <el-radio-group v-model="renameMode" size="small">
+          <el-radio-button label="template">按重命名模板</el-radio-button>
+          <el-radio-button label="regex">自定义正则</el-radio-button>
+        </el-radio-group>
+        <el-input
+          v-if="renameMode === 'regex'"
+          v-model="renameRegex"
+          class="flex-1"
+          style="min-width: 320px"
+          size="small"
+          placeholder="正则表达式，第 1 个括号捕获组作为新标题，如 ^RJ\d+\s+(.+)$"
+          clearable
+          @keyup.enter="loadRenamePreview"
+        />
+      </div>
+      <div v-if="renameMode === 'regex'" class="mb-3 text-xs text-slate-500 leading-5">
+        用法：正则匹配文件夹名后，<b>$1（第 1 个括号捕获组）</b>的内容成为新标题；不写括号则用整个匹配结果；不匹配的行自动跳过。
+        例：<code>RJ192588 [ベレス解部]新生代风格婴儿游戏 小夜子(CV ゆづきひな。)</code> 用 <code>^RJ\d+\s+(.+)$</code>
+        → 新标题 <code>[ベレス解部]新生代风格婴儿游戏 小夜子(CV ゆづきひな。)</code>。修改正则后请点「刷新预览」。
+      </div>
       <div v-if="renamePreview" class="mb-3 text-sm text-slate-600">
         共 <b>{{ renamePreview.total }}</b> 行：可改名 <b class="text-emerald-600">{{ renamePreview.changed }}</b>，
-        跳过 <b class="text-amber-600">{{ renamePreview.skipped }}</b>（未按模板命名/无 RJ 号/无变化）
+        跳过 <b class="text-amber-600">{{ renamePreview.skipped }}</b>（{{ renameMode === 'regex' ? '不匹配正则/捕获为空/无变化' : '未按模板命名/无 RJ 号/无变化' }}）
       </div>
       <el-table v-if="renamePreview" :data="renamePreview.items" size="small" border max-height="420">
         <el-table-column prop="id" label="RJ/VJ" width="120" />
@@ -497,6 +519,11 @@ const savingRow = ref(false)
 const renameWizardVisible = ref(false)
 const renamePreview = ref(null)
 const renamePreviewing = ref(false)
+const renameMode = ref('template')
+const renameRegex = ref('')
+watch(renameMode, () => {
+  if (renameWizardVisible.value) loadRenamePreview()
+})
 const renameApplying = ref(false)
 const renameScopedToSelection = ref(false)
 const previewLimit = 300
@@ -947,9 +974,11 @@ async function loadRenamePreview() {
       ElMessage.warning('当前表不支持按行选择（无 id 列），改为全库预览')
       renameScopedToSelection.value = false
     }
-    renamePreview.value = await kikoeruDbApi.renamePreview(
-      renameScopedToSelection.value ? ids : null
-    )
+    renamePreview.value = await kikoeruDbApi.renamePreview({
+      ids: renameScopedToSelection.value ? ids : null,
+      mode: renameMode.value,
+      regex: renameRegex.value
+    })
   } catch (error) {
     ElMessage.error(apiErrorDetail(error, '生成预览失败'))
   } finally {
@@ -972,7 +1001,11 @@ async function doApplyRename() {
     const ids = renameScopedToSelection.value
       ? (renamePreview.value.items || []).filter(i => i.changed).map(i => i.id)
       : null
-    const result = await kikoeruDbApi.renameApply(ids)
+    const result = await kikoeruDbApi.renameApply({
+      ids,
+      mode: renameMode.value,
+      regex: renameRegex.value
+    })
     ElMessage.success(`已套用 ${result.applied} 行（跳过 ${result.skipped}）`)
     renameWizardVisible.value = false
     await Promise.all([loadRows(), loadBackups()])

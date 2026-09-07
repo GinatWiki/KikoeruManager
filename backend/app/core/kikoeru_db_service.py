@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from ..config.settings import get_config
-from .kikoeru_folder_parser import parse_work_name_by_template
+from .kikoeru_folder_parser import compile_user_regex, parse_work_name_by_regex, parse_work_name_by_template
 
 logger = logging.getLogger(__name__)
 
@@ -495,16 +495,34 @@ class KikoeruDbService:
         return self._write_with_snapshot(_do)
 
     # ------------------------------------------------------------------ 功能2：套用文件命名
-    def _parse_dir_for_rename(self, dir_name: str) -> Dict[str, Any]:
-        """按用户当前重命名模板反解文件夹名（唯一可信路径）。
+    def _parse_dir_for_rename(self, dir_name: str, mode: str = "template",
+                              compiled_regex=None) -> Dict[str, Any]:
+        """按识别方式反解文件夹名。
 
-        文件夹名不符合模板结构时直接 skipped——绝不靠启发式猜标题，
-        避免把「RJ号 [社团]【副标题】正标题」里的社团名当成标题。
+        mode=template（默认）：按用户当前重命名模板结构匹配——文件夹名不符合
+        模板结构时直接 skipped，绝不靠启发式猜标题，避免把
+        「RJ号 [社团]【副标题】正标题」里的社团名当成标题。
+        mode=regex：用户自定义正则，第 1 个捕获组（$1）为标题，无捕获组用整体
+        匹配；compiled_regex 必须先经 _compile_rename_regex 编译。
         """
+        if mode == "regex":
+            return parse_work_name_by_regex(dir_name, compiled_regex)
         config = get_config()
         return parse_work_name_by_template(dir_name, config.rename.template)
 
-    def preview_rename(self, ids: Optional[List[Any]] = None) -> Dict[str, Any]:
+    @staticmethod
+    def _compile_rename_regex(regex: str):
+        """编译用户自定义正则；非法/为空时 400（预览阶段就报错，不逐行静默跳过）。"""
+        try:
+            return compile_user_regex(regex)
+        except ValueError as exc:
+            raise KikoeruDbError(str(exc), 400) from exc
+
+    def preview_rename(self, ids: Optional[List[Any]] = None, mode: str = "template",
+                       regex: str = "") -> Dict[str, Any]:
+        compiled = None
+        if str(mode or "template") == "regex":
+            compiled = self._compile_rename_regex(regex)
         conn = self._connect(readonly=True)
         try:
             if ids:
@@ -519,7 +537,7 @@ class KikoeruDbService:
 
         items = []
         for r in rows:
-            parsed = self._parse_dir_for_rename(r["dir"])
+            parsed = self._parse_dir_for_rename(r["dir"], mode, compiled)
             changed = bool(parsed["matched"] and parsed["work_name"] and parsed["work_name"] != r["title"])
             items.append({
                 "id": r["id"],
@@ -534,9 +552,10 @@ class KikoeruDbService:
         return {"total": len(items), "changed": sum(1 for i in items if i["changed"]),
                 "skipped": sum(1 for i in items if i["skipped"]), "items": items}
 
-    def apply_rename(self, ids: Optional[List[Any]] = None) -> Dict[str, Any]:
+    def apply_rename(self, ids: Optional[List[Any]] = None, mode: str = "template",
+                     regex: str = "") -> Dict[str, Any]:
         """批量套用：单事务内 UPDATE title 且 is_custom_meta=1（防 Kikoeru 重扫描覆盖）。"""
-        preview = self.preview_rename(ids)
+        preview = self.preview_rename(ids, mode=mode, regex=regex)
         targets = [i for i in preview["items"] if i["changed"]]
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:

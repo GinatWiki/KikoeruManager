@@ -202,6 +202,53 @@ def test_apply_rename_single(env):
     assert env.service.apply_rename_single(999999) is False
 
 
+# ------------------------------------------------------------ 正则识别模式（v2.6 新增）
+def test_rename_regex_mode_preview_and_apply(env):
+    """正则识别：$1（第 1 个捕获组）作为新标题，不匹配的行跳过。"""
+    regex = r"^RJ\d+\s+(.+)$"
+    preview = env.service.preview_rename(mode="regex", regex=regex)
+    items = {i["id"]: i for i in preview["items"]}
+    assert items[1]["changed"] is True
+    assert items[1]["new_title"] == "中文名A"
+    assert items[2]["changed"] is True
+    assert items[2]["new_title"] == "中文名B"
+    # 无编号目录 / 空 dir 不匹配正则 → skipped
+    assert items[3]["skipped"] is True
+    assert items[4]["skipped"] is True
+    assert preview["changed"] == 2
+
+    result = env.service.apply_rename(mode="regex", regex=regex)
+    assert result["applied"] == 2
+    row = env.service.query_table("t_work", search="中文名A")["rows"][0]
+    assert row["title"] == "中文名A"
+    assert row["is_custom_meta"] == 1
+
+
+def test_rename_regex_mode_group_semantics(env):
+    """无捕获组用整体匹配；可选组未参与匹配 → skipped。"""
+    preview = env.service.preview_rename(mode="regex", regex=r"RJ\d+")
+    items = {i["id"]: i for i in preview["items"]}
+    assert items[1]["new_title"] == "RJ123456"
+
+    preview2 = env.service.preview_rename(mode="regex", regex=r"^(RJ\d+)?\s*(.+)$")
+    items2 = {i["id"]: i for i in preview2["items"]}
+    # '普通文件夹名'：可选组 (RJ\d+)? 未参与 → 捕获为空 → skipped
+    assert items2[3]["skipped"] is True
+    assert items2[3]["reason"] == "empty_regex_group"
+
+
+def test_rename_regex_mode_invalid_pattern_rejected(env):
+    """非法/空正则 → 400（预览阶段直接报错，不逐行静默跳过）。"""
+    with pytest.raises(KikoeruDbError) as exc_info:
+        env.service.preview_rename(mode="regex", regex="(")
+    assert exc_info.value.status == 400
+    with pytest.raises(KikoeruDbError) as empty_exc:
+        env.service.preview_rename(mode="regex", regex="   ")
+    assert empty_exc.value.status == 400
+    with pytest.raises(KikoeruDbError):
+        env.service.apply_rename(mode="regex", regex="*bad")
+
+
 # ------------------------------------------------------------ 诊断
 def test_diagnose_all_ok(env):
     result = env.service.diagnose()
