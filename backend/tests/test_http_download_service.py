@@ -123,6 +123,33 @@ async def test_validate_url_blocks_dns_rebinding_to_private_ip(monkeypatch, tmp_
         await service.validate_url("https://example.test/file.zip")
 
 
+@pytest.mark.asyncio
+async def test_validate_url_blocks_e2e_encrypted_transfer_hosts(monkeypatch, tmp_path):
+    """transfer.it 等 MEGA 系端到端加密传输链接：快速失败并给出清晰指引（用户实测 SSL EOF）。"""
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+
+    for url in (
+        "https://transfer.it/t/AWUTTlp1VTKD",
+        "https://www.transfer.it/t/AWUTTlp1VTKD",
+        "https://mega.nz/file/xxxx#yyyy",
+    ):
+        with pytest.raises(HttpDownloadError, match="端到端加密"):
+            await service.validate_url(url)
+
+
+@pytest.mark.asyncio
+async def test_validate_url_allows_normal_https_host(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+
+    async def fake_resolve_host_ips(_host):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(service, "_resolve_host_ips", fake_resolve_host_ips)
+    assert await service.validate_url("https://example.com/file.zip") == "https://example.com/file.zip"
+
+
 def test_safe_subdir_rejects_parent_traversal(monkeypatch, tmp_path):
     bind_config(monkeypatch, tmp_path)
     service = HttpDownloadService()

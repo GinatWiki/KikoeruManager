@@ -39,6 +39,9 @@ from .resource_budget_service import get_resource_budget_service
 logger = logging.getLogger(__name__)
 
 _BLOCKED_HOST_HINTS = {"tranfile.com", "transfernow.net"}
+# MEGA 系端到端加密传输服务：链接页是 JS 反爬挑战，文件为加密分块、密钥经链接传递，
+# 普通 HTTP 下载器原理上无法获取（硬下载只会拿到挑战页 HTML 或被反爬层断开 TLS）
+_E2E_ENCRYPTED_TRANSFER_HOSTS = {"transfer.it", "mega.nz", "mega.io", "mega.co.nz"}
 _PIKPAK_HOST_HINTS = {"mypikpak.com", "www.mypikpak.com", "drive.mypikpak.com"}
 _GOFILE_HOST_HINTS = {"gofile.io", "www.gofile.io"}
 _TRANSFERIT_HOST_HINTS = {"transfer.it", "www.transfer.it"}
@@ -1062,7 +1065,16 @@ class HttpDownloadService:
         parsed = urlparse(url)
         cfg = self._config()
         allow_private = bool(getattr(cfg, "allow_private_network", False) if allow_private_network is None else allow_private_network)
-        host = parsed.hostname or ""
+        host = (parsed.hostname or "").lower()
+        # MEGA 系端到端加密传输链接（transfer.it / mega.nz 等）：链接页是 JS 反爬挑战，
+        # 文件为 AES 加密分块、密钥经链接/通道传递——普通 HTTP 下载器原理上无法获取，
+        # 硬下载只会得到挑战页 HTML 或被反爬层断开（表现为 SSL EOF 等神秘错误）。
+        if any(host == item or host.endswith(f".{item}") for item in _E2E_ENCRYPTED_TRANSFER_HOSTS):
+            raise HttpDownloadError(
+                f"{host} 是 MEGA 系端到端加密传输链接（如 transfer.it 传输件），需要浏览器执行 "
+                "JS 挑战并持密钥解密，HTTP 下载器无法直接获取。请用浏览器打开链接完成下载，"
+                "再把文件放入库存目录；或使用支持该类型的中转服务（如 PikPak）转存后下载。"
+            )
         if not allow_private:
             if self._is_private_ip(host):
                 raise HttpDownloadError("默认禁止下载内网 / 本机地址，请在设置页显式允许内网 URL")
