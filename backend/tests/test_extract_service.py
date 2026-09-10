@@ -2639,6 +2639,135 @@ class TestExtractService:
             extract_service.config.extract.password_list = old_password_list
 
     @pytest.mark.asyncio
+    async def test_nested_rar_unar_uses_trusted_parent_password_without_timeout(
+        self, extract_service, temp_dir,
+    ):
+        """嵌套 RAR 走 unar fast-path 时，外层已验证密码不能被 45 秒超时杀掉。
+
+        回归：unar 分支曾对所有候选一律套用 nested_attempt_timeout，导致最可能
+        正确的父密码在解压完成前被 SIGKILL（用户实测 RJ01666365 解压失败）。
+        """
+        archive_path = os.path.join(temp_dir, "RJ01666365")
+        output_path = os.path.join(temp_dir, "out")
+        os.makedirs(output_path, exist_ok=True)
+        with open(archive_path, "wb") as fp:
+            fp.write(b"Rar!\x1a\x07\x00" + (b"\0" * 64))
+        task = Task(
+            TaskType.EXTRACT,
+            os.path.join(temp_dir, "RJ01666365.rar"),
+            task_id="nested-rar-trusted-password",
+        )
+
+        old_password_list = extract_service.config.extract.password_list
+        try:
+            extract_service.config.extract.password_list = []
+            extract_service._get_password_candidates_for_archive = AsyncMock(return_value=[
+                {"password": f"vault-{index}"} for index in range(8)
+            ])
+            extract_service._list_archive_contents = AsyncMock(return_value=[
+                {"name": "inner.wav", "size": 5_375_627_698, "is_dir": False},
+            ])
+            extract_service._probe_password = AsyncMock(return_value="unknown")
+            extract_service._is_rar_archive = Mock(return_value=True)
+            extract_service._find_unar_executable = Mock(return_value="/usr/bin/unar")
+            extract_service._try_unar_extract = AsyncMock(return_value=subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=b"", stderr=b"",
+            ))
+            extract_service._fix_unar_garbled_encoding = AsyncMock()
+            extract_service._find_garbled_filename_sample = Mock(return_value=None)
+
+            success, password = await extract_service._try_extract_nested_direct(
+                archive_path,
+                output_path,
+                parent_password="0821",
+                task=task,
+            )
+
+            assert success is True
+            assert password == "0821"
+            unar_call = extract_service._try_unar_extract.await_args
+            assert unar_call.args[2] == "0821"  # 首候选 = 外层已验证密码
+            assert unar_call.kwargs["command_timeout"] is None
+            assert task.task_metadata["nested_parent_password_unlimited"] is True
+        finally:
+            extract_service.config.extract.password_list = old_password_list
+
+    @pytest.mark.asyncio
+    async def test_nested_rar_unar_fallback_timeout_falls_back_to_7zz(
+        self, extract_service, temp_dir,
+    ):
+        """后备候选 45 秒超时不再直接判死：回落 7zz，7zz 首个可信密码同样不限时。"""
+        archive_path = os.path.join(temp_dir, "RJ01666365")
+        output_path = os.path.join(temp_dir, "out")
+        os.makedirs(output_path, exist_ok=True)
+        with open(archive_path, "wb") as fp:
+            fp.write(b"Rar!\x1a\x07\x00" + (b"\0" * 64))
+        task = Task(
+            TaskType.EXTRACT,
+            os.path.join(temp_dir, "RJ01666365.rar"),
+            task_id="nested-rar-fallback-timeout",
+        )
+
+        call_count = {"n": 0}
+
+        async def fake_unar_extract(
+            archive_path, output_path, password,
+            task=None, encoding=None, command_timeout=None,
+        ):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # 可信父密码：unar 判定失败（内层密码与外层不同）
+                return subprocess.CompletedProcess(
+                    args=["unar"], returncode=1,
+                    stdout=b"", stderr=b"Failed! (Wrong password?)",
+                )
+            # 后备候选：45 秒超时被杀
+            return subprocess.CompletedProcess(
+                args=["unar"], returncode=-9, stdout=b"", stderr=b"",
+            )
+
+        old_password_list = extract_service.config.extract.password_list
+        try:
+            extract_service.config.extract.password_list = []
+            extract_service._get_password_candidates_for_archive = AsyncMock(return_value=[
+                {"password": f"vault-{index}"} for index in range(8)
+            ])
+            extract_service._list_archive_contents = AsyncMock(return_value=[
+                {"name": "inner.wav", "size": 5_375_627_698, "is_dir": False},
+            ])
+            extract_service._probe_password = AsyncMock(return_value="unknown")
+            extract_service._is_rar_archive = Mock(return_value=True)
+            extract_service._find_unar_executable = Mock(return_value="/usr/bin/unar")
+            extract_service._try_unar_extract = fake_unar_extract
+            extract_service._run_7z_command = AsyncMock(return_value=subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=b"", stderr=b"",
+            ))
+
+            with patch.object(
+                extract_service,
+                "_reject_if_garbled_after_extract",
+                new=AsyncMock(return_value=False),
+            ):
+                success, password = await extract_service._try_extract_nested_direct(
+                    archive_path,
+                    output_path,
+                    parent_password="0821",
+                    task=task,
+                )
+
+            assert success is True
+            assert password == "0821"
+            assert extract_service._run_7z_command.await_count >= 1
+            first_7z_call = extract_service._run_7z_command.await_args_list[0]
+            assert "-p0821" in first_7z_call.args[0]
+            assert first_7z_call.kwargs["command_timeout"] is None
+            assert task.task_metadata["nested_unar_fallback_timeout"] is True
+            # 仅后备候选超时不算"探测超时放弃"
+            assert task.task_metadata.get("nested_password_probe_timeout") is not True
+        finally:
+            extract_service.config.extract.password_list = old_password_list
+
+    @pytest.mark.asyncio
     async def test_encrypted_opaque_archive_rejects_without_full_extract_when_all_passwords_fail(
         self, extract_service, temp_dir,
     ):

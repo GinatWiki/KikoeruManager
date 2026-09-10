@@ -4118,7 +4118,8 @@ class ExtractService:
         if has_trusted_parent_password:
             password_list = [trusted_parent_password, *fallback_password_list]
             logger.info(
-                "无扩展名嵌套压缩包将先使用外层已验证密码进行不限时完整解压: %s",
+                "无扩展名嵌套压缩包先用外层已验证密码不限时解压（其余候选仍受 %.0fs 限制）: %s",
+                self.NESTED_PASSWORD_ATTEMPT_TIMEOUT_SECONDS,
                 archive_name,
             )
         else:
@@ -4165,16 +4166,29 @@ class ExtractService:
             unar_unsupported = False
             unar_disk_full = False
             unar_timed_out = False
+            unar_trusted_timed_out = False
+            unar_fallback_timed_out = False
             for index, password in enumerate(password_list):
                 if index > 0:
                     await asyncio.to_thread(clean_output)
+                # 外层已验证密码作为首候选时绝不限时：它来自上层已成功解开的压缩包，
+                # 套 45s 超时会在真实解压完成前把正确密码杀掉（与下方 7zz 循环一致）。
+                is_trusted_parent_password_attempt = (
+                    has_trusted_parent_password
+                    and index == 0
+                    and password == trusted_parent_password
+                )
                 try:
                     result = await self._try_unar_extract(
                         archive_path,
                         output_path,
                         password,
                         task=task,
-                        command_timeout=nested_attempt_timeout,
+                        command_timeout=(
+                            None
+                            if is_trusted_parent_password_attempt
+                            else nested_attempt_timeout
+                        ),
                     )
                     if result.returncode == 0:
                         # 乱码修复：Shift-JIS/GBK RAR 文件名自动编码探测失败时重试
@@ -4202,14 +4216,35 @@ class ExtractService:
                         break
                     if result.returncode == -9:
                         unar_timed_out = True
+                        # 只有"被 45s 掐断的后备候选"才值得让 7zz 用不限时再试一轮；
+                        # 不限时仍被终止（可信父密码 / 小条目已校验密码）说明是任务
+                        # 取消或全局门禁，7zz 也只会同样被终止，维持原放弃行为。
+                        attempt_was_time_limited = (
+                            not is_trusted_parent_password_attempt
+                            and nested_attempt_timeout is not None
+                        )
+                        if attempt_was_time_limited:
+                            unar_fallback_timed_out = True
+                        else:
+                            unar_trusted_timed_out = True
                         if task is not None:
-                            self._set_extract_meta(
-                                task,
-                                nested_password_probe_timeout=True,
-                                nested_password_probe_reason="无扩展名嵌套 RAR 单个候选探测超时",
-                            )
+                            if unar_trusted_timed_out:
+                                # 只有真正放弃时才置"探测超时"，避免 7zz 兜底成功后前端仍报超时
+                                self._set_extract_meta(
+                                    task,
+                                    nested_password_probe_timeout=True,
+                                    nested_unar_trusted_timeout=True,
+                                    nested_password_probe_reason="无扩展名嵌套 RAR 不限时解压被终止",
+                                )
+                            else:
+                                self._set_extract_meta(
+                                    task,
+                                    nested_unar_fallback_timeout=True,
+                                    nested_password_probe_reason="无扩展名嵌套 RAR 后备候选探测超时",
+                                )
                         logger.warning(
-                            "无扩展名嵌套 RAR 单个候选探测超时，停止继续穷举: %s",
+                            "无扩展名嵌套 RAR 单个候选探测超时（可信父密码=%s），停止继续穷举: %s",
+                            unar_trusted_timed_out,
                             archive_name,
                         )
                         break
@@ -4235,16 +4270,16 @@ class ExtractService:
                 logger.error("嵌套 RAR unar 解压因磁盘空间不足终止: %s", archive_path)
                 return False, None
             if is_opaque_nested_archive and not unar_unsupported:
-                if unar_timed_out:
-                    # 已发生单候选超时，7zz 重复穷举只会再次超时，维持原行为。
+                if unar_trusted_timed_out:
+                    # 不限时的可信父密码都被终止，7zz 重复穷举只会同样结束，维持放弃
                     if task is not None:
                         self._set_extract_meta(
                             task,
                             nested_password_probe_failed=True,
-                            nested_password_probe_reason="无扩展名嵌套 RAR 未在受限候选中验证出可用密码",
+                            nested_password_probe_reason="无扩展名嵌套 RAR 可信父密码解压超时",
                         )
                     logger.warning(
-                        "无扩展名嵌套 RAR unar 候选探测超时，不再用 7zz 重复穷举: %s",
+                        "无扩展名嵌套 RAR 可信父密码解压超时，不再用 7zz 重复穷举: %s",
                         archive_name,
                     )
                     return False, None
@@ -4252,10 +4287,15 @@ class ExtractService:
                     self._set_extract_meta(
                         task,
                         nested_password_probe_failed=True,
-                        nested_password_probe_reason="无扩展名嵌套 RAR unar 全部候选失败，回退 7zz 完整解压",
+                        nested_password_probe_reason=(
+                            "无扩展名嵌套 RAR 后备候选探测超时，回退 7zz 完整解压"
+                            if unar_fallback_timed_out
+                            else "无扩展名嵌套 RAR unar 全部候选失败，回退 7zz 完整解压"
+                        ),
                     )
                 logger.warning(
-                    "无扩展名嵌套 RAR unar 全部候选失败，回退 7zz 完整解压路径: %s",
+                    "无扩展名嵌套 RAR %s，回退 7zz 完整解压路径: %s",
+                    "后备候选探测超时" if unar_fallback_timed_out else "unar 全部候选失败",
                     archive_name,
                 )
                 # 不 return，落入下方 7zz 循环（password_list 已含空密码与全部候选）
