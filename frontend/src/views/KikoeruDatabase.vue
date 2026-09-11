@@ -130,6 +130,7 @@
       </div>
 
       <el-table
+        ref="rowsTableRef"
         :data="rows"
         v-loading="loadingRows"
         size="small"
@@ -137,6 +138,7 @@
         stripe
         class="w-full"
         @selection-change="onSelectionChange"
+        @sort-change="onSortChange"
       >
         <el-table-column v-if="currentMode === 'editable'" type="selection" width="42" />
         <el-table-column
@@ -146,6 +148,8 @@
           :label="col.name"
           :min-width="columnWidth(col)"
           show-overflow-tooltip
+          sortable="custom"
+          :sort-orders="['ascending', 'descending']"
         >
           <template #default="{ row }">
             <span class="text-xs">{{ renderCell(row[col.name]) }}</span>
@@ -531,7 +535,7 @@
 </template>
 
 <script setup>
-import { computed, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   CheckCircle2,
@@ -931,7 +935,7 @@ async function loadRows() {
       page: page.value,
       size: pageSize.value,
       search: searchText.value,
-      sort: ''
+      sort: listSort.value.field ? `${listSort.value.field}:${listSort.value.dir}` : ''
     })
     columns.value = data.columns || []
     rows.value = data.rows || []
@@ -941,6 +945,25 @@ async function loadRows() {
   } finally {
     loadingRows.value = false
   }
+}
+
+// 列头排序（服务端排序：分页在服务端，必须回服务端排）
+const rowsTableRef = ref(null)
+const listSort = ref({ field: '', dir: '' })
+
+function onSortChange({ prop, order }) {
+  listSort.value = order
+    ? { field: prop, dir: order === 'ascending' ? 'asc' : 'desc' }
+    : { field: '', dir: '' }
+  page.value = 1
+  loadRows()
+}
+
+function resetTableSort() {
+  listSort.value = { field: '', dir: '' }
+  nextTick(() => {
+    rowsTableRef.value?.clearSort?.()
+  })
 }
 
 async function loadBackups() {
@@ -1195,6 +1218,7 @@ watch(activeTable, () => {
   page.value = 1
   searchText.value = ''
   selectedRows.value = []
+  resetTableSort()
   loadRows()
 })
 
