@@ -96,7 +96,10 @@ class KikoeruScanListener:
     # ------------------------------------------------------------ 主循环
     async def _run(self):
         backoff = 5
-        last_poll = 0.0
+        # 负偏移：启动后第一次循环立即执行增量处理（"重连/恢复后自动补处理"
+        # 的设计意图），否则要等 poll_interval（默认 30 分钟）才第一次跑，
+        # 用户扫描后立刻看会以为功能没生效
+        last_poll = -10**9
         while True:
             if not self._should_run():
                 self._connected = False
@@ -248,6 +251,11 @@ class KikoeruScanListener:
 
             if not rows:
                 self._mark_scan_finished(trigger)
+                # 空结果也要留日志：让用户能区分「功能没跑」和「没有新内容」
+                logger.info(
+                    "[KIKOERU-SCAN] 增量处理完成（%s）: 新增=0 checkpoint=%s（无新内容）",
+                    trigger, checkpoint,
+                )
                 return {"processed": 0}
 
             applied, failed = 0, 0

@@ -42,5 +42,9 @@ redis>=5.0.0
 # Kikoeru 数据库管理（v2.6 功能3）：监听 Kikoeru 管理页扫描事件。
 # 新版 Kikoeru 前端捆绑 socket.io-client v2（EIO=3 协议），
 # python-socketio 5.x 只说 EIO=4，必须钉在 4.x / engineio 3.x。
+# websocket-client 是 socketio 客户端 websocket 传输的同步依赖：
+# 缺失时降级 polling，会被 Kikoeru 立即断开（现场日志
+# "websocket-client package not installed"），SCAN_FINISHED 永远收不到。
 python-socketio>=4.6.1,<5
 python-engineio>=3.14,<4
+websocket-client>=1.6.0
