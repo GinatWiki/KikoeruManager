@@ -26,10 +26,6 @@
           </template>
           {{ healthActionLabel }}
         </StatefulButton>
-        <button v-if="hasTasks" class="asmr-mini-btn is-primary" type="button" @click="$emit('open-workbench')">
-          <Download :size="12" :stroke-width="2.4" />
-          下载工作台
-        </button>
       </div>
     </header>
 
@@ -405,11 +401,10 @@ function getDownloadPreviewCacheSessionId() {
 
 const props = defineProps({
   provider: { type: String, default: 'http' },
-  hasTasks: { type: Boolean, default: false },
   draft: { type: Object, default: () => ({}) }
 })
 
-const emit = defineEmits(['started', 'open-workbench', 'update:draft'])
+const emit = defineEmits(['started', 'update:draft'])
 
 const initialDraft = normalizeDownloadPanelDraft(props.draft)
 const urlText = ref(initialDraft.urlText)

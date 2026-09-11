@@ -100,11 +100,9 @@
         :selected-set="selectedPlanSet"
         :planning="enhancedPlanning"
         :starting="enhancedStarting"
-        :has-workbench-tasks="enhancedDownloadWorkbenchTaskIds.length > 0"
         :default-filter-enabled="enhancedDefaultFilterEnabled"
         :get-resource-type-label="getResourceTypeLabel"
         @query="buildEnhancedPlans"
-        @open-workbench="enhancedDownloadWorkbenchVisible = true"
         @select-all="selectAllPlans"
         @clear-selection="clearPlanSelection"
         @download-selected="openEnhancedPreview"
@@ -115,25 +113,21 @@
       <HttpDownloadPanel
         v-else-if="activeWorkspaceTab === 'http'"
         v-model:draft="httpDownloadDraft"
-        :has-tasks="httpDownloadWorkbenchTaskIds.length > 0"
         @started="handleHttpDownloadStarted"
-        @open-workbench="resumeHttpDownloadWorkbench"
       />
 
       <BaiduNetdiskPanel
         v-else-if="activeWorkspaceTab === 'baidu'"
         v-model:draft="baiduNetdiskDraft"
-        :has-tasks="baiduNetdiskWorkbenchTaskIds.length > 0"
         @started="handleBaiduNetdiskStarted"
-        @open-workbench="resumeBaiduNetdiskWorkbench"
       />
 
       <AsmrSubtitleScanPanel v-else v-model="subtitleFolder" />
     </Transition>
 
-    <!-- 内嵌下载工作台：跟随当前工作台 tab 显示在面板下方，避免弹窗被误关闭后无法操作 -->
+    <!-- 内嵌下载工作台：常驻显示在当前工作台 tab 面板下方，任何情况下都可见 -->
     <div
-      v-if="activeWorkspaceTab === 'enhanced' && enhancedDownloadWorkbenchVisible"
+      v-if="activeWorkspaceTab === 'enhanced'"
       ref="enhancedWorkbenchAnchorRef"
       class="asmr-embedded-workbench"
     >
@@ -160,7 +154,7 @@
     </div>
 
     <div
-      v-if="activeWorkspaceTab === 'http' && httpDownloadWorkbenchVisible"
+      v-if="activeWorkspaceTab === 'http'"
       ref="httpWorkbenchAnchorRef"
       class="asmr-embedded-workbench"
     >
@@ -189,7 +183,7 @@
     </div>
 
     <div
-      v-if="activeWorkspaceTab === 'baidu' && baiduNetdiskWorkbenchVisible"
+      v-if="activeWorkspaceTab === 'baidu'"
       ref="baiduWorkbenchAnchorRef"
       class="asmr-embedded-workbench"
     >
@@ -1667,7 +1661,6 @@ function stopEnhancedDownloadWorkbenchPolling() {
 }
 
 function startEnhancedDownloadWorkbenchPolling() {
-  if (!enhancedDownloadWorkbenchTaskIds.value.length) return
   stopEnhancedDownloadWorkbenchPolling()
   enhancedDownloadWorkbenchTimer = window.setTimeout(() => {
     refreshEnhancedDownloadWorkbench()
@@ -1677,22 +1670,22 @@ function startEnhancedDownloadWorkbenchPolling() {
 async function refreshEnhancedDownloadWorkbench(options = {}) {
   const silent = Boolean(options?.silent)
   const requestSeq = enhancedDownloadWorkbenchRequestGuard.begin()
-  if (!enhancedDownloadWorkbenchTaskIds.value.length) {
-    enhancedDownloadWorkbenchTasks.value = []
-    stopEnhancedDownloadWorkbenchPolling()
-    return
-  }
   if (!silent) enhancedDownloadWorkbenchRefreshing.value = true
   try {
     const result = await asmrSyncApi.status([], { compact: true })
     if (!enhancedDownloadWorkbenchRequestGuard.isLatest(requestSeq)) return
     const allTasks = Array.isArray(result.tasks) ? result.tasks : []
-    enhancedDownloadWorkbenchTasks.value = mergeWorkbenchTaskRows(enhancedDownloadWorkbenchTasks.value, selectTrackedDownloadTasks(
-      enhancedDownloadWorkbenchTaskIds.value,
-      allTasks,
-    ))
+    if (enhancedDownloadWorkbenchTaskIds.value.length) {
+      enhancedDownloadWorkbenchTasks.value = mergeWorkbenchTaskRows(enhancedDownloadWorkbenchTasks.value, selectTrackedDownloadTasks(
+        enhancedDownloadWorkbenchTaskIds.value,
+        allTasks,
+      ))
+    } else {
+      // 常驻工作台：无追踪任务时回退显示全部任务，避免"找不到任务栏"
+      enhancedDownloadWorkbenchTasks.value = allTasks
+    }
     const stillActive = enhancedDownloadWorkbenchTasks.value.some(t => ['pending', 'processing', 'paused', 'waiting_retry'].includes(String(t.status || '')))
-    if (stillActive || enhancedDownloadWorkbenchVisible.value || enhancedDownloadWorkbenchBackgroundActive.value) startEnhancedDownloadWorkbenchPolling()
+    if (stillActive) startEnhancedDownloadWorkbenchPolling()
     else stopEnhancedDownloadWorkbenchPolling()
   } catch (error) {
     if (!enhancedDownloadWorkbenchRequestGuard.isLatest(requestSeq)) return
@@ -1821,7 +1814,6 @@ function stopHttpDownloadWorkbenchPolling() {
 }
 
 function startHttpDownloadWorkbenchPolling() {
-  if (!httpDownloadWorkbenchTaskIds.value.length) return
   stopHttpDownloadWorkbenchPolling()
   httpDownloadWorkbenchTimer = window.setTimeout(() => {
     refreshHttpDownloadWorkbench()
@@ -1831,22 +1823,22 @@ function startHttpDownloadWorkbenchPolling() {
 async function refreshHttpDownloadWorkbench(options = {}) {
   const silent = Boolean(options?.silent)
   const requestSeq = httpDownloadWorkbenchRequestGuard.begin()
-  if (!httpDownloadWorkbenchTaskIds.value.length) {
-    httpDownloadWorkbenchTasks.value = []
-    stopHttpDownloadWorkbenchPolling()
-    return
-  }
   if (!silent) httpDownloadWorkbenchRefreshing.value = true
   try {
     const result = await httpDownloadApi.status({ compact: true })
     if (!httpDownloadWorkbenchRequestGuard.isLatest(requestSeq)) return
     const allTasks = Array.isArray(result.tasks) ? result.tasks : []
-    httpDownloadWorkbenchTasks.value = mergeWorkbenchTaskRows(httpDownloadWorkbenchTasks.value, selectTrackedDownloadTasks(
-      httpDownloadWorkbenchTaskIds.value,
-      allTasks,
-    ))
+    if (httpDownloadWorkbenchTaskIds.value.length) {
+      httpDownloadWorkbenchTasks.value = mergeWorkbenchTaskRows(httpDownloadWorkbenchTasks.value, selectTrackedDownloadTasks(
+        httpDownloadWorkbenchTaskIds.value,
+        allTasks,
+      ))
+    } else {
+      // 常驻工作台：无追踪任务时回退显示全部任务，避免"找不到任务栏"
+      httpDownloadWorkbenchTasks.value = allTasks
+    }
     const stillActive = httpDownloadWorkbenchTasks.value.some(t => ['pending', 'processing', 'paused', 'waiting_retry'].includes(String(t.status || '')))
-    if (stillActive || httpDownloadWorkbenchVisible.value || httpDownloadWorkbenchBackgroundActive.value) startHttpDownloadWorkbenchPolling()
+    if (stillActive) startHttpDownloadWorkbenchPolling()
     else stopHttpDownloadWorkbenchPolling()
   } catch (error) {
     if (!httpDownloadWorkbenchRequestGuard.isLatest(requestSeq)) return
@@ -2033,7 +2025,6 @@ function stopBaiduNetdiskWorkbenchPolling() {
 }
 
 function startBaiduNetdiskWorkbenchPolling() {
-  if (!baiduNetdiskWorkbenchTaskIds.value.length) return
   stopBaiduNetdiskWorkbenchPolling()
   baiduNetdiskWorkbenchTimer = window.setTimeout(() => {
     refreshBaiduNetdiskWorkbench()
@@ -2043,22 +2034,22 @@ function startBaiduNetdiskWorkbenchPolling() {
 async function refreshBaiduNetdiskWorkbench(options = {}) {
   const silent = Boolean(options?.silent)
   const requestSeq = baiduNetdiskWorkbenchRequestGuard.begin()
-  if (!baiduNetdiskWorkbenchTaskIds.value.length) {
-    baiduNetdiskWorkbenchTasks.value = []
-    stopBaiduNetdiskWorkbenchPolling()
-    return
-  }
   if (!silent) baiduNetdiskWorkbenchRefreshing.value = true
   try {
     const result = await baiduNetdiskApi.status({ compact: true })
     if (!baiduNetdiskWorkbenchRequestGuard.isLatest(requestSeq)) return
     const allTasks = Array.isArray(result.tasks) ? result.tasks : []
-    baiduNetdiskWorkbenchTasks.value = mergeWorkbenchTaskRows(baiduNetdiskWorkbenchTasks.value, selectTrackedDownloadTasks(
-      baiduNetdiskWorkbenchTaskIds.value,
-      allTasks,
-    ))
+    if (baiduNetdiskWorkbenchTaskIds.value.length) {
+      baiduNetdiskWorkbenchTasks.value = mergeWorkbenchTaskRows(baiduNetdiskWorkbenchTasks.value, selectTrackedDownloadTasks(
+        baiduNetdiskWorkbenchTaskIds.value,
+        allTasks,
+      ))
+    } else {
+      // 常驻工作台：无追踪任务时回退显示全部任务，避免"找不到任务栏"
+      baiduNetdiskWorkbenchTasks.value = allTasks
+    }
     const stillActive = baiduNetdiskWorkbenchTasks.value.some(t => ['pending', 'processing', 'paused', 'waiting_retry'].includes(String(t.status || '')))
-    if (stillActive || baiduNetdiskWorkbenchVisible.value || baiduNetdiskWorkbenchBackgroundActive.value) startBaiduNetdiskWorkbenchPolling()
+    if (stillActive) startBaiduNetdiskWorkbenchPolling()
     else stopBaiduNetdiskWorkbenchPolling()
   } catch (error) {
     if (!baiduNetdiskWorkbenchRequestGuard.isLatest(requestSeq)) return
@@ -2895,9 +2886,10 @@ async function initializeASMRSyncPage () {
   await loadSavedFolder()
   await loadWaitingRetryTasks()
   await refreshStatus()
-  if (enhancedDownloadWorkbenchTaskIds.value.length) await refreshEnhancedDownloadWorkbench()
-  if (httpDownloadWorkbenchTaskIds.value.length) await refreshHttpDownloadWorkbench()
-  if (baiduNetdiskWorkbenchTaskIds.value.length) await refreshBaiduNetdiskWorkbench()
+  // 常驻工作台：无论是否有追踪任务都拉一次数据（无追踪任务时回退显示全部任务）
+  await refreshEnhancedDownloadWorkbench({ silent: true })
+  await refreshHttpDownloadWorkbench({ silent: true })
+  await refreshBaiduNetdiskWorkbench({ silent: true })
   activeWorkspaceTab.value = normalizeWorkspaceTab(route.query?.tab)
   if (subtitleFolder.value) {
     await scanFolder(true)

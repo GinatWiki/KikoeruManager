@@ -47,7 +47,8 @@
               >
                 <RefreshCw :size="18" />
               </button>
-              <button type="button" class="v1-icon-button" :title="embedded ? '收起面板' : '隐藏到后台'" @click.stop="emit('background')">
+              <!-- 内嵌常驻模式下收起无意义，仅弹窗模式提供「隐藏到后台」 -->
+              <button v-if="!embedded" type="button" class="v1-icon-button" :title="embedded ? '收起面板' : '隐藏到后台'" @click.stop="emit('background')">
                 <Minimize2 :size="18" />
               </button>
               <button v-if="!embedded" type="button" class="v1-icon-button" title="关闭" @click.stop="emit('close')">

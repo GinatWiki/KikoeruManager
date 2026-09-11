@@ -18,15 +18,6 @@
           <Search :size="12" :stroke-width="2.4" />
           {{ planning ? '查询中...' : '查询 RJ' }}
         </button>
-        <button
-          v-if="hasWorkbenchTasks"
-          class="asmr-mini-btn"
-          type="button"
-          @click="$emit('open-workbench')"
-        >
-          <DownloadIcon :size="12" :stroke-width="2.4" />
-          下载工作台
-        </button>
       </div>
     </header>
     <div class="asmr-card-body">
@@ -136,7 +127,6 @@ const props = defineProps({
   selectedSet: { type: Object, required: true },
   planning: { type: Boolean, default: false },
   starting: { type: Boolean, default: false },
-  hasWorkbenchTasks: { type: Boolean, default: false },
   defaultFilterEnabled: { type: Boolean, default: false },
   getResourceTypeLabel: { type: Function, required: true }
 })
@@ -144,7 +134,6 @@ const props = defineProps({
 defineEmits([
   'update:input',
   'query',
-  'open-workbench',
   'select-all',
   'clear-selection',
   'download-selected',
