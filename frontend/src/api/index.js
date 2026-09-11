@@ -1442,9 +1442,9 @@ export const libraryApi = {
     return response.data
   },
 
-  flattenSingleChains: async (libraryId, path, operations = null) => {
+  flattenSingleChains: async (libraryId, path, cleanup = null) => {
     const body = { library_id: libraryId, path }
-    if (Array.isArray(operations)) body.operations = operations
+    if (cleanup && typeof cleanup === 'object') body.cleanup = cleanup
     const response = await apiClient.post('/library/browser/flatten-single-chains', body)
     return response.data
   },

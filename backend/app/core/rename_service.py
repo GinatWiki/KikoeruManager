@@ -294,6 +294,115 @@ class RenameService:
 
         return str(root_path)
 
+    def plan_directory_cleanup(self, path: str, max_depth: Optional[int] = None) -> dict:
+        """
+        目录整理干跑（过滤删除后的收尾整理）：
+        1. 递归收集「空目录」（无文件且所有子目录同样为空——典型的被过滤后残留壳）；
+        2. 在模拟删除这些空目录之后，扫描剩余结构中的「单子目录链」合并变换。
+
+        返回 {empty_dirs: [相对路径，深层在前], operations: [单链合并变换]}。
+        """
+        root_path = Path(path)
+        depth_limit = int(max_depth if max_depth is not None else self.config.rename.flatten_depth)
+        empty_relative: list[str] = []
+
+        def walk_empty(current: Path, rel: str) -> bool:
+            """后序遍历：目录是否可整删（无文件且所有子目录均可整删）。"""
+            try:
+                entries = list(current.iterdir())
+            except OSError:
+                return False
+            if not entries:
+                if rel:
+                    empty_relative.append(rel)
+                return True
+            deletable = True
+            for entry in entries:
+                child_rel = f"{rel}/{entry.name}" if rel else entry.name
+                if entry.is_dir():
+                    if not walk_empty(entry, child_rel):
+                        deletable = False
+                else:
+                    deletable = False
+            if deletable and rel:
+                empty_relative.append(rel)
+            return deletable
+
+        walk_empty(root_path, "")
+        empty_set = set(empty_relative)
+
+        # 模拟空目录已删除，再扫描剩余结构的单链。
+        # 只压「因删除而收敛」的链：parent 的子项中存在将被删除的空目录
+        # （说明是过滤删除后只剩一个子目录）才产生合并变换；
+        # 原生单链（如 04_CG集/无台词 这类有意义命名的分类目录）保持原样。
+        operations: list[dict[str, str]] = []
+
+        def scan(current: Path, depth: int, parent_rel: str) -> None:
+            if depth >= depth_limit or not current.is_dir():
+                return
+            try:
+                raw_entries = list(current.iterdir())
+            except OSError:
+                return
+
+            def rel_of(entry: Path) -> str:
+                return f"{parent_rel}/{entry.name}" if parent_rel else entry.name
+
+            kept_entries = [entry for entry in raw_entries if rel_of(entry) not in empty_set]
+            deleted_sibling_exists = len(kept_entries) != len(raw_entries)
+            kept_subdirs = [entry for entry in kept_entries if entry.is_dir()]
+            if len(kept_entries) == 1 and len(kept_subdirs) == 1:
+                subfolder = kept_subdirs[0]
+                if deleted_sibling_exists:
+                    operations.append({
+                        "parent_relative_path": parent_rel,
+                        "removed_segment": subfolder.name,
+                    })
+                next_rel = rel_of(subfolder)
+                scan(subfolder, depth + 1, next_rel)
+                return
+            for subfolder in kept_subdirs:
+                scan(subfolder, depth + 1, rel_of(subfolder))
+
+        scan(root_path, 0, "")
+        empty_relative.sort(key=lambda rel: -rel.count("/"))
+        return {"empty_dirs": empty_relative, "operations": operations}
+
+    def apply_directory_cleanup(self, path: str, empty_dirs: list[str], operations: list[dict[str, str]]) -> dict:
+        """
+        执行目录整理（用户在预审弹窗勾选的子集）：
+        1. 删除空目录（深层优先；rmdir 只能删空目录，非空/缺失自动跳过）；
+        2. 执行单链合并（深层优先、同名冲突跳过，复用 apply_single_chain_flattens）；
+        3. remove_empty_folders 兜底清理。
+        """
+        root_path = Path(path)
+        removed_dirs: list[str] = []
+        skipped_dirs: list[dict[str, str]] = []
+        for rel in sorted(empty_dirs or [], key=lambda item: -str(item).count("/")):
+            rel_clean = str(rel or "").strip("/")
+            if not rel_clean:
+                continue
+            target = root_path.joinpath(*rel_clean.split("/"))
+            if not target.is_dir():
+                skipped_dirs.append({"path": rel_clean, "reason": "missing"})
+                continue
+            try:
+                target.rmdir()
+                removed_dirs.append(rel_clean)
+            except OSError as exc:
+                skipped_dirs.append({"path": rel_clean, "reason": str(exc)})
+        result = self.apply_single_chain_flattens(str(root_path), operations or [])
+        logger.info(
+            "目录整理完成: 删除空目录 %d 个（跳过 %d），合并单链 %d 条",
+            len(removed_dirs), len(skipped_dirs), result.get("applied_count", 0),
+        )
+        return {
+            "removed_empty_dirs": removed_dirs,
+            "removed_empty_dir_count": len(removed_dirs),
+            "skipped_empty_dirs": skipped_dirs,
+            **result,
+        }
+
     def plan_single_chain_flattens(self, path: str, max_depth: Optional[int] = None) -> list[dict[str, str]]:
         """
         干跑扫描：返回目标目录下所有「单子目录链」的合并变换清单（不移动任何文件）。

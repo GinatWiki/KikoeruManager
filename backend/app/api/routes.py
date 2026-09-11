@@ -11712,24 +11712,35 @@ async def flatten_library_browser_single_chains(request: Request):
         from ..core.rename_service import RenameService
 
         service = RenameService()
-        raw_operations = data.get("operations")
-        if isinstance(raw_operations, list) and raw_operations:
+        cleanup = data.get("cleanup") if isinstance(data.get("cleanup"), dict) else None
+        if cleanup:
+            # 执行：用户勾选的空目录删除 + 单链合并子集
+            empty_dirs = [
+                str(item or "").strip("/")
+                for item in (cleanup.get("empty_dirs") or [])
+                if str(item or "").strip("/")
+            ]
             operations = [
                 {
                     "parent_relative_path": str(op.get("parent_relative_path") or "").strip("/"),
                     "removed_segment": str(op.get("removed_segment") or "").strip("/"),
                 }
-                for op in raw_operations
+                for op in (cleanup.get("operations") or [])
                 if isinstance(op, dict) and str(op.get("removed_segment") or "").strip("/")
             ]
-            if not operations:
-                raise HTTPException(status_code=400, detail="没有有效的扁平化变换")
-            result = service.apply_single_chain_flattens(path, operations)
-            logger.info(f"过滤删除后扁平化执行完成: {path}（合并 {result['applied_count']} 条单链）")
+            result = service.apply_directory_cleanup(path, empty_dirs, operations)
+            logger.info(
+                f"过滤删除后目录整理执行完成: {path}（删空目录 {result['removed_empty_dir_count']} 个、合并单链 {result['applied_count']} 条）"
+            )
             return {"mode": "apply", **result}
 
-        operations = service.plan_single_chain_flattens(path)
-        return {"mode": "preview", "operations": operations, "count": len(operations), "path": path}
+        preview = service.plan_directory_cleanup(path)
+        return {
+            "mode": "preview",
+            "empty_dirs": preview.get("empty_dirs") or [],
+            "operations": preview.get("operations") or [],
+            "path": path,
+        }
     except HTTPException:
         raise
     except Exception as e:

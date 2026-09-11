@@ -1799,7 +1799,7 @@
 
     <el-dialog
       v-model="flattenPreviewVisible"
-      title="文件夹扁平化预览"
+      title="目录整理预览"
       width="680px"
       append-to-body
       :close-on-click-modal="!flattenPreviewApplying"
@@ -1809,35 +1809,61 @@
         :closable="false"
         show-icon
         class="mb-3"
-        title="以下单链目录（每层只有一个子文件夹）将被合并提升。取消勾选可保留不想动的层级；被过滤删除的空目录已在确认删除时自动清理。"
+        title="整理两部分内容：①过滤删除后残留的空目录整链删除；②删除后只剩一个子目录的「收敛单链」合并提升。取消勾选可保留对应层级。"
       />
       <div v-loading="flattenPreviewApplying" class="flatten-preview-list">
-        <label
-          v-for="(op, index) in flattenPreviewOperations"
-          :key="`${op.parent_relative_path || '@root'}::${op.removed_segment}`"
-          class="flatten-preview-row"
+        <template v-if="flattenPreviewEmptyDirs.length">
+          <div class="flatten-preview-section-title">
+            将删除的空目录（已选 {{ flattenPreviewSelectedEmptyDirs.length }} / {{ flattenPreviewEmptyDirs.length }}）
+          </div>
+          <label
+            v-for="dir in flattenPreviewEmptyDirs"
+            :key="dir"
+            class="flatten-preview-row"
+          >
+            <input
+              type="checkbox"
+              class="flatten-preview-checkbox"
+              :checked="flattenPreviewSelectedEmptyDirs.includes(dir)"
+              @change="toggleFlattenPreviewDir(dir, $event.target.checked)"
+            />
+            <span class="flatten-preview-label">删除空目录「{{ dir }}」</span>
+          </label>
+        </template>
+        <template v-if="flattenPreviewOperations.length">
+          <div class="flatten-preview-section-title">
+            将合并的单链（已选 {{ flattenPreviewSelectedOps.length }} / {{ flattenPreviewOperations.length }}）
+          </div>
+          <label
+            v-for="(op, index) in flattenPreviewOperations"
+            :key="`${op.parent_relative_path || '@root'}::${op.removed_segment}`"
+            class="flatten-preview-row"
+          >
+            <input
+              type="checkbox"
+              class="flatten-preview-checkbox"
+              :checked="flattenPreviewSelectedOps.includes(index)"
+              @change="toggleFlattenPreviewOp(index, $event.target.checked)"
+            />
+            <span class="flatten-preview-label">{{ flattenOpLabel(op) }}</span>
+          </label>
+        </template>
+        <div
+          v-if="!flattenPreviewEmptyDirs.length && !flattenPreviewOperations.length"
+          class="text-sm text-slate-400 py-4 text-center"
         >
-          <input
-            type="checkbox"
-            class="flatten-preview-checkbox"
-            :checked="flattenPreviewSelected.includes(index)"
-            @change="toggleFlattenPreviewRow(index, $event.target.checked)"
-          />
-          <span class="flatten-preview-label">{{ flattenOpLabel(op) }}</span>
-        </label>
-        <div v-if="!flattenPreviewOperations.length" class="text-sm text-slate-400 py-4 text-center">
-          没有可扁平化的单链结构
+          没有需要整理的空目录或单链结构
         </div>
       </div>
       <template #footer>
         <el-button :disabled="flattenPreviewApplying" @click="flattenPreviewVisible = false">取消</el-button>
         <el-button
           type="primary"
-          :disabled="flattenPreviewApplying || flattenPreviewSelected.length === 0"
+          :disabled="flattenPreviewApplying || (flattenPreviewSelectedEmptyDirs.length === 0 && flattenPreviewSelectedOps.length === 0)"
           :loading="flattenPreviewApplying"
           @click="confirmFlattenPreview"
         >
-          扁平化选中 ({{ flattenPreviewSelected.length }})
+          整理选中（{{ flattenPreviewSelectedEmptyDirs.length + flattenPreviewSelectedOps.length }} 项）
         </el-button>
       </template>
     </el-dialog>
@@ -5912,11 +5938,13 @@ onDeactivated(() => {
 // （数据可能略旧，但空列表不可用；tombstone 过滤仍会隐藏已删除项）
 let directoryStaleDropCount = 0
 
-// 扁平化预审弹窗：先干跑列出单链变换清单，勾选后执行
+// 扁平化预审弹窗：先干跑列出「空目录删除」与「单链合并」两组清单，勾选后执行
 const flattenPreviewVisible = ref(false)
 const flattenPreviewLoading = ref(false)
+const flattenPreviewEmptyDirs = ref([])
+const flattenPreviewSelectedEmptyDirs = ref([])
 const flattenPreviewOperations = ref([])
-const flattenPreviewSelected = ref([])
+const flattenPreviewSelectedOps = ref([])
 const flattenPreviewApplying = ref(false)
 
 function flattenOpLabel (op) {
@@ -5926,9 +5954,9 @@ function flattenOpLabel (op) {
 }
 
 async function flattenCurrentFolder () {
-  // 单链扁平化（两段式）：先干跑预览变换清单，用户勾选要合并的单链后执行。
-  // 典型场景：过滤删除清掉 mp3/台本后残留的 翻译组目录/原目录名/版本目录 单链。
-  // 移动文件后 Kikoeru 需要重新扫描才能感知新路径。
+  // 目录整理（两段式）：先干跑预览「空目录删除」与「单链合并」两组清单，
+  // 用户勾选后执行。典型场景：过滤删除清掉 mp3/台本后残留的空目录与
+  // 收敛出的单链（翻译组目录/版本目录）。移动文件后 Kikoeru 需重新扫描。
   if (!selectedLibraryId.value || !currentPath.value || isFlatteningCurrentFolder.value) return
   if (isRemoteCurrentLibrary.value) {
     ElMessage.warning('远程库存（群晖）暂不支持扁平化整理')
@@ -5937,48 +5965,63 @@ async function flattenCurrentFolder () {
   isFlatteningCurrentFolder.value = true
   try {
     const result = await libraryApi.flattenSingleChains(selectedLibraryId.value, currentPath.value)
+    const emptyDirs = Array.isArray(result?.empty_dirs) ? result.empty_dirs : []
     const operations = Array.isArray(result?.operations) ? result.operations : []
-    if (!operations.length) {
-      ElMessage.info('当前目录没有可扁平化的单链结构')
+    if (!emptyDirs.length && !operations.length) {
+      ElMessage.info('当前目录没有需要整理的空目录或单链结构')
       return
     }
+    flattenPreviewEmptyDirs.value = emptyDirs
+    flattenPreviewSelectedEmptyDirs.value = [...emptyDirs]
     flattenPreviewOperations.value = operations
-    flattenPreviewSelected.value = operations.map((_, index) => index)
+    flattenPreviewSelectedOps.value = operations.map((_, index) => index)
     flattenPreviewVisible.value = true
   } catch (error) {
-    ElMessage.error('扁平化预览失败: ' + (error.response?.data?.detail || error.message || '未知错误'))
+    ElMessage.error('整理预览失败: ' + (error.response?.data?.detail || error.message || '未知错误'))
   } finally {
     isFlatteningCurrentFolder.value = false
   }
 }
 
 async function confirmFlattenPreview () {
-  const selected = flattenPreviewSelected.value
+  const selectedEmptyDirs = flattenPreviewSelectedEmptyDirs.value.filter(Boolean)
+  const selectedOps = flattenPreviewSelectedOps.value
     .map(index => flattenPreviewOperations.value[index])
     .filter(Boolean)
-  if (!selected.length) {
-    ElMessage.warning('请至少勾选一条要合并的单链')
+  if (!selectedEmptyDirs.length && !selectedOps.length) {
+    ElMessage.warning('请至少勾选一项要整理的内容')
     return
   }
   flattenPreviewApplying.value = true
   try {
-    const result = await libraryApi.flattenSingleChains(selectedLibraryId.value, currentPath.value, selected)
+    const result = await libraryApi.flattenSingleChains(selectedLibraryId.value, currentPath.value, {
+      empty_dirs: selectedEmptyDirs,
+      operations: selectedOps,
+    })
+    const removedDirs = Number(result?.removed_empty_dir_count || 0)
     const applied = Number(result?.applied_count || 0)
-    ElMessage.success(`扁平化完成：合并了 ${applied} 条单链`)
+    ElMessage.success(`整理完成：删除空目录 ${removedDirs} 个，合并单链 ${applied} 条`)
     flattenPreviewVisible.value = false
     await refreshLibrary({ forceRefresh: true })
   } catch (error) {
-    ElMessage.error('扁平化失败: ' + (error.response?.data?.detail || error.message || '未知错误'))
+    ElMessage.error('整理失败: ' + (error.response?.data?.detail || error.message || '未知错误'))
   } finally {
     flattenPreviewApplying.value = false
   }
 }
 
-function toggleFlattenPreviewRow (index, checked) {
-  const next = new Set(flattenPreviewSelected.value)
+function toggleFlattenPreviewDir (dir, checked) {
+  const next = new Set(flattenPreviewSelectedEmptyDirs.value)
+  if (checked) next.add(dir)
+  else next.delete(dir)
+  flattenPreviewSelectedEmptyDirs.value = [...next]
+}
+
+function toggleFlattenPreviewOp (index, checked) {
+  const next = new Set(flattenPreviewSelectedOps.value)
   if (checked) next.add(index)
   else next.delete(index)
-  flattenPreviewSelected.value = [...next]
+  flattenPreviewSelectedOps.value = [...next]
 }
 
 const selectedFilterDeleteRows = computed(() => selectedRows.value.filter(row => row?.is_directory))
@@ -27906,6 +27949,18 @@ async function startFileLevelRename() {
   text-overflow: ellipsis;
 
   white-space: nowrap;
+
+}
+
+.flatten-preview-section-title {
+
+  font-size: 12px;
+
+  font-weight: 600;
+
+  color: var(--el-text-color-secondary, #64748b);
+
+  padding: 6px 2px 2px;
 
 }
 
