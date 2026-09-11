@@ -1657,6 +1657,40 @@ function applyFilterDeletePostDelete (deletedPaths, options = {}) {
   })
 }
 
+async function cleanupFilterDeleteEmptyDirs (succeededPaths = []) {
+  // 删除成功后清理被清空的父目录：被过滤文件删掉后常留下整链空目录
+  // （01_正篇mp3 / 台本 等）。按路径深度从深到浅逐层尝试删除，目录仍
+  // 有内容（用户保留了部分文件）或删除失败时静默跳过；清理范围不越过
+  // 预审目标根（root 本身保留）。
+  const rootPath = normalizeFilterDeleteComparePath(props.currentPath || filterDeletePreviewInfo.value.folderPath || '')
+  if (!rootPath) return
+  const rootPrefix = `${rootPath}/`
+  const candidates = new Set()
+  for (const target of succeededPaths) {
+    const normalizedTarget = normalizeFilterDeleteComparePath(target.path || target.delete_path)
+    if (!normalizedTarget.startsWith(rootPrefix)) continue
+    let parent = normalizedTarget.slice(0, normalizedTarget.lastIndexOf('/'))
+    while (parent.startsWith(rootPrefix) && parent !== rootPath) {
+      candidates.add(parent)
+      parent = parent.slice(0, parent.lastIndexOf('/'))
+    }
+  }
+  if (!candidates.size) return
+  const libraryId = String(succeededPaths[0]?.library_id || props.libraryId || '').trim()
+  if (!libraryId) return
+  const ordered = [...candidates].sort((left, right) => right.length - left.length) // 深 → 浅
+  try {
+    await libraryApi.browserBatchDeleteTargets(
+      ordered.map(path => ({ library_id: libraryId, path })),
+      true,
+      { skipActivityLog: true }
+    )
+    logger?.debug?.(`[FILTER-DELETE] 空目录清理完成，候选 ${ordered.length} 个`)
+  } catch (error) {
+    console.warn('清理过滤删除后的空目录失败（不影响删除结果）:', error)
+  }
+}
+
 async function confirmFilterDeleteSelection () {
   if (filterDeletePreviewInfo.value.status !== 'completed') {
     ElMessage.warning('\u5220\u9664\u8fc7\u6ee4\u9884\u5ba1\u5c1a\u672a\u5b8c\u6574\u5b8c\u6210\uff0c\u8bf7\u7b49\u5f85\u626b\u63cf\u7ed3\u675f\u540e\u518d\u5220\u9664')
@@ -1805,6 +1839,7 @@ async function confirmFilterDeleteSelection () {
           ? `\u5220\u9664\u5df2\u505c\u6b62\uff0c\u5df2\u5b8c\u6210 ${successCount} / ${deleteTargets.length}`
           : `\u5220\u9664\u5b8c\u6210\uff0c\u6210\u529f ${successCount} / ${deleteTargets.length}`
       })
+      await cleanupFilterDeleteEmptyDirs(succeededPaths)
     }
     const succeededItems = buildFilterDeleteLogItemsByTargets(attemptedItems, succeededPaths)
     await writeFilterDeleteApplyActivityLog({
