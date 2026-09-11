@@ -191,7 +191,9 @@ class KikoeruScanListener:
                 )
                 sio.wait()
             except Exception as exc:
-                logger.info("[KIKOERU-SCAN] socket 连接/等待结束: %s", exc)
+                # 连接失败原因升级为 WARNING：现场从未成功连上过（9/7 起日志无一次"已连接"），
+                # 一直在 5→300s 退避重试，需要 exc 内容定位（JWT/协议/网络）
+                logger.warning("[KIKOERU-SCAN] socket 连接/等待结束，退避后重试: %s", exc)
             finally:
                 self._connected = False
                 try:
@@ -249,6 +251,7 @@ class KikoeruScanListener:
                 return {"processed": 0}
 
             applied, failed = 0, 0
+            new_ids = [r["id"] for r in rows]
             for r in rows:
                 try:
                     if await asyncio.to_thread(service.apply_rename_single, r["id"]):
@@ -257,18 +260,99 @@ class KikoeruScanListener:
                     failed += 1
                     logger.warning("[KIKOERU-SCAN] 处理作品失败 id=%s", r["id"], exc_info=True)
 
+            # title 重构 + 评分修复（监控链路补全：原先只做文件命名，
+            # 新增内容的 title/评分从未做重构校验）
+            title_result = {"updated": 0, "unchanged": 0, "missed": 0}
+            rating_started = False
+            rating_reason = ""
+            try:
+                title_result = await self._refresh_titles_for_new_works(rows)
+            except Exception:
+                logger.warning("[KIKOERU-SCAN] title 重构整体失败", exc_info=True)
+            try:
+                from .kikoeru_rating_fix_service import get_kikoeru_rating_fix_service
+
+                rating_result = await get_kikoeru_rating_fix_service().start_run(ids=new_ids)
+                rating_started = bool(rating_result.get("started"))
+                rating_reason = str(rating_result.get("reason") or "")
+                if not rating_started:
+                    logger.info("[KIKOERU-SCAN] 评分修复未启动: %s", rating_reason)
+            except Exception:
+                logger.warning("[KIKOERU-SCAN] 评分修复任务启动失败", exc_info=True)
+                rating_reason = "启动异常"
+
             new_checkpoint = max(
                 [str(r["created_at"]) for r in rows if r["created_at"]] + [checkpoint]
             )
             self._save_checkpoint(new_checkpoint)
             self._mark_scan_finished(trigger)
             logger.info(
-                "[KIKOERU-SCAN] 增量套用完成（%s）: 新增=%s applied=%s failed=%s checkpoint=%s",
-                trigger, len(rows), applied, failed, new_checkpoint,
+                "[KIKOERU-SCAN] 增量处理完成（%s）: 新增=%s rename_applied=%s rename_failed=%s "
+                "title_updated=%s title_missed=%s rating_started=%s%s checkpoint=%s",
+                trigger, len(rows), applied, failed,
+                title_result.get("updated"), title_result.get("missed"),
+                rating_started, (f"（{rating_reason}）" if rating_reason else ""), new_checkpoint,
             )
-            return {"processed": len(rows), "applied": applied, "failed": failed}
+            return {
+                "processed": len(rows), "applied": applied, "failed": failed,
+                "title_updated": title_result.get("updated"),
+                "rating_started": rating_started,
+            }
         finally:
             self._processing = False
+
+    # ------------------------------------------------------------ title 重构
+    async def _refresh_titles_for_new_works(self, rows: list) -> dict:
+        """对新作品用 DLsite 官方 title 校验/重构数据库 title（title 杂乱痛点）。
+
+        逐作品：dir 解析 workno 候选（复用评分修复的解析）→ get_work_info 取
+        官方 work_name → 非空且与当前 title 不同则 UPDATE t_work.title。
+        """
+        from .dlsite_service import get_dlsite_service
+        from .kikoeru_rating_fix_service import get_kikoeru_rating_fix_service
+
+        rating_fix = get_kikoeru_rating_fix_service()
+        dlsite = get_dlsite_service()
+        service = get_kikoeru_db_service()
+        updated, unchanged, missed = 0, 0, 0
+        conn = await asyncio.to_thread(service._connect, None, readonly=False)
+        try:
+            for r in rows:
+                work_id = r["id"]
+                dir_name = str(r["dir"] or "")
+                try:
+                    candidates = rating_fix._resolve_workno_candidates(work_id, dir_name)
+                    official_title = ""
+                    for workno in candidates:
+                        info = await dlsite.get_work_info(workno)
+                        if info and str(info.get("title") or "").strip():
+                            official_title = str(info["title"]).strip()
+                            break
+                    if not official_title:
+                        missed += 1
+                        logger.info("[KIKOERU-SCAN] title 重构跳过（DLsite 无数据）: id=%s dir=%s", work_id, dir_name)
+                        continue
+                    current_title = str(r["title"] or "").strip()
+                    if current_title == official_title:
+                        unchanged += 1
+                        continue
+                    await asyncio.to_thread(
+                        conn.execute,
+                        'UPDATE "t_work" SET title = ? WHERE id = ?',
+                        (official_title, work_id),
+                    )
+                    await asyncio.to_thread(conn.commit)
+                    updated += 1
+                    logger.info(
+                        "[KIKOERU-SCAN] title 重构: id=%s 旧=%s 新=%s",
+                        work_id, current_title[:60], official_title[:60],
+                    )
+                except Exception:
+                    missed += 1
+                    logger.warning("[KIKOERU-SCAN] title 重构失败 id=%s", work_id, exc_info=True)
+        finally:
+            conn.close()
+        return {"updated": updated, "unchanged": unchanged, "missed": missed}
 
     # ------------------------------------------------------------ 检查点持久化
     @staticmethod
