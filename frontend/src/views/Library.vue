@@ -466,9 +466,7 @@
 
       </div>
 
-      <div class="lib-body-flex">
-
-      <Teleport v-if="railSlotReady" to="#lib-rail-slot">
+      <Teleport v-if="railTeleportActive" to="#lib-tools-rail-host">
 
         <div class="lib-path-right">
 
@@ -914,10 +912,6 @@
           popper-class="km-pagination-size-popper"
           background
         />
-
-      </div>
-
-      <div id="lib-rail-slot" class="lib-tools-rail"></div>
 
       </div>
 
@@ -5901,10 +5895,17 @@ const canProcessCurrentFolder = computed(() => {
 
 const isFlatteningCurrentFolder = ref(false)
 
-// 右侧功能栏的 Teleport 目标（el-card__body 尾部）需在挂载后才存在
-const railSlotReady = ref(false)
+// 右侧功能栏 Teleport 到 App.vue content-shell 的宿主；
+// Library 是 keep-alive 缓存页，离开页面时收起 Teleport（host 为空自动隐藏）
+const railTeleportActive = ref(false)
 onMounted(() => {
-  railSlotReady.value = true
+  railTeleportActive.value = true
+})
+onActivated(() => {
+  railTeleportActive.value = true
+})
+onDeactivated(() => {
+  railTeleportActive.value = false
 })
 
 // 索引 revision 丢弃计数：连续丢弃超过 3 次则接受响应兜底
@@ -8448,6 +8449,14 @@ watch(selectedLibraryId, async (newId, oldId) => {
   // 切换库存强制走实时浏览：索引视图可能返回滞后快照（表现为切换后仍显示
   // 上一个库存的文件、必须手动刷新），切换是全新视图，直接绕过索引缓存
   await refreshLibrary({ forceRefresh: true })
+
+  // 双保险：1.5 秒后再强制刷新一次（silent），覆盖索引物化滞后、
+  // 响应被 revision 丢弃、恢复的浏览路径晚到等一切竞态场景
+  setTimeout(() => {
+    if (String(selectedLibraryId.value) === newId && libraryViewMode.value !== 'circle') {
+      refreshLibrary({ forceRefresh: true, silent: true })
+    }
+  }, 1500)
 
   refreshStats(false, { silent: true })
 

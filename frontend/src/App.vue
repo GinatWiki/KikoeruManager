@@ -222,6 +222,8 @@
               />
             </keep-alive>
           </RouterView>
+          <!-- 库存页右侧功能栏的 Teleport 宿主：其他页面时为空不占位 -->
+          <div id="lib-tools-rail-host" class="lib-tools-rail-host"></div>
         </div>
       </el-main>
     </el-container>
@@ -5896,6 +5898,34 @@ html.kikoerumanager-dark .logo-update-badge.is-checking {
   overflow-x: hidden;
   padding-right: 4px;
   scrollbar-gutter: stable;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.content-shell > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.lib-tools-rail-host {
+  flex: 0 0 auto;
+  width: 176px;
+  position: sticky;
+  top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+  padding: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 14px;
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.lib-tools-rail-host:empty {
+  display: none;
 }
 
 :deep(.sidebar-menu .el-menu) {
