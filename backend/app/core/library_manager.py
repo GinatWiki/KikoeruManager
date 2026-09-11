@@ -2324,15 +2324,20 @@ class LibraryManager:
                 remote_warmup_retries=remote_warmup_retries,
             )
         if library.type == "local":
+            # 前端的根路径语义是「/」（相对浏览根）；字面 '/' 必须解析为 browse_root，
+            # 否则索引查询与完整性探测会拿到容器根（os.listdir('/')）导致列表为空/误判
+            effective_current_path = current_path
+            if effective_current_path in (None, "", "/"):
+                effective_current_path = library.browse_root_path or library.root_path
             indexed_result = self._list_files_via_index(
                 library,
                 page=page,
                 page_size=page_size,
-                current_path=current_path or (library.browse_root_path or library.root_path),
+                current_path=effective_current_path,
                 browse_root=library.browse_root_path or library.root_path,
                 parent_path=self._index_parent_path_for_target(
                     library,
-                    current_path or (library.browse_root_path or library.root_path),
+                    effective_current_path,
                 ) or "",
                 sort_by=sort_by,
                 sort_order=sort_order,
@@ -2347,7 +2352,7 @@ class LibraryManager:
                 page,
                 page_size,
                 search,
-                current_path,
+                effective_current_path,
                 sort_by,
                 sort_order,
                 force_refresh,

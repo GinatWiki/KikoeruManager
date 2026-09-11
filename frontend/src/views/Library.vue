@@ -9244,7 +9244,12 @@ async function refreshLibrary (options = {}) {
     if (String(selectedLibraryId.value) !== requestLibraryId || String(currentPath.value || '') !== requestPath) return
     if (Number(currentPage.value || 1) !== requestPage || Number(pageSize.value || DEFAULT_PAGE_SIZE) !== requestPageSize) return
     if (String(sortBy.value || DEFAULT_SORT_BY) !== requestSortBy || String(sortOrder.value || DEFAULT_SORT_ORDER) !== requestSortOrder) return
-    if (!libraryIndexStateStore.isIndexViewResponseCurrent(data)) return
+    if (!libraryIndexStateStore.isIndexViewResponseCurrent(data)) {
+      // 索引物化滞后（revision 低于本地记录）时丢弃旧快照是正确的，
+      // 但必须安排重试，否则列表会冻结在空状态直到用户手动刷新
+      scheduleListPoll([], { index_refresh_pending: true })
+      return
+    }
     libraryIndexStateStore.recordIndexViews(data)
 
     files.value = applyRecentRenameRows(filterRowsByIndexTombstones(data.files || [], requestLibraryId))
@@ -27614,7 +27619,22 @@ async function startFileLevelRename() {
 
 .lib-path-right {
 
-  /* 右侧功能栏：竖排卡片化，避免横排按钮挤占路径面包屑的宽度 */
+  /* 右侧常驻功能栏：fixed 定位脱离路径工具栏，面包屑独占整行宽度；
+     桌面端主体通过 .library-page-loading-shell 的 padding-right 让位 */
+  position: fixed;
+
+  top: 92px;
+
+  right: 18px;
+
+  width: 176px;
+
+  max-height: calc(100vh - 132px);
+
+  overflow-y: auto;
+
+  z-index: 40;
+
   display: flex;
 
   flex-direction: column;
@@ -27622,14 +27642,6 @@ async function startFileLevelRename() {
   align-items: stretch;
 
   gap: 5px;
-
-  flex: 0 0 auto;
-
-  width: 176px;
-
-  max-height: 260px;
-
-  overflow-y: auto;
 
   padding: 8px;
 
@@ -27639,7 +27651,47 @@ async function startFileLevelRename() {
 
   background: var(--lib-toolbar-rail-bg, rgba(148, 163, 184, 0.08));
 
+  backdrop-filter: blur(8px);
+
   white-space: nowrap;
+
+}
+
+.library-page-loading-shell {
+
+  padding-right: 206px;
+
+}
+
+@media (max-width: 960px) {
+
+  .library-page-loading-shell {
+
+    padding-right: 0;
+
+  }
+
+  .lib-path-right {
+
+    position: static;
+
+    width: 100%;
+
+    max-height: none;
+
+    flex-direction: row;
+
+    flex-wrap: wrap;
+
+    align-items: center;
+
+  }
+
+  .lib-path-right > .lib-btn {
+
+    width: auto;
+
+  }
 
 }
 
@@ -27682,6 +27734,72 @@ async function startFileLevelRename() {
   min-height: 26px;
 
   font-size: 12px;
+
+}
+
+.flatten-preview-list {
+
+  display: flex;
+
+  flex-direction: column;
+
+  gap: 6px;
+
+  max-height: 46vh;
+
+  overflow-y: auto;
+
+  padding: 4px 2px;
+
+}
+
+.flatten-preview-row {
+
+  display: flex;
+
+  align-items: center;
+
+  gap: 10px;
+
+  padding: 8px 10px;
+
+  border-radius: 10px;
+
+  border: 1px solid rgba(148, 163, 184, 0.26);
+
+  cursor: pointer;
+
+}
+
+.flatten-preview-row:hover {
+
+  background: rgba(148, 163, 184, 0.12);
+
+}
+
+.flatten-preview-checkbox {
+
+  width: 15px;
+
+  height: 15px;
+
+  flex: 0 0 auto;
+
+  accent-color: #2563eb;
+
+  cursor: pointer;
+
+}
+
+.flatten-preview-label {
+
+  font-size: 13px;
+
+  overflow: hidden;
+
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
 
 }
 
