@@ -131,49 +131,91 @@
       <AsmrSubtitleScanPanel v-else v-model="subtitleFolder" />
     </Transition>
 
-    <DownloadTaskWorkbenchDialog
-      v-model:visible="httpDownloadWorkbenchVisible"
-      :tasks="httpDownloadWorkbenchTasks"
-      :refreshing="httpDownloadWorkbenchRefreshing"
-      :retrying-keys="[...httpDownloadRetryingTaskIds]"
-      title="HTTP 外链下载"
-      subtitle="aria2 下载任务进度"
-      source-path-label="下载根目录"
-      :merge-tasks="false"
-      :compact="true"
-      :enable-file-retry="true"
-      @refresh="refreshHttpDownloadWorkbench({ silent: true })"
-      @background="hideHttpDownloadWorkbenchToBackground"
-      @close="closeHttpDownloadWorkbench"
-      @retry-task="retryHttpDownloadTask"
-      @retry-file="retryHttpDownloadFile"
-      @pause-task="pauseHttpDownloadTask"
-      @resume-task="resumeHttpDownloadTask"
-      @cancel-task="cancelHttpDownloadTask"
-      @load-files="task => loadFullWorkbenchTaskFiles(task, httpDownloadWorkbenchTasks)"
-    />
+    <!-- 内嵌下载工作台：跟随当前工作台 tab 显示在面板下方，避免弹窗被误关闭后无法操作 -->
+    <div
+      v-if="activeWorkspaceTab === 'enhanced' && enhancedDownloadWorkbenchVisible"
+      ref="enhancedWorkbenchAnchorRef"
+      class="asmr-embedded-workbench"
+    >
+      <DownloadTaskWorkbenchDialog
+        v-model:visible="enhancedDownloadWorkbenchVisible"
+        :tasks="enhancedDownloadWorkbenchTasks"
+        :refreshing="enhancedDownloadWorkbenchRefreshing"
+        :retrying-keys="[...enhancedRetryingTaskIds]"
+        :retrying-session-ids="[...enhancedRetryingSessionIds]"
+        title="ASMR 增强下载"
+        subtitle="增强下载任务进度"
+        :enable-file-retry="true"
+        :embedded="true"
+        @refresh="refreshEnhancedDownloadWorkbench({ silent: true })"
+        @background="hideEnhancedDownloadWorkbenchToBackground"
+        @close="closeEnhancedDownloadWorkbench"
+        @retry-task="retryEnhancedDownloadTask"
+        @retry-file="retryEnhancedDownloadFile"
+        @pause-task="handlePauseEnhancedDownloadTask"
+        @resume-task="handleResumeEnhancedDownloadTask"
+        @cancel-task="handleCancelEnhancedDownloadTask"
+        @load-files="task => loadFullWorkbenchTaskFiles(task, enhancedDownloadWorkbenchTasks)"
+      />
+    </div>
 
-    <DownloadTaskWorkbenchDialog
-      v-model:visible="baiduNetdiskWorkbenchVisible"
-      :tasks="baiduNetdiskWorkbenchTasks"
-      :refreshing="baiduNetdiskWorkbenchRefreshing"
-      :retrying-keys="[...baiduNetdiskRetryingTaskIds]"
-      title="百度网盘下载"
-      subtitle="百度网盘直下任务进度"
-      source-path-label="下载根目录"
-      :merge-tasks="false"
-      :compact="true"
-      :enable-file-retry="true"
-      @refresh="refreshBaiduNetdiskWorkbench({ silent: true })"
-      @background="hideBaiduNetdiskWorkbenchToBackground"
-      @close="closeBaiduNetdiskWorkbench"
-      @retry-task="retryBaiduNetdiskTask"
-      @retry-file="retryBaiduNetdiskFile"
-      @pause-task="pauseBaiduNetdiskTask"
-      @resume-task="resumeBaiduNetdiskTask"
-      @cancel-task="cancelBaiduNetdiskTask"
-      @load-files="task => loadFullWorkbenchTaskFiles(task, baiduNetdiskWorkbenchTasks)"
-    />
+    <div
+      v-if="activeWorkspaceTab === 'http' && httpDownloadWorkbenchVisible"
+      ref="httpWorkbenchAnchorRef"
+      class="asmr-embedded-workbench"
+    >
+      <DownloadTaskWorkbenchDialog
+        v-model:visible="httpDownloadWorkbenchVisible"
+        :tasks="httpDownloadWorkbenchTasks"
+        :refreshing="httpDownloadWorkbenchRefreshing"
+        :retrying-keys="[...httpDownloadRetryingTaskIds]"
+        title="HTTP 外链下载"
+        subtitle="aria2 下载任务进度"
+        source-path-label="下载根目录"
+        :merge-tasks="false"
+        :compact="true"
+        :enable-file-retry="true"
+        :embedded="true"
+        @refresh="refreshHttpDownloadWorkbench({ silent: true })"
+        @background="hideHttpDownloadWorkbenchToBackground"
+        @close="closeHttpDownloadWorkbench"
+        @retry-task="retryHttpDownloadTask"
+        @retry-file="retryHttpDownloadFile"
+        @pause-task="pauseHttpDownloadTask"
+        @resume-task="resumeHttpDownloadTask"
+        @cancel-task="cancelHttpDownloadTask"
+        @load-files="task => loadFullWorkbenchTaskFiles(task, httpDownloadWorkbenchTasks)"
+      />
+    </div>
+
+    <div
+      v-if="activeWorkspaceTab === 'baidu' && baiduNetdiskWorkbenchVisible"
+      ref="baiduWorkbenchAnchorRef"
+      class="asmr-embedded-workbench"
+    >
+      <DownloadTaskWorkbenchDialog
+        v-model:visible="baiduNetdiskWorkbenchVisible"
+        :tasks="baiduNetdiskWorkbenchTasks"
+        :refreshing="baiduNetdiskWorkbenchRefreshing"
+        :retrying-keys="[...baiduNetdiskRetryingTaskIds]"
+        title="百度网盘下载"
+        subtitle="百度网盘直下任务进度"
+        source-path-label="下载根目录"
+        :merge-tasks="false"
+        :compact="true"
+        :enable-file-retry="true"
+        :embedded="true"
+        @refresh="refreshBaiduNetdiskWorkbench({ silent: true })"
+        @background="hideBaiduNetdiskWorkbenchToBackground"
+        @close="closeBaiduNetdiskWorkbench"
+        @retry-task="retryBaiduNetdiskTask"
+        @retry-file="retryBaiduNetdiskFile"
+        @pause-task="pauseBaiduNetdiskTask"
+        @resume-task="resumeBaiduNetdiskTask"
+        @cancel-task="cancelBaiduNetdiskTask"
+        @load-files="task => loadFullWorkbenchTaskFiles(task, baiduNetdiskWorkbenchTasks)"
+      />
+    </div>
 
     <Transition name="floating-card">
       <div v-if="visibleBackgroundFloatingCards.length" class="asmr-floating-pager">
@@ -217,27 +259,6 @@
         </Transition>
       </div>
     </Transition>
-
-    <!-- Enhanced Download Workbench Dialog -->
-    <DownloadTaskWorkbenchDialog
-      v-model:visible="enhancedDownloadWorkbenchVisible"
-      :tasks="enhancedDownloadWorkbenchTasks"
-      :refreshing="enhancedDownloadWorkbenchRefreshing"
-      :retrying-keys="[...enhancedRetryingTaskIds]"
-      :retrying-session-ids="[...enhancedRetryingSessionIds]"
-      title="ASMR 增强下载"
-      subtitle="增强下载任务进度"
-      :enable-file-retry="true"
-      @refresh="refreshEnhancedDownloadWorkbench({ silent: true })"
-      @background="hideEnhancedDownloadWorkbenchToBackground"
-      @close="closeEnhancedDownloadWorkbench"
-      @retry-task="retryEnhancedDownloadTask"
-      @retry-file="retryEnhancedDownloadFile"
-      @pause-task="handlePauseEnhancedDownloadTask"
-      @resume-task="handleResumeEnhancedDownloadTask"
-      @cancel-task="handleCancelEnhancedDownloadTask"
-      @load-files="task => loadFullWorkbenchTaskFiles(task, enhancedDownloadWorkbenchTasks)"
-    />
 
     <!-- Enhanced Download Preview Dialog -->
     <CircleDownloadPreviewDialog
@@ -698,7 +719,7 @@
 </template>
 
 <script setup>
-import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
@@ -933,6 +954,19 @@ const baiduNetdiskRetryingTaskIds = ref(new Set())
 const baiduNetdiskDraft = ref(readDownloadDraft(ASMR_SYNC_BAIDU_NETDISK_DRAFT_KEY))
 let baiduNetdiskWorkbenchTimer = null
 const baiduNetdiskWorkbenchRequestGuard = createLatestRequestGuard()
+
+// 内嵌下载工作台锚点（面板下方展开时滚动定位用）
+const enhancedWorkbenchAnchorRef = ref(null)
+const httpWorkbenchAnchorRef = ref(null)
+const baiduWorkbenchAnchorRef = ref(null)
+function scrollWorkbenchIntoView(anchorRef) {
+  nextTick(() => {
+    const el = anchorRef?.value
+    if (el && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+  })
+}
 
 // Enhanced preview dialog state
 const enhancedPreviewVisible = ref(false)
@@ -1724,6 +1758,8 @@ function hideEnhancedDownloadWorkbenchToBackground() {
 }
 
 function resumeEnhancedDownloadWorkbench() {
+  // 内嵌工作台跟随当前 tab 渲染：恢复时切到对应 tab，避免恢复后看不到面板
+  activeWorkspaceTab.value = 'enhanced'
   enhancedDownloadWorkbenchVisible.value = true
   enhancedDownloadWorkbenchBackgroundActive.value = false
 }
@@ -1840,6 +1876,8 @@ function hideHttpDownloadWorkbenchToBackground() {
 }
 
 function resumeHttpDownloadWorkbench() {
+  // 内嵌工作台跟随当前 tab 渲染：恢复时切到对应 tab，避免恢复后看不到面板
+  activeWorkspaceTab.value = 'http'
   httpDownloadWorkbenchVisible.value = true
   httpDownloadWorkbenchBackgroundActive.value = false
 }
@@ -2050,6 +2088,8 @@ function hideBaiduNetdiskWorkbenchToBackground() {
 }
 
 function resumeBaiduNetdiskWorkbench() {
+  // 内嵌工作台跟随当前 tab 渲染：恢复时切到对应 tab，避免恢复后看不到面板
+  activeWorkspaceTab.value = 'baidu'
   baiduNetdiskWorkbenchVisible.value = true
   baiduNetdiskWorkbenchBackgroundActive.value = false
 }
@@ -2919,6 +2959,7 @@ watch(enhancedDownloadWorkbenchVisible, (visible) => {
   persistEnhancedDownloadWorkbenchState()
   if (visible || enhancedDownloadWorkbenchBackgroundActive.value) startEnhancedDownloadWorkbenchPolling()
   else stopEnhancedDownloadWorkbenchPolling()
+  if (visible) scrollWorkbenchIntoView(enhancedWorkbenchAnchorRef)
 })
 
 watch(enhancedDownloadWorkbenchBackgroundActive, () => {
@@ -2935,6 +2976,7 @@ watch(httpDownloadWorkbenchVisible, (visible) => {
   persistHttpDownloadWorkbenchState()
   if (visible || httpDownloadWorkbenchBackgroundActive.value) startHttpDownloadWorkbenchPolling()
   else stopHttpDownloadWorkbenchPolling()
+  if (visible) scrollWorkbenchIntoView(httpWorkbenchAnchorRef)
 })
 
 watch(httpDownloadWorkbenchBackgroundActive, () => {
@@ -2955,6 +2997,7 @@ watch(baiduNetdiskWorkbenchVisible, (visible) => {
   persistBaiduNetdiskWorkbenchState()
   if (visible || baiduNetdiskWorkbenchBackgroundActive.value) startBaiduNetdiskWorkbenchPolling()
   else stopBaiduNetdiskWorkbenchPolling()
+  if (visible) scrollWorkbenchIntoView(baiduWorkbenchAnchorRef)
 })
 
 watch(baiduNetdiskWorkbenchBackgroundActive, () => {
@@ -3604,6 +3647,10 @@ html.kikoerumanager-dark .asmr-floating-page-dot.is-active {
   background: var(--asmr-surface);
   border: 1px solid var(--asmr-border);
   box-shadow: var(--asmr-card-shadow);
+}
+/* 内嵌下载工作台容器：出现在当前工作台面板下方 */
+.asmr-embedded-workbench {
+  margin-top: 14px;
 }
 .asmr-workspace-tab {
   display: inline-flex;

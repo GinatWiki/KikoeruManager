@@ -4,10 +4,15 @@
     当前只作为独立 V1 原型文件存在，不接入、不替换正式组件。
     数据契约与旧组件保持兼容，便于后续在 CircleCompletion 中切换验收。
   -->
-  <Teleport to="body">
+  <Teleport to="body" :disabled="embedded">
     <transition name="el-fade-in">
-      <div v-if="visible" class="v1-overlay" @click.self="emit('background')">
-        <div class="v1-shell" :class="{ 'is-compact': compact }">
+      <div
+        v-if="visible"
+        class="v1-overlay"
+        :class="{ 'is-embedded': embedded }"
+        @click.self="!embedded && emit('background')"
+      >
+        <div class="v1-shell" :class="{ 'is-compact': compact, 'is-embedded': embedded }">
           <header class="v1-header">
             <div class="v1-header-copy">
               <div class="v1-title">{{ titleText }}</div>
@@ -42,10 +47,10 @@
               >
                 <RefreshCw :size="18" />
               </button>
-              <button type="button" class="v1-icon-button" title="隐藏到后台" @click.stop="emit('background')">
+              <button type="button" class="v1-icon-button" :title="embedded ? '收起面板' : '隐藏到后台'" @click.stop="emit('background')">
                 <Minimize2 :size="18" />
               </button>
-              <button type="button" class="v1-icon-button" title="关闭" @click.stop="emit('close')">
+              <button v-if="!embedded" type="button" class="v1-icon-button" title="关闭" @click.stop="emit('close')">
                 <X :size="18" />
               </button>
             </div>
@@ -345,6 +350,8 @@ const props = defineProps({
   mergeTasks: { type: Boolean, default: true },
   compact: { type: Boolean, default: false },
   enableFileRetry: { type: Boolean, default: false },
+  // 内嵌模式：不 Teleport、不铺满遮罩，作为卡片原地渲染（防止误关闭导致无法操作）
+  embedded: { type: Boolean, default: false },
 })
 
 const emit = defineEmits([
@@ -1558,6 +1565,31 @@ function buildUnifiedFileRows(task) {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
+
+/* 内嵌模式：覆盖为页面内静态卡片（跟随父容器布局，无遮罩/无全屏定位） */
+.v1-overlay.is-embedded {
+  position: static;
+  z-index: auto;
+  display: block;
+  min-height: 0;
+  padding: 0;
+}
+
+.v1-shell.is-embedded {
+  height: auto;
+  max-height: 640px;
+  max-width: none;
+  border-radius: 20px;
+  box-shadow:
+    0 10px 32px rgba(24, 24, 27, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.v1-shell.is-embedded .v1-header { padding: 16px 22px 10px; }
+.v1-shell.is-embedded .v1-header-copy,
+.v1-shell.is-embedded .v1-header-tools { min-height: 56px; }
+.v1-shell.is-embedded .v1-title { font-size: 18px; }
+.v1-shell.is-embedded .v1-body { padding: 12px 22px 12px; }
 
 .v1-shell {
   position: relative;
