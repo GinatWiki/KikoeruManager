@@ -53,11 +53,12 @@ class FilterService:
         audio_formats = self._detect_audio_formats_from_walk(walk_entries)
         logger.info(f"检测到音频格式分布: {audio_formats}")
         
-        # 如果只有 MP3 格式，临时禁用 MP3 过滤规则
-        if audio_formats.get('mp3', 0) > 0 and len(audio_formats) == 1:
-            logger.info("目录中只有 MP3 格式的音频文件，临时禁用 MP3 过滤规则以防止空文件夹")
-            rules = self._disable_mp3_filter(rules)
-        
+        # 防空任务保护（精确判定）：仅当目录中的音频文件会被当前规则全部过滤、
+        # 且目录中没有任何其他文件时，才临时禁用命中音频的规则（避免产生空任务）；
+        # 目录里还有其他文件（图片/文档/字幕等）时尊重用户规则正常过滤。
+        # 触发时把被禁用的规则名写进任务进度与返回值，不再静默吞掉用户规则。
+        rules, mp3_protection_disabled = self._resolve_audio_wipeout_protection(rules, walk_entries)
+
         logger.info(f"当前过滤规则数: {len(rules)}")
         for i, rule in enumerate(rules):
             if hasattr(rule, 'target'):
@@ -163,7 +164,17 @@ class FilterService:
                 filtered_files.append(item["name"])
             logger.info("过滤%s已移入恢复区: %s", "目录" if item["type"] == "dir" else "文件", item["relative_path"])
         
-        task.update_progress(50, f"过滤完成，已过滤 {len(filtered_files)} 个文件，{len(filtered_dirs)} 个文件夹")
+        protection_notice = ""
+        if mp3_protection_disabled:
+            protection_notice = (
+                f"防空任务保护：该目录的音频文件会被规则全部过滤且目录中没有其他文件，"
+                f"规则「{'、'.join(mp3_protection_disabled)}」本次未生效"
+            )
+            logger.warning("[Filter] %s", protection_notice)
+        completion_msg = f"过滤完成，已过滤 {len(filtered_files)} 个文件，{len(filtered_dirs)} 个文件夹"
+        if protection_notice:
+            completion_msg = f"{protection_notice}；{completion_msg}"
+        task.update_progress(50, completion_msg)
         logger.info(f"过滤完成: 文件 {len(filtered_files)} 个，文件夹 {len(filtered_dirs)} 个")
         return {
             "all_items": all_items,
@@ -173,6 +184,7 @@ class FilterService:
             "filtered_count": len(filtered_items),
             "filtered_size": int(filtered_size),
             "filter_recovery": recovery_service.public_summary(task.id),
+            "filter_protection_notice": protection_notice,
         }
     
     def _create_filter_rule(self, name: str, pattern: str, target: str = "file", action: str = "exclude", enabled: bool = True):
@@ -278,28 +290,54 @@ class FilterService:
                     audio_formats[format_name] = audio_formats.get(format_name, 0) + 1
         return audio_formats
     
-    def _disable_mp3_filter(self, rules):
+    def _resolve_audio_wipeout_protection(self, rules, walk_entries):
         """
-        临时禁用 MP3 过滤规则
-        创建规则的副本并禁用匹配 MP3 的规则
+        防空任务保护（精确判定，替代旧的「pattern 含 mp3 即禁用」）：
+        - 仅当目录中的音频文件会被当前启用规则全部过滤、且目录中没有任何其他文件时，
+          才临时禁用命中音频的规则（避免产生空任务）；
+        - 目录中还有其他文件（图片/文档/字幕等）时不干预，尊重用户规则正常过滤；
+        - 返回 (new_rules, disabled_rule_names)，触发时由调用方在任务进度与日志中明示。
         """
+        audio_extensions = {'.wav', '.mp3', '.flac', '.m4a', '.ogg', '.wma', '.aac'}
+        audio_names: list[str] = []
+        other_file_count = 0
+        for _, _, files in walk_entries:
+            for file in files:
+                if os.path.splitext(file)[1].lower() in audio_extensions:
+                    audio_names.append(file)
+                else:
+                    other_file_count += 1
+        if not audio_names or other_file_count > 0:
+            return rules, []
+        try:
+            all_audio_matched = all(self._should_filter_file(name, rules) for name in audio_names)
+        except re.error:
+            all_audio_matched = False
+        if not all_audio_matched:
+            return rules, []
+
+        disabled_names: list[str] = []
         new_rules = []
         for rule in rules:
-            # 创建规则的副本
             new_rule = self._create_filter_rule(
                 name=rule.name,
                 pattern=rule.pattern,
                 target=rule.target,
                 action=rule.action,
-                enabled=rule.enabled
+                enabled=rule.enabled,
             )
-            
-            # 如果规则匹配 MP3，则禁用它
-            if rule.enabled and rule.target in ['file', 'all']:
-                if re.search(r'mp3', rule.pattern, re.IGNORECASE):
-                    new_rule.enabled = False
-                    logger.info(f"临时禁用 MP3 过滤规则: {rule.name}")
-            
+            if rule.enabled and rule.target in ('file', 'all'):
+                try:
+                    if any(re.search(rule.pattern, name, re.IGNORECASE) for name in audio_names if name):
+                        new_rule.enabled = False
+                        disabled_names.append(rule.name)
+                except re.error:
+                    pass
             new_rules.append(new_rule)
-        
-        return new_rules
+        if disabled_names:
+            logger.warning(
+                "防空任务保护：目录中的 %d 个音频文件会被全部过滤且目录中无其他文件，已临时禁用规则: %s",
+                len(audio_names),
+                '、'.join(disabled_names),
+            )
+        return new_rules, disabled_names

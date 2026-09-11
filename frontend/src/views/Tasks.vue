@@ -1606,7 +1606,9 @@ async function handleRestoreFilteredItem({ entry }) {
 
 function taskTreeRowRelativePath(entry, section) {
   const rootLabel = normalizeTaskFileTreePath(section?.rootLabel || '')
-  const rowPath = normalizeTaskFileTreePath(entry?.relative_path || '')
+  // buildTreeRows 生成的树行只有 key（完整路径，含 root 前缀）字段，没有 relative_path；
+  // 旧代码读 relative_path 恒为空 → 误删整个输出根目录（表现为"删除整个项目"）
+  const rowPath = normalizeTaskFileTreePath(entry?.key || entry?.relative_path || '')
   if (!rootLabel) return rowPath
   if (rowPath.toLowerCase() === rootLabel.toLowerCase()) return ''
   if (rowPath.toLowerCase().startsWith(`${rootLabel.toLowerCase()}/`)) {
