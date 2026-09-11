@@ -484,9 +484,10 @@
     <el-dialog v-model="cleanupDialogVisible" title="增量整理（title 替换 + 评分异常修复）" width="640px" destroy-on-close>
       <div class="space-y-3">
         <div class="text-sm text-slate-600 space-y-1">
-          <p>① <b>title 替换</b>：目标作品全部用 DLsite 官方名称校验/覆盖数据库 title；</p>
+          <p>① <b>title 同步为文件夹名称</b>：目标作品的数据库 title 直接采用作品文件夹名（按「重命名与落盘」模板生成的规范名称），dir 为空的行保持原 title；</p>
           <p>② <b>评分修复</b>：仅 <b>0 分 / 无评分 / 满分（≥5）</b>的异常作品触发修复（关联版本日文原版优先 + 满分核验），正常评分不碰。</p>
         </div>
+        <div class="text-xs text-slate-400">起点按 <b>加入时间（created_at）</b> 判定——不是发售顺序；t_work.id 是 DLsite 作品号，方向对应发售时间，不用于此处。</div>
         <el-input
           v-model="cleanupSinceInput"
           placeholder="起点：留空 = 从上次处理位置继续；填 0 = 整个数据库；填 RJ 号（如 RJ01649167）= 处理该作品之后入库的数据（不含它）"

@@ -78,44 +78,58 @@ class KikoeruDbCleanupService:
             logger.warning("[KIKOERU-CLEANUP] 游标文件写入失败", exc_info=True)
 
     # ------------------------------------------------------------ 目标解析
-    def _resolve_since(self, since: str) -> tuple[int, str]:
-        """解析起点：返回 (since_id, 描述)。空串=上次游标；'0'=全库；RJ=定位作品。"""
+    def _resolve_since(self, since: str) -> tuple[str, str]:
+        """解析起点：返回 (since_created_at, 描述)。
+
+        - 空串 → 上次游标的 created_at（从未处理过则全库）；
+        - "0" → 全库（空串比较基准）；
+        - "RJxxxx" → 定位该作品的 **created_at**（Kikoeru 的加入时间；
+          t_work.id 是 DLsite 作品号数值，递增方向是发售顺序而非入库顺序）。
+        处理范围：created_at 严格大于起点的所有作品。
+        """
         since_clean = str(since or "").strip()
         if not since_clean:
             cursor = self.get_cursor()
-            since_id = int(cursor.get("work_id") or 0)
-            if since_id > 0:
-                return since_id, f"上次处理位置 {cursor.get('rjcode') or since_id}"
-            return 0, "从未处理过，从数据库起始"
+            since_created = str(cursor.get("created_at") or "")
+            if since_created:
+                return since_created, f"上次处理位置 {cursor.get('rjcode') or since_created}"
+            return "", "从未处理过，从数据库起始"
         if since_clean in ("0", "RJ0"):
-            return 0, "整个数据库"
+            return "", "整个数据库"
         service = get_kikoeru_db_service()
         conn = service._connect(None, readonly=True)
         try:
             workno = since_clean.upper()
             if not workno.startswith("RJ"):
                 workno = f"RJ{workno}"
-            # 目录名/关联 RJ 都可能承载起点作品——按 dir LIKE 与 id 双路定位
             cursor = conn.execute(
-                'SELECT id, dir FROM "t_work" WHERE dir LIKE ? OR CAST(id AS TEXT) = ? '
-                "ORDER BY id LIMIT 1",
-                (f"%{workno}%", workno[2:]),
+                'SELECT id, dir, created_at FROM "t_work" WHERE dir LIKE ? ORDER BY created_at LIMIT 1',
+                (f"%{workno}%",),
             ).fetchone()
             if not cursor:
                 raise ValueError(f"起点作品 {workno} 在数据库中不存在，请确认 RJ 号")
-            return int(cursor["id"]), f"起点作品 {workno}（id={cursor['id']}）"
+            created_at = str(cursor["created_at"] or "")
+            if not created_at:
+                raise ValueError(f"起点作品 {workno} 缺少 created_at，无法按加入时间定位")
+            return created_at, f"起点作品 {workno}（加入于 {created_at}）"
         finally:
             conn.close()
 
-    def _collect_targets(self, since_id: int) -> List[Dict[str, Any]]:
+    def _collect_targets(self, since_created_at: str) -> List[Dict[str, Any]]:
         service = get_kikoeru_db_service()
         conn = service._connect(None, readonly=True)
         try:
-            rows = conn.execute(
-                'SELECT id, dir, title, created_at, rate_count, rate_average_2dp '
-                'FROM "t_work" WHERE id > ? ORDER BY id',
-                (since_id,),
-            ).fetchall()
+            if since_created_at:
+                rows = conn.execute(
+                    'SELECT id, dir, title, created_at, rate_count, rate_average_2dp '
+                    'FROM "t_work" WHERE created_at > ? ORDER BY created_at, id',
+                    (since_created_at,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    'SELECT id, dir, title, created_at, rate_count, rate_average_2dp '
+                    'FROM "t_work" ORDER BY created_at, id'
+                ).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()
@@ -134,8 +148,8 @@ class KikoeruDbCleanupService:
     async def start(self, since: str) -> Dict[str, Any]:
         if self._state and self._state.get("running"):
             return {"started": False, "reason": "已有整理任务在运行"}
-        since_id, since_desc = await asyncio.to_thread(self._resolve_since, since)
-        targets = await asyncio.to_thread(self._collect_targets, since_id)
+        since_created_at, since_desc = await asyncio.to_thread(self._resolve_since, since)
+        targets = await asyncio.to_thread(self._collect_targets, since_created_at)
         abnormal_ids = self._abnormal_rating_ids(targets)
         state: Dict[str, Any] = {
             "running": True,
@@ -155,7 +169,7 @@ class KikoeruDbCleanupService:
             "finished_at": "",
         }
         self._state = state
-        self._task = asyncio.create_task(self._run_impl(state, targets, abnormal_ids, since_id))
+        self._task = asyncio.create_task(self._run_impl(state, targets, abnormal_ids, since_created_at))
         logger.info(
             "[KIKOERU-CLEANUP] 整理任务已启动: %s 目标=%s 评分异常=%s",
             since_desc, len(targets), len(abnormal_ids),
@@ -169,53 +183,52 @@ class KikoeruDbCleanupService:
 
     # ------------------------------------------------------------ 执行
     async def _run_impl(self, state: Dict[str, Any], targets: List[Dict[str, Any]],
-                        abnormal_ids: List[Any], since_id: int) -> None:
-        from .dlsite_service import get_dlsite_service
+                        abnormal_ids: List[Any], since_created_at: str) -> None:
         from .kikoeru_db_service import get_kikoeru_db_service
         from .kikoeru_rating_fix_service import get_kikoeru_rating_fix_service
 
         service = get_kikoeru_db_service()
-        dlsite = get_dlsite_service()
-        last_row: Optional[Dict[str, Any]] = None
+        last_row: Optional[Dict[str, Any]] = targets[-1] if targets else None
         try:
-            # ---------- 阶段 1：title 替换 ----------
+            # ---------- 阶段 0：写前备份（批量修改不可逆，失败即中止） ----------
+            state["phase"] = "backup"
+            try:
+                backup_result = await asyncio.to_thread(service.create_backup, "snapshot")
+                state["backup_file"] = str(backup_result.get("filename") or "")
+                logger.info("[KIKOERU-CLEANUP] 写前备份完成: %s", state["backup_file"])
+            except Exception as exc:
+                state["running"] = False
+                state["phase"] = "error"
+                state["error"] = f"写前备份失败，已中止整理: {exc}"
+                state["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                logger.error("[KIKOERU-CLEANUP] 写前备份失败，整理中止: %s", exc)
+                return
+
+            # ---------- 阶段 1：title = 作品文件夹名称（重命名模板产物，纯 SQL 瞬间完成） ----------
+            # 文件夹名按「重命名与落盘」模板生成，即用户想要的展示名；
+            # dir 为空的行为避免（保持原 title）。
+            state["title_total"] = len(targets)
             conn = await asyncio.to_thread(service._connect, None, readonly=False)
             try:
-                for row in targets:
-                    if state["cancel"]:
-                        break
-                    work_id = row["id"]
-                    dir_name = str(row["dir"] or "")
-                    last_row = row
-                    try:
-                        candidates = self._resolve_workno_candidates(work_id, dir_name)
-                        official_title = ""
-                        for workno in candidates:
-                            info = await dlsite.get_work_info(workno)
-                            if info and str(info.get("title") or "").strip():
-                                official_title = str(info["title"]).strip()
-                                break
-                        current_title = str(row["title"] or "").strip()
-                        if official_title and current_title != official_title:
-                            await asyncio.to_thread(
-                                conn.execute,
-                                'UPDATE "t_work" SET title = ? WHERE id = ?',
-                                (official_title, work_id),
-                            )
-                            await asyncio.to_thread(conn.commit)
-                            state["title_updated"] += 1
-                            logger.info(
-                                "[KIKOERU-CLEANUP] title 替换: id=%s 旧=%s 新=%s",
-                                work_id, current_title[:50], official_title[:50],
-                            )
-                        elif official_title:
-                            state["title_unchanged"] += 1
-                        else:
-                            state["title_missed"] += 1
-                    except Exception:
-                        state["title_missed"] += 1
-                        logger.warning("[KIKOERU-CLEANUP] title 处理失败 id=%s", work_id, exc_info=True)
-                    state["title_done"] += 1
+                base_cond = "created_at > ?" if since_created_at else "1=1"
+                params = (since_created_at,) if since_created_at else ()
+                cursor = await asyncio.to_thread(
+                    conn.execute,
+                    f'UPDATE "t_work" SET title = dir '
+                    f'WHERE {base_cond} AND dir IS NOT NULL AND dir != \'\' '
+                    f"AND (title IS NULL OR title != dir)",
+                    params,
+                )
+                updated = int(cursor.rowcount or 0)
+                await asyncio.to_thread(conn.commit)
+                state["title_updated"] = updated
+                state["title_unchanged"] = max(0, len(targets) - updated)
+                state["title_missed"] = 0
+                state["title_done"] = len(targets)
+                logger.info(
+                    "[KIKOERU-CLEANUP] title 已同步为文件夹名称: 更新 %s / 目标 %s",
+                    updated, len(targets),
+                )
             finally:
                 conn.close()
             state["phase"] = "rating"
@@ -247,18 +260,20 @@ class KikoeruDbCleanupService:
             state["running"] = False
             state["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if last_row and not state["cancel"]:
-                # 游标推进：记录本次处理的最大 id 对应作品（下次默认起点）
+                # 游标推进：记录本次处理的最大 created_at 作品（下次默认起点）
                 candidates = self._resolve_workno_candidates(last_row["id"], str(last_row["dir"] or ""))
+                last_created_at = str(last_row.get("created_at") or "")
                 self._save_cursor({
                     "rjcode": candidates[0] if candidates else str(last_row["dir"] or ""),
                     "work_id": int(last_row["id"]),
+                    "created_at": last_created_at,
                     "finished_at": state["finished_at"],
                     "processed_count": len(targets),
                 })
                 logger.info(
-                    "[KIKOERU-CLEANUP] 整理完成: 游标推进到 %s（id=%s）title 更新 %s / 评分异常 %s",
+                    "[KIKOERU-CLEANUP] 整理完成: 游标推进到 %s（created_at=%s）title 更新 %s / 评分异常 %s",
                     candidates[0] if candidates else last_row["dir"],
-                    last_row["id"], state["title_updated"], len(abnormal_ids),
+                    last_created_at, state["title_updated"], len(abnormal_ids),
                 )
             if state["cancel"]:
                 logger.info("[KIKOERU-CLEANUP] 整理任务被取消，游标不推进")

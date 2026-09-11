@@ -332,10 +332,10 @@ class KikoeruScanListener:
 
     # ------------------------------------------------------------ title 重构
     async def _refresh_titles_for_new_works(self, rows: list) -> dict:
-        """对新作品用 DLsite 官方 title 校验/重构数据库 title（title 杂乱痛点）。
+        """对新作品补全空缺 title：DLsite 官方 work_name 只在**当前 title 为空**时写入。
 
-        逐作品：dir 解析 workno 候选（复用评分修复的解析）→ get_work_info 取
-        官方 work_name → 非空且与当前 title 不同则 UPDATE t_work.title。
+        用户库的 title 多为维护好的中文汉化名，DLsite API 的 work_name 是官方
+        日文名/带宣传标记的官方名（拿不到中文翻译）——非空覆盖是降级，一律保留。
         """
         from .dlsite_service import get_dlsite_service
         from .kikoeru_rating_fix_service import get_kikoeru_rating_fix_service
@@ -350,6 +350,10 @@ class KikoeruScanListener:
                 work_id = r["id"]
                 dir_name = str(r["dir"] or "")
                 try:
+                    current_title = str(r["title"] or "").strip()
+                    if current_title:
+                        unchanged += 1
+                        continue
                     candidates = rating_fix._resolve_workno_candidates(work_id, dir_name)
                     official_title = ""
                     for workno in candidates:
@@ -359,11 +363,6 @@ class KikoeruScanListener:
                             break
                     if not official_title:
                         missed += 1
-                        logger.info("[KIKOERU-SCAN] title 重构跳过（DLsite 无数据）: id=%s dir=%s", work_id, dir_name)
-                        continue
-                    current_title = str(r["title"] or "").strip()
-                    if current_title == official_title:
-                        unchanged += 1
                         continue
                     await asyncio.to_thread(
                         conn.execute,
@@ -373,12 +372,12 @@ class KikoeruScanListener:
                     await asyncio.to_thread(conn.commit)
                     updated += 1
                     logger.info(
-                        "[KIKOERU-SCAN] title 重构: id=%s 旧=%s 新=%s",
-                        work_id, current_title[:60], official_title[:60],
+                        "[KIKOERU-SCAN] title 补全（原为空）: id=%s 新=%s",
+                        work_id, official_title[:60],
                     )
                 except Exception:
                     missed += 1
-                    logger.warning("[KIKOERU-SCAN] title 重构失败 id=%s", work_id, exc_info=True)
+                    logger.warning("[KIKOERU-SCAN] title 处理失败 id=%s", work_id, exc_info=True)
         finally:
             conn.close()
         return {"updated": updated, "unchanged": unchanged, "missed": missed}
