@@ -552,7 +552,10 @@ const filterDeleteTypeRowIds = computed(() => {
   return map
 })
 // 按命中规则批量选中：预审已按设置里的全部规则跑（每行 matched_rules 标注命中项），
-// 这里把同一规则命中的文件+目录归组，支持一键只选某条规则的命中项
+// 这里把同一规则命中的文件+目录归组，支持一键只选某条规则的命中项。
+// 标签以「设置中的全部启用规则」为全集（保持设置顺序）——未命中的规则显示计数 0，
+// 让用户一眼看出本目录哪些规则有命中、哪些没有；matched_rules 里超出设置名单的
+// 名字（防御）追加在尾部。
 const filterDeleteRuleOptions = computed(() => {
   const counts = new Map()
   for (const item of filterDeleteItems.value || []) {
@@ -563,12 +566,21 @@ const filterDeleteRuleOptions = computed(() => {
       counts.set(key, (counts.get(key) || 0) + 1)
     }
   }
-  return [...counts.entries()]
-    .sort((left, right) => {
-      if (right[1] !== left[1]) return right[1] - left[1]
-      return String(left[0]).localeCompare(String(right[0]), 'zh-Hans-CN-u-kn-true')
-    })
-    .map(([key, count]) => ({ key, label: key, count }))
+  const options = []
+  const seen = new Set()
+  for (const rule of props.rules || []) {
+    const name = String(rule?.name || '').trim()
+    if (!name || rule?.enabled === false || seen.has(name)) continue
+    seen.add(name)
+    options.push({ key: name, label: name, count: counts.get(name) || 0 })
+  }
+  for (const [key, count] of counts.entries()) {
+    if (!seen.has(key)) {
+      seen.add(key)
+      options.push({ key, label: key, count })
+    }
+  }
+  return options
 })
 const filterDeleteRuleRowIds = computed(() => {
   const map = new Map()
