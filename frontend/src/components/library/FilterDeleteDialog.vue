@@ -551,49 +551,66 @@ const filterDeleteTypeRowIds = computed(() => {
   }
   return map
 })
-// 按命中规则批量选中：预审已按设置里的全部规则跑（每行 matched_rules 标注命中项），
-// 这里把同一规则命中的文件+目录归组，支持一键只选某条规则的命中项。
-// 标签以「设置中的全部启用规则」为全集（保持设置顺序）——未命中的规则显示计数 0，
-// 让用户一眼看出本目录哪些规则有命中、哪些没有；matched_rules 里超出设置名单的
-// 名字（防御）追加在尾部。
-const filterDeleteRuleOptions = computed(() => {
-  const counts = new Map()
-  for (const item of filterDeleteItems.value || []) {
-    if (!item || !canFilterDeleteDeleteRow(item)) continue
+// 按命中规则批量选中：预审已按设置里的全部规则跑。删除粒度是文件级
+// （勾选目录只是批量选中已展示子项的手势，不删目录本身），所以规则
+// 标签的选中集合 = 该规则直接命中的文件 + 命中目录的后代文件
+// （后代 matched_rules 为空、靠 covered_by 关联命中目录，需继承规则名）。
+// 标签以「设置中的全部启用规则」为全集（保持设置顺序）——未命中的规则
+// 显示计数 0，让用户一眼看出本目录哪些规则有命中。
+const filterDeleteRuleRowIds = computed(() => {
+  const map = new Map()
+  const items = filterDeleteItems.value || []
+  const normalizePath = value => String(value || '').replace(/\\/g, '/').replace(/\/+$/, '')
+  // 命中目录：目录自身路径 -> Set(命中规则名)
+  const dirRuleMap = new Map()
+  for (const item of items) {
+    if (!item || item.type !== 'dir') continue
     for (const ruleName of item.matched_rules || []) {
       const key = String(ruleName || '').trim()
       if (!key) continue
-      counts.set(key, (counts.get(key) || 0) + 1)
+      const dirPath = normalizePath(item.path || item.delete_path)
+      if (!dirPath) continue
+      if (!dirRuleMap.has(dirPath)) dirRuleMap.set(dirPath, new Set())
+      dirRuleMap.get(dirPath).add(key)
     }
   }
+  for (const item of items) {
+    if (!item || item.type === 'dir' || !canFilterDeleteDeleteRow(item)) continue
+    const ruleNames = new Set(
+      (item.matched_rules || []).map(rule => String(rule || '').trim()).filter(Boolean)
+    )
+    const coveredBy = normalizePath(item.covered_by)
+    if (coveredBy && dirRuleMap.has(coveredBy)) {
+      for (const ruleName of dirRuleMap.get(coveredBy)) {
+        ruleNames.add(ruleName)
+      }
+    }
+    for (const ruleName of ruleNames) {
+      if (!map.has(ruleName)) map.set(ruleName, [])
+      map.get(ruleName).push(item.id)
+    }
+  }
+  return map
+})
+const filterDeleteRuleOptions = computed(() => {
+  const rowIds = filterDeleteRuleRowIds.value
   const options = []
   const seen = new Set()
+  // 全集：设置中的启用规则（保持设置顺序），未命中显示计数 0
   for (const rule of props.rules || []) {
     const name = String(rule?.name || '').trim()
     if (!name || rule?.enabled === false || seen.has(name)) continue
     seen.add(name)
-    options.push({ key: name, label: name, count: counts.get(name) || 0 })
+    options.push({ key: name, label: name, count: (rowIds.get(name) || []).length })
   }
-  for (const [key, count] of counts.entries()) {
+  // 防御：matched_rules 里超出设置名单的名字追加在尾部
+  for (const [key, ids] of rowIds.entries()) {
     if (!seen.has(key)) {
       seen.add(key)
-      options.push({ key, label: key, count })
+      options.push({ key, label: key, count: ids.length })
     }
   }
   return options
-})
-const filterDeleteRuleRowIds = computed(() => {
-  const map = new Map()
-  for (const item of filterDeleteItems.value || []) {
-    if (!item || !canFilterDeleteDeleteRow(item)) continue
-    for (const ruleName of item.matched_rules || []) {
-      const key = String(ruleName || '').trim()
-      if (!key) continue
-      if (!map.has(key)) map.set(key, [])
-      map.get(key).push(item.id)
-    }
-  }
-  return map
 })
 const filterDeleteFilteredRoot = computed(() => {
   const keyword = filterDeleteSearch.value.trim().toLowerCase()
