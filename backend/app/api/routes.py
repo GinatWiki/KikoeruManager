@@ -23036,6 +23036,31 @@ def _duplicate_collect_version_files(
     return items, truncated
 
 
+def _duplicate_excluded_library_ids() -> set:
+    """仓库查重排除的库 id：设置里勾选「查重排除」（exclude_dedup）的库存。"""
+    from ..config.settings import get_config
+
+    config = get_config()
+    return {
+        str(lib.id)
+        for lib in (config.storage.libraries or [])
+        if bool(getattr(lib, "exclude_dedup", False)) and str(lib.id or "").strip()
+    }
+
+
+def _duplicate_input_library_id() -> str:
+    """输入库 id（storage.input_path 对应的库存）——其内部多版本在仓库查重中折叠为一个版本。"""
+    from ..config.settings import get_config
+
+    config = get_config()
+    input_path = str(config.storage.input_path or "").rstrip("/") or "/input"
+    for lib in (config.storage.libraries or []):
+        lib_path = str(lib.path or "").rstrip("/")
+        if lib_path and (lib_path == input_path or input_path.startswith(f"{lib_path}/")):
+            return str(lib.id or "")
+    return ""
+
+
 @app.get("/api/duplicate-check/groups")
 async def get_duplicate_groups(
     page: int = 1,
@@ -23044,7 +23069,12 @@ async def get_duplicate_groups(
     search: str = "",
 ):
     """获取重复 RJ 分组列表。按"作品根目录"（路径中第一个包含 RJ 号的目录组件）聚合版本，
-    避免同一作品文件夹下文件名带 RJ 的多个文件被误算为多个版本。"""
+    避免同一作品文件夹下文件名带 RJ 的多个文件被误算为多个版本。
+
+    - 设置里勾选「查重排除」（exclude_dedup）的库存不参与仓库查重；
+    - 输入库（storage.input_path）内部的多个版本折叠为一个版本：
+      输入库是待处理区，内部自重复（如压缩包与解压残留并存）没有清理价值。
+    """
     from ..models.database import LibraryIndexEntry, get_db
 
     db = next(get_db())
@@ -23069,12 +23099,27 @@ async def get_duplicate_groups(
             ),
             else_=func.coalesce(LibraryIndexEntry.parent_path, ""),
         )
-        # 版本去重键：每个 (library_id, 作品根目录) 组合算一个版本
-        version_key_expr = func.concat(
-            LibraryIndexEntry.library_id,
-            "::",
-            work_root_expr,
+        # 版本去重键：每个 (library_id, 作品根目录) 组合算一个版本；
+        # 输入库条目折叠为库 id 本身——输入库内部多版本不计数（待处理区自重复无清理价值）
+        input_library_id = _duplicate_input_library_id()
+        version_key_expr = case(
+            (
+                and_(
+                    bool(input_library_id),
+                    LibraryIndexEntry.library_id == input_library_id,
+                ),
+                LibraryIndexEntry.library_id,
+            ),
+            else_=func.concat(
+                LibraryIndexEntry.library_id,
+                "::",
+                work_root_expr,
+            ),
         )
+        # 设置里勾选「查重排除」（exclude_dedup）的库存不参与仓库查重
+        excluded_library_ids = _duplicate_excluded_library_ids()
+        if excluded_library_ids:
+            base_q = base_q.filter(~LibraryIndexEntry.library_id.in_(excluded_library_ids))
         # 版本根目录行自身（目录行 size / file_count 是递归汇总值，直接取用避免嵌套目录重复计数）；
         # 散放 RJ 文件没有目录行，大小和文件数按自身计 1。
         root_row_cond = and_(rj_pos > 0, tail_slash.is_(None))
@@ -23175,9 +23220,15 @@ async def get_duplicate_groups(
 
 @app.get("/api/duplicate-check/groups/{rjcode}")
 async def get_duplicate_group_detail(rjcode: str):
-    """获取指定 RJ 的所有重复版本详情，按版本分组（每个 library_id + parent_path 组合为一个版本）。"""
+    """获取指定 RJ 的所有重复版本详情，按版本分组（每个 library_id + parent_path 组合为一个版本）。
+
+    与列表端点同口径：exclude_dedup 库不参与；输入库内部多版本折叠为一个版本。
+    """
     from ..models.database import LibraryIndexEntry, get_db
     from ..core.library_manager import get_library_manager
+
+    excluded_library_ids = _duplicate_excluded_library_ids()
+    input_library_id = _duplicate_input_library_id()
 
     db = next(get_db())
     try:
@@ -23187,6 +23238,8 @@ async def get_duplicate_group_detail(rjcode: str):
             .order_by(LibraryIndexEntry.library_id, LibraryIndexEntry.parent_path, LibraryIndexEntry.depth)
             .all()
         )
+        if excluded_library_ids:
+            entries = [entry for entry in entries if str(entry.library_id) not in excluded_library_ids]
 
         if not entries:
             raise HTTPException(status_code=404, detail=f"未找到 RJ{rjcode} 的索引记录")
@@ -23212,7 +23265,11 @@ async def get_duplicate_group_detail(rjcode: str):
             version_root = _duplicate_version_root(
                 entry.relative_path, entry.parent_path, entry.entry_type, entry.rjcode
             )
-            version_key = f"{entry.library_id}::{version_root}"
+            # 输入库条目折叠为库 id 版本（与列表端点同口径）
+            if input_library_id and str(entry.library_id) == input_library_id:
+                version_key = f"{entry.library_id}::@input"
+            else:
+                version_key = f"{entry.library_id}::{version_root}"
 
             entry_item = DuplicateEntryItem(
                 id=entry.id,
