@@ -27906,7 +27906,7 @@ async function startFileLevelRename() {
 
   display: flex;
 
-  align-items: center;
+  align-items: flex-start;
 
   gap: 10px;
 
@@ -27934,6 +27934,8 @@ async function startFileLevelRename() {
 
   flex: 0 0 auto;
 
+  margin-top: 3px;
+
   accent-color: #2563eb;
 
   cursor: pointer;
@@ -27944,11 +27946,13 @@ async function startFileLevelRename() {
 
   font-size: 13px;
 
-  overflow: hidden;
+  line-height: 1.55;
 
-  text-overflow: ellipsis;
+  white-space: normal;
 
-  white-space: nowrap;
+  word-break: break-all;
+
+  overflow-wrap: anywhere;
 
 }
 
