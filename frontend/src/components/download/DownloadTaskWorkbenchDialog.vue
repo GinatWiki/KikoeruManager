@@ -7,7 +7,7 @@
   <Teleport to="body" :disabled="embedded">
     <transition name="el-fade-in">
       <div
-        v-if="visible"
+        v-if="visible || embedded"
         class="v1-overlay"
         :class="{ 'is-embedded': embedded }"
         @click.self="!embedded && emit('background')"
