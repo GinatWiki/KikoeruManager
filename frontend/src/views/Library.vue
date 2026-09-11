@@ -462,6 +462,14 @@
 
         </div>
 
+        </div>
+
+      </div>
+
+      <div class="lib-body-flex">
+
+      <Teleport v-if="railSlotReady" to="#lib-rail-slot">
+
         <div class="lib-path-right">
 
           <StatefulButton
@@ -631,9 +639,7 @@
           </button>
         </div>
 
-      </div>
-
-      </div>
+      </Teleport>
 
 
 
@@ -908,6 +914,10 @@
           popper-class="km-pagination-size-popper"
           background
         />
+
+      </div>
+
+      <div id="lib-rail-slot" class="lib-tools-rail"></div>
 
       </div>
 
@@ -5891,6 +5901,16 @@ const canProcessCurrentFolder = computed(() => {
 
 const isFlatteningCurrentFolder = ref(false)
 
+// 右侧功能栏的 Teleport 目标（el-card__body 尾部）需在挂载后才存在
+const railSlotReady = ref(false)
+onMounted(() => {
+  railSlotReady.value = true
+})
+
+// 索引 revision 丢弃计数：连续丢弃超过 3 次则接受响应兜底
+// （数据可能略旧，但空列表不可用；tombstone 过滤仍会隐藏已删除项）
+let directoryStaleDropCount = 0
+
 // 扁平化预审弹窗：先干跑列出单链变换清单，勾选后执行
 const flattenPreviewVisible = ref(false)
 const flattenPreviewLoading = ref(false)
@@ -9246,10 +9266,16 @@ async function refreshLibrary (options = {}) {
     if (String(sortBy.value || DEFAULT_SORT_BY) !== requestSortBy || String(sortOrder.value || DEFAULT_SORT_ORDER) !== requestSortOrder) return
     if (!libraryIndexStateStore.isIndexViewResponseCurrent(data)) {
       // 索引物化滞后（revision 低于本地记录）时丢弃旧快照是正确的，
-      // 但必须安排重试，否则列表会冻结在空状态直到用户手动刷新
-      scheduleListPoll([], { index_refresh_pending: true })
-      return
+      // 但必须安排重试，否则列表会冻结在空状态直到用户手动刷新；
+      // 连续丢弃超过 3 次则接受当前响应兜底（空列表不可用）
+      directoryStaleDropCount += 1
+      if (directoryStaleDropCount <= 3) {
+        scheduleListPoll([], { index_refresh_pending: true })
+        return
+      }
+      directoryStaleDropCount = 0
     }
+    directoryStaleDropCount = 0
     libraryIndexStateStore.recordIndexViews(data)
 
     files.value = applyRecentRenameRows(filterRowsByIndexTombstones(data.files || [], requestLibraryId))
@@ -27617,23 +27643,32 @@ async function startFileLevelRename() {
 
 }
 
-.lib-path-right {
+.lib-body-flex {
 
-  /* 右侧常驻功能栏：fixed 定位脱离路径工具栏，面包屑独占整行宽度；
-     桌面端主体通过 .library-page-loading-shell 的 padding-right 让位 */
-  position: fixed;
+  /* 列表主列 + 右侧功能栏的两栏布局 */
+  display: flex;
 
-  top: 92px;
+  align-items: flex-start;
 
-  right: 18px;
+  gap: 14px;
 
-  width: 176px;
+}
 
-  max-height: calc(100vh - 132px);
+.lib-body-flex > *:not(#lib-rail-slot) {
 
-  overflow-y: auto;
+  flex: 1 1 auto;
 
-  z-index: 40;
+  min-width: 0;
+
+}
+
+.lib-tools-rail {
+
+  flex: 0 0 176px;
+
+  position: sticky;
+
+  top: 14px;
 
   display: flex;
 
@@ -27643,6 +27678,10 @@ async function startFileLevelRename() {
 
   gap: 5px;
 
+  max-height: calc(100vh - 60px);
+
+  overflow-y: auto;
+
   padding: 8px;
 
   border: 1px solid var(--lib-toolbar-rail-border, rgba(148, 163, 184, 0.28));
@@ -27651,33 +27690,91 @@ async function startFileLevelRename() {
 
   background: var(--lib-toolbar-rail-bg, rgba(148, 163, 184, 0.08));
 
-  backdrop-filter: blur(8px);
-
   white-space: nowrap;
 
 }
 
-.library-page-loading-shell {
+.lib-path-right {
 
-  padding-right: 206px;
+  display: flex;
+
+  flex-direction: column;
+
+  align-items: stretch;
+
+  gap: 5px;
+
+}
+
+.lib-path-right > .lib-btn {
+
+  width: 100%;
+
+  justify-content: flex-start;
+
+  gap: 8px;
+
+  padding: 6px 10px;
+
+  border-radius: 9px;
+
+}
+
+.lib-path-right > .lib-btn > span {
+
+  overflow: hidden;
+
+  text-overflow: ellipsis;
+
+}
+
+.lib-path-right > .lib-scope-switch {
+
+  width: 100%;
+
+  justify-content: stretch;
+
+}
+
+.lib-path-right > .lib-scope-switch > .lib-scope-option {
+
+  flex: 1 1 0;
+
+  justify-content: center;
+
+  min-height: 26px;
+
+  font-size: 12px;
 
 }
 
 @media (max-width: 960px) {
 
-  .library-page-loading-shell {
+  .lib-body-flex {
 
-    padding-right: 0;
+    flex-direction: column;
+
+  }
+
+  .lib-tools-rail {
+
+    flex: 1 1 auto;
+
+    width: 100%;
+
+    position: static;
+
+    max-height: none;
+
+    flex-direction: row;
+
+    flex-wrap: wrap;
+
+    align-items: center;
 
   }
 
   .lib-path-right {
-
-    position: static;
-
-    width: 100%;
-
-    max-height: none;
 
     flex-direction: row;
 
