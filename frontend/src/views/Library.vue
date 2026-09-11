@@ -574,6 +574,28 @@
 
             type="button"
 
+            class="lib-btn lib-btn-icon-tinted lib-icon-flatten"
+
+            :disabled="!canProcessCurrentFolder || isRemoteCurrentLibrary || isFlatteningCurrentFolder"
+
+            title="单链扁平化：把「每层只有一个子文件夹」的嵌套链合并提升，整理目录结构"
+
+            @click="flattenCurrentFolder"
+
+          >
+
+            <IconLoaderCircle v-if="isFlatteningCurrentFolder" class="animate-spin" :size="14" :stroke-width="2.2" />
+
+            <IconFlatten v-else :size="14" :stroke-width="2.2" />
+
+            <span>{{ isFlatteningCurrentFolder ? '扁平化中…' : '文件夹扁平化' }}</span>
+
+          </button>
+
+          <button
+
+            type="button"
+
             class="lib-btn lib-btn-icon-tinted lib-icon-task-panel"
 
             @click="openSubtitleTaskPanel"
@@ -1771,6 +1793,51 @@
 
     />
 
+    <el-dialog
+      v-model="flattenPreviewVisible"
+      title="文件夹扁平化预览"
+      width="680px"
+      append-to-body
+      :close-on-click-modal="!flattenPreviewApplying"
+    >
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        class="mb-3"
+        title="以下单链目录（每层只有一个子文件夹）将被合并提升。取消勾选可保留不想动的层级；被过滤删除的空目录已在确认删除时自动清理。"
+      />
+      <div v-loading="flattenPreviewApplying" class="flatten-preview-list">
+        <label
+          v-for="(op, index) in flattenPreviewOperations"
+          :key="`${op.parent_relative_path || '@root'}::${op.removed_segment}`"
+          class="flatten-preview-row"
+        >
+          <input
+            type="checkbox"
+            class="flatten-preview-checkbox"
+            :checked="flattenPreviewSelected.includes(index)"
+            @change="toggleFlattenPreviewRow(index, $event.target.checked)"
+          />
+          <span class="flatten-preview-label">{{ flattenOpLabel(op) }}</span>
+        </label>
+        <div v-if="!flattenPreviewOperations.length" class="text-sm text-slate-400 py-4 text-center">
+          没有可扁平化的单链结构
+        </div>
+      </div>
+      <template #footer>
+        <el-button :disabled="flattenPreviewApplying" @click="flattenPreviewVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :disabled="flattenPreviewApplying || flattenPreviewSelected.length === 0"
+          :loading="flattenPreviewApplying"
+          @click="confirmFlattenPreview"
+        >
+          扁平化选中 ({{ flattenPreviewSelected.length }})
+        </el-button>
+      </template>
+    </el-dialog>
+
 
 
     <FilterDeleteDialog
@@ -1991,6 +2058,7 @@ import {
 
   Languages as IconLanguages,
   FilterX as IconFilterX,
+  FoldVertical as IconFlatten,
 
   Upload as IconUpload,
   Archive as IconArchive,
@@ -5821,6 +5889,77 @@ const canProcessCurrentFolder = computed(() => {
 
 })
 
+const isFlatteningCurrentFolder = ref(false)
+
+// 扁平化预审弹窗：先干跑列出单链变换清单，勾选后执行
+const flattenPreviewVisible = ref(false)
+const flattenPreviewLoading = ref(false)
+const flattenPreviewOperations = ref([])
+const flattenPreviewSelected = ref([])
+const flattenPreviewApplying = ref(false)
+
+function flattenOpLabel (op) {
+  const parent = String(op.parent_relative_path || '').replace(/\\/g, '/')
+  const parentText = parent ? `${parent}/` : ''
+  return `合并 ${parentText}「${op.removed_segment}」的内容到 ${parentText || '根目录'}`
+}
+
+async function flattenCurrentFolder () {
+  // 单链扁平化（两段式）：先干跑预览变换清单，用户勾选要合并的单链后执行。
+  // 典型场景：过滤删除清掉 mp3/台本后残留的 翻译组目录/原目录名/版本目录 单链。
+  // 移动文件后 Kikoeru 需要重新扫描才能感知新路径。
+  if (!selectedLibraryId.value || !currentPath.value || isFlatteningCurrentFolder.value) return
+  if (isRemoteCurrentLibrary.value) {
+    ElMessage.warning('远程库存（群晖）暂不支持扁平化整理')
+    return
+  }
+  isFlatteningCurrentFolder.value = true
+  try {
+    const result = await libraryApi.flattenSingleChains(selectedLibraryId.value, currentPath.value)
+    const operations = Array.isArray(result?.operations) ? result.operations : []
+    if (!operations.length) {
+      ElMessage.info('当前目录没有可扁平化的单链结构')
+      return
+    }
+    flattenPreviewOperations.value = operations
+    flattenPreviewSelected.value = operations.map((_, index) => index)
+    flattenPreviewVisible.value = true
+  } catch (error) {
+    ElMessage.error('扁平化预览失败: ' + (error.response?.data?.detail || error.message || '未知错误'))
+  } finally {
+    isFlatteningCurrentFolder.value = false
+  }
+}
+
+async function confirmFlattenPreview () {
+  const selected = flattenPreviewSelected.value
+    .map(index => flattenPreviewOperations.value[index])
+    .filter(Boolean)
+  if (!selected.length) {
+    ElMessage.warning('请至少勾选一条要合并的单链')
+    return
+  }
+  flattenPreviewApplying.value = true
+  try {
+    const result = await libraryApi.flattenSingleChains(selectedLibraryId.value, currentPath.value, selected)
+    const applied = Number(result?.applied_count || 0)
+    ElMessage.success(`扁平化完成：合并了 ${applied} 条单链`)
+    flattenPreviewVisible.value = false
+    await refreshLibrary({ forceRefresh: true })
+  } catch (error) {
+    ElMessage.error('扁平化失败: ' + (error.response?.data?.detail || error.message || '未知错误'))
+  } finally {
+    flattenPreviewApplying.value = false
+  }
+}
+
+function toggleFlattenPreviewRow (index, checked) {
+  const next = new Set(flattenPreviewSelected.value)
+  if (checked) next.add(index)
+  else next.delete(index)
+  flattenPreviewSelected.value = [...next]
+}
+
 const selectedFilterDeleteRows = computed(() => selectedRows.value.filter(row => row?.is_directory))
 
 const selectedRealFilterDeleteRows = computed(() => normalizeLibraryActionRows(selectedFilterDeleteRows.value).filter(row => row?.is_directory))
@@ -8286,7 +8425,9 @@ watch(selectedLibraryId, async (newId, oldId) => {
 
   }
 
-  await refreshLibrary()
+  // 切换库存强制走实时浏览：索引视图可能返回滞后快照（表现为切换后仍显示
+  // 上一个库存的文件、必须手动刷新），切换是全新视图，直接绕过索引缓存
+  await refreshLibrary({ forceRefresh: true })
 
   refreshStats(false, { silent: true })
 
@@ -27473,17 +27614,74 @@ async function startFileLevelRename() {
 
 .lib-path-right {
 
+  /* 右侧功能栏：竖排卡片化，避免横排按钮挤占路径面包屑的宽度 */
   display: flex;
 
-  align-items: center;
+  flex-direction: column;
 
-  gap: 8px;
+  align-items: stretch;
+
+  gap: 5px;
 
   flex: 0 0 auto;
 
-  flex-wrap: nowrap;
+  width: 176px;
+
+  max-height: 260px;
+
+  overflow-y: auto;
+
+  padding: 8px;
+
+  border: 1px solid var(--lib-toolbar-rail-border, rgba(148, 163, 184, 0.28));
+
+  border-radius: 14px;
+
+  background: var(--lib-toolbar-rail-bg, rgba(148, 163, 184, 0.08));
 
   white-space: nowrap;
+
+}
+
+.lib-path-right > .lib-btn {
+
+  width: 100%;
+
+  justify-content: flex-start;
+
+  gap: 8px;
+
+  padding: 6px 10px;
+
+  border-radius: 9px;
+
+}
+
+.lib-path-right > .lib-btn > span {
+
+  overflow: hidden;
+
+  text-overflow: ellipsis;
+
+}
+
+.lib-path-right > .lib-scope-switch {
+
+  width: 100%;
+
+  justify-content: stretch;
+
+}
+
+.lib-path-right > .lib-scope-switch > .lib-scope-option {
+
+  flex: 1 1 0;
+
+  justify-content: center;
+
+  min-height: 26px;
+
+  font-size: 12px;
 
 }
 

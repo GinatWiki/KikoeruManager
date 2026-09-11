@@ -11689,10 +11689,12 @@ async def cancel_library_browser_filter_delete_preview(request: Request):
 
 @app.post("/api/library/browser/flatten-single-chains")
 async def flatten_library_browser_single_chains(request: Request):
-    """过滤删除收尾：对目标目录做单子目录链扁平化（删除文件后残留的空壳/单链整理）。
+    """过滤删除收尾：单子目录链扁平化的预览与执行。
 
-    复用重命名服务的扁平化实现（rename.flatten_single_subfolder / flatten_depth），
-    仅支持本地库存；目录内有多个子项（多分支）时按设计停止，不移动文件。
+    - body 不带 operations：干跑预览，返回将被合并的变换清单（不移动文件）；
+    - body 带 operations（用户勾选的变换子集）：按清单执行移动（深层优先），
+      并顺带清理残留空目录。复用重命名服务的扁平化实现
+      （rename.flatten_single_subfolder / flatten_depth），仅支持本地库存。
     """
     try:
         data = await request.json()
@@ -11710,11 +11712,24 @@ async def flatten_library_browser_single_chains(request: Request):
         from ..core.rename_service import RenameService
 
         service = RenameService()
-        operations: list[dict[str, str]] = []
-        service._flatten_single_subfolder(path, operation_sink=operations)
-        service.remove_empty_folders(path, remove_root=False)
-        logger.info(f"过滤删除后扁平化完成: {path}（{len(operations)} 次合并）")
-        return {"flattened_operations": len(operations), "operations": operations, "path": path}
+        raw_operations = data.get("operations")
+        if isinstance(raw_operations, list) and raw_operations:
+            operations = [
+                {
+                    "parent_relative_path": str(op.get("parent_relative_path") or "").strip("/"),
+                    "removed_segment": str(op.get("removed_segment") or "").strip("/"),
+                }
+                for op in raw_operations
+                if isinstance(op, dict) and str(op.get("removed_segment") or "").strip("/")
+            ]
+            if not operations:
+                raise HTTPException(status_code=400, detail="没有有效的扁平化变换")
+            result = service.apply_single_chain_flattens(path, operations)
+            logger.info(f"过滤删除后扁平化执行完成: {path}（合并 {result['applied_count']} 条单链）")
+            return {"mode": "apply", **result}
+
+        operations = service.plan_single_chain_flattens(path)
+        return {"mode": "preview", "operations": operations, "count": len(operations), "path": path}
     except HTTPException:
         raise
     except Exception as e:

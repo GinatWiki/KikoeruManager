@@ -294,6 +294,86 @@ class RenameService:
 
         return str(root_path)
 
+    def plan_single_chain_flattens(self, path: str, max_depth: Optional[int] = None) -> list[dict[str, str]]:
+        """
+        干跑扫描：返回目标目录下所有「单子目录链」的合并变换清单（不移动任何文件）。
+        变换格式与 _flatten_single_subfolder 的 operation_sink 一致：
+        {parent_relative_path, removed_segment}——把 parent 下的 removed_segment
+        子目录内容提升到 parent。沿链深入自动产生链式变换（A→B→C 产生两条）。
+        """
+        root_path = Path(path)
+        depth_limit = int(max_depth if max_depth is not None else self.config.rename.flatten_depth)
+        operations: list[dict[str, str]] = []
+
+        def scan(current: Path, depth: int, parent_rel: str) -> None:
+            if depth >= depth_limit or not current.is_dir():
+                return
+            try:
+                entries = list(current.iterdir())
+            except OSError:
+                return
+            subdirs = [entry for entry in entries if entry.is_dir()]
+            if len(entries) == 1 and len(subdirs) == 1:
+                subfolder = subdirs[0]
+                operations.append({
+                    "parent_relative_path": parent_rel,
+                    "removed_segment": subfolder.name,
+                })
+                # 沿链深入：子目录成为新的 parent（继续找链的下一节）
+                next_rel = f"{parent_rel}/{subfolder.name}" if parent_rel else subfolder.name
+                scan(subfolder, depth + 1, next_rel)
+                return
+            for subfolder in subdirs:
+                next_rel = f"{parent_rel}/{subfolder.name}" if parent_rel else subfolder.name
+                scan(subfolder, depth + 1, next_rel)
+
+        scan(root_path, 0, "")
+        # 深层优先排序（执行顺序：先合并深层，浅层合并才能一次到位）
+        def _depth_key(op: dict[str, str]) -> int:
+            parent = str(op.get("parent_relative_path") or "")
+            return -(len([part for part in parent.split("/") if part]) + 1)
+        operations.sort(key=_depth_key)
+        return operations
+
+    def apply_single_chain_flattens(self, path: str, operations: list[dict[str, str]]) -> dict:
+        """
+        按给定的变换清单执行单链合并（用户在预审弹窗中勾选的子集）。
+        深层优先执行；目标冲突（同名已存在）或目录缺失的变换跳过并记录。
+        执行完成后顺带清理残留的空目录。
+        """
+        root_path = Path(path)
+        applied: list[dict[str, str]] = []
+        skipped: list[dict[str, str]] = []
+
+        def _depth_key(op: dict[str, str]) -> int:
+            parent = str(op.get("parent_relative_path") or "")
+            return -(len([part for part in parent.split("/") if part]) + 1)
+
+        for op in sorted(operations or [], key=_depth_key):
+            parent_rel = str(op.get("parent_relative_path") or "").strip("/")
+            segment = str(op.get("removed_segment") or "").strip("/")
+            if not segment:
+                continue
+            parent = root_path.joinpath(*parent_rel.split("/")) if parent_rel else root_path
+            subfolder = parent / segment
+            if not parent.is_dir() or not subfolder.is_dir():
+                skipped.append({**op, "reason": "missing"})
+                continue
+            conflict = [entry for entry in subfolder.iterdir() if (parent / entry.name).exists()]
+            if conflict:
+                skipped.append({**op, "reason": f"同名冲突: {conflict[0].name}"})
+                continue
+            for entry in list(subfolder.iterdir()):
+                shutil.move(str(entry), str(parent / entry.name))
+            subfolder.rmdir()
+            applied.append(op)
+            logger.info(f"单链扁平化: {parent / segment} -> {parent}")
+        try:
+            self.remove_empty_folders(str(root_path), remove_root=False)
+        except Exception:
+            logger.warning("扁平化后空目录清理失败", exc_info=True)
+        return {"applied": applied, "skipped": skipped, "applied_count": len(applied)}
+
     def remove_empty_folders(self, path: str, remove_root: bool = False) -> None:
         """
         递归移除空文件夹
