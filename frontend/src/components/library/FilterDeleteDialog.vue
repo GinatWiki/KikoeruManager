@@ -1691,6 +1691,22 @@ async function cleanupFilterDeleteEmptyDirs (succeededPaths = []) {
   }
 }
 
+async function flattenFilterDeleteTargetRoot () {
+  // 过滤删除收尾：删除导致的空壳已清理，此时残留的单链目录
+  // （如 翻译组目录/原目录名/仅剩的一个版本目录）压平，让结构更干净。
+  // 复用解压管道同款扁平化实现（rename.flatten_single_subfolder，多分支按设计停止）。
+  // 仅本地库存支持；失败静默（不影响删除结果），Kikoeru 重新扫描后感知新路径。
+  if (props.isRemote) return
+  const rootPath = normalizeFilterDeleteComparePath(props.currentPath || filterDeletePreviewInfo.value.folderPath || '')
+  const libraryId = String(props.libraryId || '').trim()
+  if (!rootPath || !libraryId) return
+  try {
+    await libraryApi.flattenSingleChains(libraryId, rootPath)
+  } catch (error) {
+    console.warn('过滤删除后扁平化失败（不影响删除结果）:', error)
+  }
+}
+
 async function confirmFilterDeleteSelection () {
   if (filterDeletePreviewInfo.value.status !== 'completed') {
     ElMessage.warning('\u5220\u9664\u8fc7\u6ee4\u9884\u5ba1\u5c1a\u672a\u5b8c\u6574\u5b8c\u6210\uff0c\u8bf7\u7b49\u5f85\u626b\u63cf\u7ed3\u675f\u540e\u518d\u5220\u9664')
@@ -1840,6 +1856,7 @@ async function confirmFilterDeleteSelection () {
           : `\u5220\u9664\u5b8c\u6210\uff0c\u6210\u529f ${successCount} / ${deleteTargets.length}`
       })
       await cleanupFilterDeleteEmptyDirs(succeededPaths)
+      await flattenFilterDeleteTargetRoot()
     }
     const succeededItems = buildFilterDeleteLogItemsByTargets(attemptedItems, succeededPaths)
     await writeFilterDeleteApplyActivityLog({

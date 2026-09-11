@@ -11687,6 +11687,41 @@ async def cancel_library_browser_filter_delete_preview(request: Request):
         raise HTTPException(status_code=500, detail=f"取消过滤删除预审失败: {str(e)}")
 
 
+@app.post("/api/library/browser/flatten-single-chains")
+async def flatten_library_browser_single_chains(request: Request):
+    """过滤删除收尾：对目标目录做单子目录链扁平化（删除文件后残留的空壳/单链整理）。
+
+    复用重命名服务的扁平化实现（rename.flatten_single_subfolder / flatten_depth），
+    仅支持本地库存；目录内有多个子项（多分支）时按设计停止，不移动文件。
+    """
+    try:
+        data = await request.json()
+        library_id = str(data.get("library_id") or "").strip()
+        path = str(data.get("path") or "").strip()
+        if not library_id or not path:
+            raise HTTPException(status_code=400, detail="library_id 与 path 不能为空")
+        manager = get_library_manager()
+        library = manager.get_library_definition(library_id)
+        if library.type != "local":
+            raise HTTPException(status_code=400, detail="仅本地库存支持扁平化整理")
+        manager._assert_local_path_in_library(library, path)
+        if not os.path.isdir(path):
+            raise HTTPException(status_code=404, detail="目标目录不存在")
+        from ..core.rename_service import RenameService
+
+        service = RenameService()
+        operations: list[dict[str, str]] = []
+        service._flatten_single_subfolder(path, operation_sink=operations)
+        service.remove_empty_folders(path, remove_root=False)
+        logger.info(f"过滤删除后扁平化完成: {path}（{len(operations)} 次合并）")
+        return {"flattened_operations": len(operations), "operations": operations, "path": path}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"过滤删除后扁平化失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"扁平化失败: {str(e)}")
+
+
 @app.post("/api/library/browser/create-folder")
 async def create_library_browser_folder(request: Request):
     prepared = None

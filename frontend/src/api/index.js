@@ -1442,6 +1442,14 @@ export const libraryApi = {
     return response.data
   },
 
+  flattenSingleChains: async (libraryId, path) => {
+    const response = await apiClient.post('/library/browser/flatten-single-chains', {
+      library_id: libraryId,
+      path
+    })
+    return response.data
+  },
+
   batchApiRename: async (paths, libraryId = null, options = {}) => {
     const payload = { paths }
     if (libraryId) payload.library_id = libraryId
