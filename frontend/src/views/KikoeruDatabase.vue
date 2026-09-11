@@ -40,6 +40,18 @@
         <span class="page-head-btn-label">评分修复</span>
       </button>
 
+      <button
+        class="page-head-btn ghost is-blue btn-cleanup"
+        type="button"
+        :disabled="!featureEnabled"
+        :title="featureEnabled ? '对上次处理位置之后入库的作品做 title 替换与评分异常修复' : '功能未启用，请先在设置中开启并保存'"
+        @click="openCleanupDialog"
+      >
+        <Loader2 v-if="cleanupStatusData.running" :size="13" :stroke-width="2.4" class="animate-spin" />
+        <FolderSync v-else :size="13" :stroke-width="2.6" class="page-head-btn-icon" />
+        <span class="page-head-btn-label">{{ cleanupStatusData.running ? '整理中…' : '增量整理' }}</span>
+      </button>
+
       <button class="page-head-btn ghost btn-refresh icon-only" type="button" title="刷新" @click="refreshAll">
         <RefreshCw :size="13" :stroke-width="2.6" class="page-head-btn-icon" />
       </button>
@@ -467,6 +479,53 @@
         </div>
       </div>
     </el-dialog>
+
+    <!-- 增量整理对话框 -->
+    <el-dialog v-model="cleanupDialogVisible" title="增量整理（title 替换 + 评分异常修复）" width="640px" destroy-on-close>
+      <div class="space-y-3">
+        <div class="text-sm text-slate-600 space-y-1">
+          <p>① <b>title 替换</b>：目标作品全部用 DLsite 官方名称校验/覆盖数据库 title；</p>
+          <p>② <b>评分修复</b>：仅 <b>0 分 / 无评分 / 满分（≥5）</b>的异常作品触发修复（关联版本日文原版优先 + 满分核验），正常评分不碰。</p>
+        </div>
+        <el-input
+          v-model="cleanupSinceInput"
+          placeholder="起点：留空 = 从上次处理位置继续；填 0 = 整个数据库；填 RJ 号（如 RJ01649167）= 处理该作品之后入库的数据（不含它）"
+          clearable
+        />
+        <div v-if="cleanupCursorInfo" class="text-xs text-slate-500">
+          上次整理到：<b>{{ cleanupCursorInfo.rjcode }}</b>
+          <span v-if="cleanupCursorInfo.finished_at">（{{ cleanupCursorInfo.finished_at }}，处理 {{ cleanupCursorInfo.processed_count }} 个）</span>
+          —— 留空起点即从此之后继续
+        </div>
+        <div v-if="cleanupStatusData.running" class="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
+          <div class="flex items-center justify-between text-sm">
+            <span class="font-medium text-slate-700">
+              {{ cleanupStatusData.phase === 'title' ? '① title 替换中' : (cleanupStatusData.phase === 'rating' ? '② 评分异常修复中' : '整理进行中') }}
+            </span>
+            <el-button size="small" type="danger" plain @click="cancelCleanup">取消</el-button>
+          </div>
+          <div v-if="cleanupStatusData.phase === 'title'" class="text-xs text-slate-500">
+            title 进度：{{ cleanupStatusData.title_done }} / {{ cleanupStatusData.title_total }}
+            （替换 {{ cleanupStatusData.title_updated }} · 一致 {{ cleanupStatusData.title_unchanged }} · 未匹配 {{ cleanupStatusData.title_missed }}）
+          </div>
+          <div v-if="cleanupStatusData.phase === 'rating'" class="text-xs text-slate-500">
+            评分修复：{{ cleanupStatusData.rating_phase }} {{ cleanupStatusData.rating_done }} / {{ cleanupStatusData.rating_total }}
+            （已应用 {{ cleanupStatusData.rating_applied || 0 }}）
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="cleanupDialogVisible = false">关闭</el-button>
+        <el-button
+          type="primary"
+          :disabled="!featureEnabled || cleanupStarting || cleanupStatusData.running"
+          :loading="cleanupStarting"
+          @click="startCleanup"
+        >
+          开始整理
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -476,6 +535,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   CheckCircle2,
   Database,
+  FolderSync,
   Loader2,
   Plus,
   RefreshCw,
@@ -506,6 +566,91 @@ const selectedRows = ref([])
 const dbPath = ref('')
 const featureEnabled = ref(false)
 const scanStatus = ref({ listening: false, last_scan_finished_at: '', checkpoint: '' })
+
+// ---- 增量整理（title 替换 + 评分异常修复） ----
+const cleanupDialogVisible = ref(false)
+const cleanupStarting = ref(false)
+const cleanupSinceInput = ref('')
+const cleanupCursorInfo = ref(null)
+const cleanupStatusData = ref({ running: false, phase: 'idle', title_done: 0, title_total: 0, title_updated: 0, title_unchanged: 0, title_missed: 0, rating_total: 0, rating_done: 0, rating_applied: 0, rating_phase: 'pending', since_desc: '', finished_at: '' })
+let cleanupPollTimer = null
+
+async function openCleanupDialog () {
+  cleanupDialogVisible.value = true
+  try {
+    const cursor = await kikoeruDbApi.cleanupCursor()
+    cleanupCursorInfo.value = cursor && cursor.rjcode ? cursor : null
+    // 默认起点：上次处理位置之后继续（输入框留空即从游标继续）
+    cleanupSinceInput.value = ''
+  } catch {
+    cleanupCursorInfo.value = null
+  }
+  pollCleanupStatus()
+}
+
+async function startCleanup () {
+  const since = cleanupSinceInput.value.trim()
+  if (cleanupStarting.value) return
+  const desc = since === '0'
+    ? '整个数据库'
+    : (since ? `起点 ${since} 之后入库的所有作品（不含起点）` : `上次处理位置${cleanupCursorInfo.value ? `（${cleanupCursorInfo.value.rjcode}）之后` : '（数据库起始）'}之后入库的所有作品`)
+  try {
+    await ElMessageBox.confirm(
+      `将对 ${desc} 执行：\n① title 替换（DLsite 官方名称校验/覆盖）；\n② 评分修复（仅 0 分 / 无评分 / 满分异常作品，正常评分不碰）。\n\n继续？`,
+      '确认增量整理',
+      { confirmButtonText: '开始整理', cancelButtonText: '取消', type: 'info' }
+    )
+  } catch {
+    return
+  }
+  cleanupStarting.value = true
+  try {
+    const result = await kikoeruDbApi.cleanupStart({ since })
+    if (result?.started) {
+      ElMessage.success(`整理任务已启动（${result.since_desc || desc}），目标 ${result.total ?? '?'} 个作品，其中评分异常 ${result.abnormal_rating ?? 0} 个`)
+      cleanupDialogVisible.value = false
+      pollCleanupStatus()
+    } else {
+      ElMessage.warning(result?.reason || '任务未能启动')
+    }
+  } catch (error) {
+    ElMessage.error('启动失败: ' + (error.response?.data?.detail || error.message || '未知错误'))
+  } finally {
+    cleanupStarting.value = false
+  }
+}
+
+function pollCleanupStatus () {
+  if (cleanupPollTimer) clearTimeout(cleanupPollTimer)
+  fetchCleanupStatus()
+  cleanupPollTimer = setTimeout(pollCleanupStatus, 2500)
+}
+
+async function fetchCleanupStatus () {
+  try {
+    const data = await kikoeruDbApi.cleanupStatus()
+    cleanupStatusData.value = data
+    if (data?.running) {
+      if (!cleanupPollTimer) cleanupPollTimer = setTimeout(pollCleanupStatus, 2500)
+    } else if (cleanupPollTimer) {
+      clearTimeout(cleanupPollTimer)
+      cleanupPollTimer = null
+    }
+  } catch {
+    /* 状态轮询失败静默 */
+  }
+}
+
+async function cancelCleanup () {
+  try {
+    await kikoeruDbApi.cleanupCancel()
+    ElMessage.info('已发送取消请求（当前阶段完成后停止）')
+  } catch (error) {
+    ElMessage.error('取消失败: ' + (error.response?.data?.detail || error.message || '未知错误'))
+  }
+}
+
+onMounted(() => pollCleanupStatus())
 
 const backups = ref([])
 const snapshots = ref([])
@@ -1058,7 +1203,12 @@ onActivated(() => {
   loadScanStatus()
 })
 onBeforeUnmount(stopRunPolling)
-onBeforeUnmount(stopRunPolling)
+onBeforeUnmount(() => {
+  if (cleanupPollTimer) {
+    clearTimeout(cleanupPollTimer)
+    cleanupPollTimer = null
+  }
+})
 </script>
 
 <style scoped>

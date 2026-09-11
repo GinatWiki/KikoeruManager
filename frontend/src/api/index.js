@@ -2941,6 +2941,27 @@ export const kikoeruDbApi = {
     return response.data
   },
 
+  // 增量整理（v2.6.26）：title 替换 + 评分异常修复，手动指定起点
+  cleanupStart: async ({ since = '' } = {}) => {
+    const response = await apiClient.post('/kikoeru-db/cleanup/start', { since })
+    return response.data
+  },
+
+  cleanupStatus: async () => {
+    const response = await apiClient.get('/kikoeru-db/cleanup/status')
+    return response.data
+  },
+
+  cleanupCancel: async () => {
+    const response = await apiClient.post('/kikoeru-db/cleanup/cancel')
+    return response.data
+  },
+
+  cleanupCursor: async () => {
+    const response = await apiClient.get('/kikoeru-db/cleanup/cursor')
+    return response.data
+  },
+
   scanStatus: async () => {
     const response = await apiClient.get('/kikoeru-db/scan/status')
     return response.data

@@ -319,6 +319,59 @@ async def rating_fix_cancel():
     return {"cancelled": get_kikoeru_rating_fix_service().request_cancel()}
 
 
+# ---------------------------------------------------------------- 增量整理（v2.6.26：title 替换 + 评分异常修复，手动触发替代 socket 监听）
+@router.post("/cleanup/start")
+async def cleanup_start(body: Dict[str, Any] = Body(default={})):
+    """启动增量整理：起点之后的全部作品做 title 替换，其中评分异常（NULL/0/≥5）的再触发评分修复。
+
+    - since 空串 = 从上次处理游标继续（首次使用时等同全库）；
+    - since = "0" = 整个数据库；
+    - since = "RJxxxx" = 不包括该作品、处理其之后入库的所有作品。
+    """
+    _require_enabled()
+    from ..core.kikoeru_db_cleanup_service import get_kikoeru_db_cleanup_service
+
+    since = str((body or {}).get("since") or "").strip()
+    service = get_kikoeru_db_cleanup_service()
+    try:
+        return await service.start(since)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KikoeruDbError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"整理任务启动失败: {exc}")
+
+
+@router.get("/cleanup/status")
+async def cleanup_status():
+    """增量整理任务实时进度（title 阶段 / 评分阶段 / 游标推进）。"""
+    _require_enabled()
+    from ..core.kikoeru_db_cleanup_service import get_kikoeru_db_cleanup_service
+
+    service = get_kikoeru_db_cleanup_service()
+    status = service.get_status()
+    status["cursor"] = service.get_cursor()
+    return status
+
+
+@router.post("/cleanup/cancel")
+async def cleanup_cancel():
+    _require_enabled()
+    from ..core.kikoeru_db_cleanup_service import get_kikoeru_db_cleanup_service
+
+    return {"cancelled": get_kikoeru_db_cleanup_service().request_cancel()}
+
+
+@router.get("/cleanup/cursor")
+async def cleanup_cursor():
+    """上次整理游标（前端弹窗展示「上次处理到哪」，作为默认起点）。"""
+    _require_enabled()
+    from ..core.kikoeru_db_cleanup_service import get_kikoeru_db_cleanup_service
+
+    return get_kikoeru_db_cleanup_service().get_cursor()
+
+
 @router.post("/diagnose")
 async def diagnose():
     _require_enabled()

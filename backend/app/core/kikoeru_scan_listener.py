@@ -68,6 +68,8 @@ class KikoeruScanListener:
         if not self._should_run():
             logger.info("[KIKOERU-SCAN] 未满足启动条件（kikoeru_db.enabled / scan_listen_enabled / kikoeru_server），不启动")
             return
+        # PING/PONG 心跳日志（engineio.client INFO）每 25 秒刷屏，静音到 WARNING
+        logging.getLogger("engineio.client").setLevel(logging.WARNING)
         self._loop = asyncio.get_running_loop()
         self._task = asyncio.create_task(self._run(), name="kikoeru-scan-listener")
         logger.info("[KIKOERU-SCAN] 监听任务已启动")
@@ -280,11 +282,30 @@ class KikoeruScanListener:
             try:
                 from .kikoeru_rating_fix_service import get_kikoeru_rating_fix_service
 
-                rating_result = await get_kikoeru_rating_fix_service().start_run(ids=new_ids)
-                rating_started = bool(rating_result.get("started"))
-                rating_reason = str(rating_result.get("reason") or "")
-                if not rating_started:
-                    logger.info("[KIKOERU-SCAN] 评分修复未启动: %s", rating_reason)
+                # 用户要求：必须评分异常（NULL/0/≥5）才处理——正常评分的新作品跳过
+                abnormal_ids = []
+                conn2 = await asyncio.to_thread(service._connect, None, readonly=True)
+                try:
+                    marks = ",".join(["?"] * len(new_ids))
+                    cursor2 = await asyncio.to_thread(
+                        conn2.execute,
+                        f'SELECT id FROM "t_work" WHERE id IN ({marks}) '
+                        "AND (rate_average_2dp IS NULL OR rate_average_2dp = 0 OR rate_average_2dp >= 5)",
+                        list(new_ids),
+                    )
+                    rows2 = await asyncio.to_thread(cursor2.fetchall)
+                    abnormal_ids = [row["id"] for row in rows2]
+                finally:
+                    conn2.close()
+                if not abnormal_ids:
+                    rating_reason = "新作品评分全部正常"
+                    rating_started = False
+                else:
+                    rating_result = await get_kikoeru_rating_fix_service().start_run(ids=abnormal_ids)
+                    rating_started = bool(rating_result.get("started"))
+                    rating_reason = str(rating_result.get("reason") or "")
+                    if not rating_started:
+                        logger.info("[KIKOERU-SCAN] 评分修复未启动: %s", rating_reason)
             except Exception:
                 logger.warning("[KIKOERU-SCAN] 评分修复任务启动失败", exc_info=True)
                 rating_reason = "启动异常"
