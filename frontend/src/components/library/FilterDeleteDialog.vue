@@ -128,6 +128,23 @@
                 <span class="fd-type-count">{{ option.count }}</span>
               </button>
             </div>
+
+            <div v-if="filterDeleteRuleOptions.length" class="fd-type-filter-bar flex items-center gap-1.5">
+              <span class="text-[12px] font-medium text-slate-500 mr-1">{{ text.hitRuleLabel }}</span>
+              <button
+                v-for="option in filterDeleteRuleOptions"
+                :key="option.key"
+                type="button"
+                class="fd-type-tag inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[12px] font-medium transition-all border group"
+                :class="isFilterDeleteRuleFullySelected(option.key) ? 'fd-type-tag-active' : (isFilterDeleteRulePartiallySelected(option.key) ? 'fd-type-tag-partial' : 'fd-type-tag-inactive')"
+                :disabled="filterDeleteBusy"
+                @click="toggleFilterDeleteRule(option.key)"
+              >
+                <span v-if="isFilterDeleteRulePartiallySelected(option.key)" class="font-bold">-</span>
+                <span>{{ option.label }}</span>
+                <span class="fd-type-count">{{ option.count }}</span>
+              </button>
+            </div>
           </div>
 
           <div class="toolbar-search-group flex min-w-0 items-center gap-2 shrink-0">
@@ -339,6 +356,7 @@ const text = {
   clearSelection: '\u53d6\u6d88\u9009\u62e9',
   retryFailedTargets: '\u91cd\u8bd5\u5931\u8d25\u9879',
   fileTypeLabel: '\u6587\u4ef6\u7c7b\u578b',
+  hitRuleLabel: '\u547d\u4e2d\u89c4\u5219',
   searchBasic: '\u641c\u7d22\u5f85\u5220\u9664\u6587\u4ef6\u540d\u6216\u8def\u5f84\u2026',
   searchFull: '\u641c\u7d22\u5f85\u5220\u9664\u6587\u4ef6\u540d\u3001\u8def\u5f84\u6216\u89c4\u5219\u2026',
   selectedLabel: '\u5df2\u9009',
@@ -530,6 +548,38 @@ const filterDeleteTypeRowIds = computed(() => {
     const typeKey = getFilterDeleteFileType(item)
     if (!map.has(typeKey)) map.set(typeKey, [])
     map.get(typeKey).push(item.id)
+  }
+  return map
+})
+// 按命中规则批量选中：预审已按设置里的全部规则跑（每行 matched_rules 标注命中项），
+// 这里把同一规则命中的文件+目录归组，支持一键只选某条规则的命中项
+const filterDeleteRuleOptions = computed(() => {
+  const counts = new Map()
+  for (const item of filterDeleteItems.value || []) {
+    if (!item || !canFilterDeleteDeleteRow(item)) continue
+    for (const ruleName of item.matched_rules || []) {
+      const key = String(ruleName || '').trim()
+      if (!key) continue
+      counts.set(key, (counts.get(key) || 0) + 1)
+    }
+  }
+  return [...counts.entries()]
+    .sort((left, right) => {
+      if (right[1] !== left[1]) return right[1] - left[1]
+      return String(left[0]).localeCompare(String(right[0]), 'zh-Hans-CN-u-kn-true')
+    })
+    .map(([key, count]) => ({ key, label: key, count }))
+})
+const filterDeleteRuleRowIds = computed(() => {
+  const map = new Map()
+  for (const item of filterDeleteItems.value || []) {
+    if (!item || !canFilterDeleteDeleteRow(item)) continue
+    for (const ruleName of item.matched_rules || []) {
+      const key = String(ruleName || '').trim()
+      if (!key) continue
+      if (!map.has(key)) map.set(key, [])
+      map.get(key).push(item.id)
+    }
   }
   return map
 })
@@ -1427,6 +1477,32 @@ function isFilterDeleteTypeFullySelected(typeKey) {
 
 function isFilterDeleteTypePartiallySelected(typeKey) {
   const ids = filterDeleteTypeRowIds.value.get(typeKey) || []
+  if (!ids.length) return false
+  const selectedCount = ids.filter(id => filterDeleteSelectedIds.value.has(id)).length
+  return selectedCount > 0 && selectedCount < ids.length
+}
+
+async function toggleFilterDeleteRule(ruleName) {
+  if (!ruleName || filterDeleteBusy.value) return
+  const ids = filterDeleteRuleRowIds.value.get(ruleName) || []
+  if (!ids.length) return
+  const next = new Set(filterDeleteSelectedIds.value)
+  const shouldSelect = !ids.every(id => next.has(id))
+  ids.forEach(id => {
+    if (shouldSelect) next.add(id)
+    else next.delete(id)
+  })
+  filterDeleteSelectedIds.value = next
+  filterDeleteLastSelectedId.value = ids.at(-1) || ''
+}
+
+function isFilterDeleteRuleFullySelected(ruleName) {
+  const ids = filterDeleteRuleRowIds.value.get(ruleName) || []
+  return ids.length > 0 && ids.every(id => filterDeleteSelectedIds.value.has(id))
+}
+
+function isFilterDeleteRulePartiallySelected(ruleName) {
+  const ids = filterDeleteRuleRowIds.value.get(ruleName) || []
   if (!ids.length) return false
   const selectedCount = ids.filter(id => filterDeleteSelectedIds.value.has(id)).length
   return selectedCount > 0 && selectedCount < ids.length
