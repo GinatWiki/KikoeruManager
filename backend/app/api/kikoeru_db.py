@@ -332,9 +332,11 @@ async def cleanup_start(body: Dict[str, Any] = Body(default={})):
     from ..core.kikoeru_db_cleanup_service import get_kikoeru_db_cleanup_service
 
     since = str((body or {}).get("since") or "").strip()
+    strict_template = (body or {}).get("strict_template")
+    strict_template = True if strict_template is None else bool(strict_template)
     service = get_kikoeru_db_cleanup_service()
     try:
-        return await service.start(since)
+        return await service.start(since, strict_template=strict_template)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except KikoeruDbError as exc:

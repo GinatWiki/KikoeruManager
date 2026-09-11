@@ -488,8 +488,15 @@
     <el-dialog v-model="cleanupDialogVisible" title="增量整理（title 替换 + 评分异常修复）" width="640px" destroy-on-close>
       <div class="space-y-3">
         <div class="text-sm text-slate-600 space-y-1">
-          <p>① <b>title 反解同步</b>：按「重命名与落盘」模板从文件夹名反解出 <b>作品名</b>（去掉 RJ 号/社团等模板片段，如 <code>[RJ01630673][作品名]</code> → <code>作品名</code>）写入数据库 title；反解不出的行保持原 title；</p>
+          <p>① <b>title 反解同步</b>：按你在设置中配置的重命名模板反解文件夹名，只取 <b>work_name</b> 段写入数据库 title（如模板 <code>[{'{'}rjcode{'}'}][{'{'}work_name{'}'}]</code> 把 <code>[RJ01630673][作品名]</code> 反解为 <code>作品名</code>）；</p>
           <p>② <b>评分修复</b>：仅 <b>0 分 / 无评分 / 满分（≥5）</b>的异常作品触发修复（关联版本日文原版优先 + 满分核验），正常评分不碰。</p>
+        </div>
+        <el-checkbox v-model="cleanupStrictTemplate">
+          仅按我的重命名模板严格反解（推荐）——不匹配的文件夹保持原 title，不做启发式猜测
+        </el-checkbox>
+        <div class="text-xs text-slate-400">
+          当前模板：<code>{{ renameTemplate || '（未配置，将无法反解）' }}</code>
+          <span v-if="!cleanupStrictTemplate"> · 已关闭严格模式：不符合模板的历史文件夹会用通用形态（<code>[RJ..][名字]</code> 等）兜底解析</span>
         </div>
         <div class="text-xs text-slate-400">起点按 <b>加入时间（created_at）</b> 判定——不是发售顺序；t_work.id 是 DLsite 作品号，方向对应发售时间，不用于此处。</div>
         <el-input
@@ -572,11 +579,13 @@ const dbPath = ref('')
 const featureEnabled = ref(false)
 const scanStatus = ref({ listening: false, last_scan_finished_at: '', checkpoint: '' })
 
-// ---- 增量整理（title 替换 + 评分异常修复） ----
+// ---- 增量整理（title 反解 + 评分异常修复） ----
 const cleanupDialogVisible = ref(false)
 const cleanupStarting = ref(false)
 const cleanupSinceInput = ref('')
 const cleanupCursorInfo = ref(null)
+const cleanupStrictTemplate = ref(true)
+const renameTemplate = ref('')
 const cleanupStatusData = ref({ running: false, phase: 'idle', title_done: 0, title_total: 0, title_updated: 0, title_unchanged: 0, title_missed: 0, rating_total: 0, rating_done: 0, rating_applied: 0, rating_phase: 'pending', since_desc: '', finished_at: '' })
 let cleanupPollTimer = null
 
@@ -590,7 +599,17 @@ async function openCleanupDialog () {
   } catch {
     cleanupCursorInfo.value = null
   }
+  loadRenameTemplate()
   pollCleanupStatus()
+}
+
+async function loadRenameTemplate () {
+  try {
+    const config = await configApi.get()
+    renameTemplate.value = String(config?.rename?.template || '')
+  } catch {
+    renameTemplate.value = ''
+  }
 }
 
 async function startCleanup () {
@@ -610,7 +629,10 @@ async function startCleanup () {
   }
   cleanupStarting.value = true
   try {
-    const result = await kikoeruDbApi.cleanupStart({ since })
+    const result = await kikoeruDbApi.cleanupStart({
+      since,
+      strict_template: cleanupStrictTemplate.value
+    })
     if (result?.started) {
       ElMessage.success(`整理任务已启动（${result.since_desc || desc}），目标 ${result.total ?? '?'} 个作品，其中评分异常 ${result.abnormal_rating ?? 0} 个`)
       cleanupDialogVisible.value = false

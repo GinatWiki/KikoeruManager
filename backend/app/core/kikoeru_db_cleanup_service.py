@@ -145,7 +145,7 @@ class KikoeruDbCleanupService:
         return abnormal
 
     # ------------------------------------------------------------ 启动
-    async def start(self, since: str) -> Dict[str, Any]:
+    async def start(self, since: str, strict_template: bool = True) -> Dict[str, Any]:
         if self._state and self._state.get("running"):
             return {"started": False, "reason": "已有整理任务在运行"}
         since_created_at, since_desc = await asyncio.to_thread(self._resolve_since, since)
@@ -156,6 +156,7 @@ class KikoeruDbCleanupService:
             "cancel": False,
             "phase": "title",
             "since_desc": since_desc,
+            "strict_template": bool(strict_template),
             "total": len(targets),
             "title_done": 0,
             "title_total": len(targets),
@@ -169,7 +170,9 @@ class KikoeruDbCleanupService:
             "finished_at": "",
         }
         self._state = state
-        self._task = asyncio.create_task(self._run_impl(state, targets, abnormal_ids, since_created_at))
+        self._task = asyncio.create_task(
+            self._run_impl(state, targets, abnormal_ids, since_created_at, bool(strict_template))
+        )
         logger.info(
             "[KIKOERU-CLEANUP] 整理任务已启动: %s 目标=%s 评分异常=%s",
             since_desc, len(targets), len(abnormal_ids),
@@ -183,7 +186,8 @@ class KikoeruDbCleanupService:
 
     # ------------------------------------------------------------ 执行
     async def _run_impl(self, state: Dict[str, Any], targets: List[Dict[str, Any]],
-                        abnormal_ids: List[Any], since_created_at: str) -> None:
+                        abnormal_ids: List[Any], since_created_at: str,
+                        strict_template: bool = True) -> None:
         from .kikoeru_db_service import get_kikoeru_db_service
         from .kikoeru_rating_fix_service import get_kikoeru_rating_fix_service
 
@@ -216,8 +220,11 @@ class KikoeruDbCleanupService:
             updates: List[tuple] = []
             for row in targets:
                 dir_name = str(row["dir"] or "")
+                # 严格模式（默认）：只按用户设置的重命名模板反解；
+                # 不匹配的文件夹保持原 title，不做启发式猜测。
+                # 非严格模式：模板不匹配时回退通用形态解析（兼容老库历史命名）。
                 parsed = parse_work_name_by_template(dir_name, rename_template)
-                if not parsed.get("matched"):
+                if not parsed.get("matched") and not strict_template:
                     parsed = parse_work_name_from_dir(dir_name)
                 new_title = str(parsed.get("work_name") or "").strip() if parsed.get("matched") else ""
                 current_title = str(row["title"] or "").strip()

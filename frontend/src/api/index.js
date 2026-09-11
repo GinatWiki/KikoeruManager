@@ -2941,9 +2941,12 @@ export const kikoeruDbApi = {
     return response.data
   },
 
-  // 增量整理（v2.6.26）：title 替换 + 评分异常修复，手动指定起点
-  cleanupStart: async ({ since = '' } = {}) => {
-    const response = await apiClient.post('/kikoeru-db/cleanup/start', { since })
+  // 增量整理（v2.6.26）：title 反解 + 评分异常修复，手动指定起点
+  cleanupStart: async ({ since = '', strict_template = true } = {}) => {
+    const response = await apiClient.post('/kikoeru-db/cleanup/start', {
+      since,
+      strict_template
+    })
     return response.data
   },
 
