@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional
 
-from ..config.settings import get_config_file_path
+from ..config.settings import get_config, get_config_file_path
 
 
 logger = logging.getLogger(__name__)
@@ -37,9 +37,8 @@ class FilterRecoveryService:
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
-    def recovery_root(self) -> Path:
-        if self._recovery_root_override:
-            return Path(self._recovery_root_override).resolve()
+    def _legacy_recovery_root(self) -> Path:
+        """旧版恢复区位置（DATA_PATH / config 推断），仅用于存量迁移。"""
         data_path = str(os.environ.get("DATA_PATH") or "").strip()
         if data_path:
             return (Path(data_path).resolve() / "filter-recovery")
@@ -51,6 +50,164 @@ class FilterRecoveryService:
         else:
             data_root = config_path.parent / "data"
         return data_root / "filter-recovery"
+
+    def recovery_root(self) -> Path:
+        if self._recovery_root_override:
+            return Path(self._recovery_root_override).resolve()
+
+        # 优先使用临时目录设置（storage.temp_path）：恢复区是可再生的过渡数据，
+        # 跟随临时目录便于统一清理，避免把常驻 data 卷写满（用户实测满盘事故）
+        try:
+            temp_path = str(get_config().storage.temp_path or "").strip()
+        except Exception:
+            temp_path = ""
+        if temp_path:
+            return (Path(temp_path).resolve() / "filter-recovery")
+
+        return self._legacy_recovery_root()
+
+    def migrate_legacy_recovery_root(self) -> dict:
+        """
+        把旧位置（DATA_PATH / config 推断）的存量恢复数据整目录搬到新位置
+        （临时目录下）。manifest 不存储恢复区绝对路径（payload 按
+        recovery_root 动态解析），整目录搬移后还原功能完全兼容。
+        逐任务目录搬移，单个失败记录日志并继续；任何失败都不影响服务启动。
+        """
+        legacy_root = self._legacy_recovery_root()
+        new_root = self.recovery_root()
+        try:
+            if legacy_root.resolve() == new_root.resolve():
+                return {"migrated": 0, "skipped": "same_path"}
+        except OSError:
+            return {"migrated": 0, "skipped": "resolve_error"}
+        if not legacy_root.exists():
+            return {"migrated": 0, "skipped": "legacy_missing"}
+
+        migrated, failed = 0, 0
+        try:
+            new_root.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            logger.warning("[FILTER-RECOVERY] 新恢复区目录创建失败，跳过存量迁移: %s", new_root, exc_info=True)
+            return {"migrated": 0, "failed": "new_root_unwritable"}
+        for entry in sorted(legacy_root.iterdir()):
+            if not entry.is_dir():
+                continue
+            target = new_root / entry.name
+            if target.exists():
+                continue
+            try:
+                shutil.move(str(entry), str(target))
+                migrated += 1
+            except Exception:
+                failed += 1
+                logger.warning(
+                    "[FILTER-RECOVERY] 存量恢复数据搬移失败（保留原目录）: %s -> %s",
+                    entry, target, exc_info=True,
+                )
+        if migrated or failed:
+            logger.info("[FILTER-RECOVERY] 存量恢复区迁移完成: %s -> %s（搬移 %d 个任务目录，失败 %d）",
+                        legacy_root, new_root, migrated, failed)
+        return {"migrated": migrated, "failed": failed}
+
+    def cleanup_expired(
+        self,
+        *,
+        preserve_days: int = 7,
+        max_size_gb: float = 20.0,
+        min_keep_count: int = 3,
+        active_guard_hours: float = 24.0,
+    ) -> dict:
+        """
+        按保留策略清理恢复区：
+        - preserve_days：任务目录最后修改时间超过 N 天的恢复数据删除；
+        - max_size_gb：恢复区总占用超过上限时，从最旧的任务目录开始删除；
+        - min_keep_count：无论其他条件如何，保留最近 N 个任务目录；
+        - active_guard_hours：最近 N 小时内修改过的目录视为活跃任务，跳过不删。
+        """
+        import time as _time
+
+        root = self.recovery_root()
+        result = {"deleted_tasks": [], "freed_bytes": 0, "kept_count": 0, "total_bytes": 0}
+        if not root.exists():
+            return result
+
+        task_dirs = [entry for entry in root.iterdir() if entry.is_dir()]
+        if not task_dirs:
+            return result
+
+        now = _time.time()
+        active_cutoff = now - max(0.0, float(active_guard_hours)) * 3600.0
+
+        def _dir_size_bytes(path: Path) -> int:
+            total = 0
+            for sub in path.rglob("*"):
+                try:
+                    if sub.is_file():
+                        total += sub.stat().st_size
+                except OSError:
+                    continue
+            return total
+
+        entries = []
+        for task_dir in task_dirs:
+            try:
+                mtime = task_dir.stat().st_mtime
+            except OSError:
+                continue
+            entries.append({"path": task_dir, "mtime": mtime, "size": _dir_size_bytes(task_dir)})
+        entries.sort(key=lambda e: e["mtime"], reverse=True)  # 最新在前
+        result["total_bytes"] = sum(e["size"] for e in entries)
+
+        keep = max(0, int(min_keep_count or 0))
+        preserved_indexes = set(range(min(keep, len(entries))))  # 最近 N 个始终保留
+        preserve_cutoff = now - max(1, int(preserve_days or 7)) * 86400
+        size_limit_bytes = max(0.0, float(max_size_gb or 0)) * (1024 ** 3)
+
+        def _can_delete(index: int) -> bool:
+            if index in preserved_indexes:
+                return False
+            entry = entries[index]
+            if entry["mtime"] > active_cutoff:
+                return False  # 活跃/最近任务保护
+            return True
+
+        # 1) 按保留天数清理
+        for index, entry in enumerate(entries):
+            if entry["path"].exists() and entry["mtime"] <= preserve_cutoff and _can_delete(index):
+                size = entry["size"]
+                self._remove_path(entry["path"], missing_ok=True)
+                result["deleted_tasks"].append(entry["path"].name)
+                result["freed_bytes"] += size
+                entry["deleted"] = True
+
+        # 2) 按容量清理（从最旧开始）
+        def _current_total() -> int:
+            return sum(e["size"] for e in entries if not e.get("deleted"))
+
+        if size_limit_bytes > 0:
+            for index in range(len(entries) - 1, -1, -1):  # 最旧在前
+                if _current_total() <= size_limit_bytes:
+                    break
+                entry = entries[index]
+                if entry.get("deleted") or not _can_delete(index):
+                    continue
+                size = entry["size"]
+                self._remove_path(entry["path"], missing_ok=True)
+                result["deleted_tasks"].append(entry["path"].name)
+                result["freed_bytes"] += size
+                entry["deleted"] = True
+
+        remaining = [e for e in entries if not e.get("deleted")]
+        result["kept_count"] = len(remaining)
+        result["total_bytes"] = sum(e["size"] for e in remaining)
+        if result["deleted_tasks"]:
+            logger.info(
+                "[FILTER-RECOVERY] 智能清理完成: 删除 %d 个任务目录，释放 %s；剩余 %d 个任务目录",
+                len(result["deleted_tasks"]),
+                f"{result['freed_bytes'] / (1024 ** 3):.2f} GB",
+                result["kept_count"],
+            )
+        return result
 
     def capture_item(
         self,

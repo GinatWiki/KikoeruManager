@@ -253,6 +253,14 @@ class ProcessedArchiveCleanupConfig(BaseModel):
     scan_on_startup: bool = True  # 启动时是否扫描已处理压缩包目录
     min_keep_count: int = 10  # 最小保留数量，无论其他条件如何都保留最近的N个
 
+class FilterRecoveryCleanupConfig(BaseModel):
+    """过滤恢复区智能清理配置（恢复区位于临时目录下，随保留策略自动清理）"""
+    enabled: bool = False  # 是否启用智能清理
+    cron_expression: str = "0 3 * * *"  # Cron表达式，默认每天凌晨3点执行
+    preserve_days: int = 7  # 保留天数，按任务目录最后修改时间计算
+    max_size_gb: float = 20.0  # 恢复区最大占用(GB)，超过此容量从最旧任务开始清理
+    min_keep_count: int = 3  # 最小保留数量，无论其他条件如何都保留最近的N个任务
+
 class PathMappingRule(BaseModel):
     """路径映射规则"""
     remote_path: str  # 远程/Docker中的路径，如 /viocelink
@@ -843,6 +851,7 @@ class AppConfig(BaseModel):
     ]
     password_cleanup: PasswordCleanupConfig = PasswordCleanupConfig()
     processed_archive_cleanup: ProcessedArchiveCleanupConfig = ProcessedArchiveCleanupConfig()
+    filter_recovery_cleanup: FilterRecoveryCleanupConfig = FilterRecoveryCleanupConfig()
     path_mapping: PathMappingConfig = PathMappingConfig()
     kikoeru_server: KikoeruServerConfig = KikoeruServerConfig()
     kikoeru_db: KikoeruDbConfig = KikoeruDbConfig()
@@ -1035,6 +1044,27 @@ def load_config(config_path: str = None) -> AppConfig:
                             config_data['processed_archive_cleanup']['max_size_gb'] = 50
                         if 'exclude_reprocessing' not in config_data['processed_archive_cleanup']:
                             config_data['processed_archive_cleanup']['exclude_reprocessing'] = True
+
+                    if 'filter_recovery_cleanup' not in config_data or not config_data['filter_recovery_cleanup']:
+                        config_data['filter_recovery_cleanup'] = {
+                            'enabled': False,
+                            'cron_expression': '0 3 * * *',
+                            'preserve_days': 7,
+                            'max_size_gb': 20,
+                            'min_keep_count': 3
+                        }
+                        logger.info("添加缺失的 filter_recovery_cleanup 配置，使用默认值")
+                    else:
+                        if 'enabled' not in config_data['filter_recovery_cleanup']:
+                            config_data['filter_recovery_cleanup']['enabled'] = False
+                        if 'cron_expression' not in config_data['filter_recovery_cleanup']:
+                            config_data['filter_recovery_cleanup']['cron_expression'] = '0 3 * * *'
+                        if 'preserve_days' not in config_data['filter_recovery_cleanup']:
+                            config_data['filter_recovery_cleanup']['preserve_days'] = 7
+                        if 'max_size_gb' not in config_data['filter_recovery_cleanup']:
+                            config_data['filter_recovery_cleanup']['max_size_gb'] = 20
+                        if 'min_keep_count' not in config_data['filter_recovery_cleanup']:
+                            config_data['filter_recovery_cleanup']['min_keep_count'] = 3
 
                     if 'auto_process' not in config_data or not config_data['auto_process']:
                         config_data['auto_process'] = {

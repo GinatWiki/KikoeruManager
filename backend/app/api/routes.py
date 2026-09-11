@@ -2594,6 +2594,14 @@ async def startup_event():
     archive_cleanup_service = get_processed_archive_cleanup_service()
     await archive_cleanup_service.start()
 
+    # 启动过滤恢复区智能清理服务（含存量恢复区迁移到临时目录，未启用时迁移仍执行、清理内部跳过）
+    try:
+        from ..core.filter_recovery_cleanup import get_filter_recovery_cleanup_service
+
+        await get_filter_recovery_cleanup_service().start()
+    except Exception:
+        logger.warning("[启动] 过滤恢复区智能清理启动失败", exc_info=True)
+
     # 启动 Kikoeru 数据库定时备份服务（v2.6，未启用时内部直接跳过）
     try:
         from ..core.kikoeru_db_backup_service import get_kikoeru_db_backup_service
@@ -2937,6 +2945,7 @@ class ConfigResponse(BaseModel):
     classification: list
     password_cleanup: Optional[dict] = None
     processed_archive_cleanup: Optional[dict] = None
+    filter_recovery_cleanup: Optional[dict] = None
     path_mapping: Optional[dict] = None
     kikoeru_server: Optional[dict] = None
     kikoeru_db: Optional[dict] = None
@@ -3928,6 +3937,7 @@ def get_configuration():
         classification=[rule.model_dump() for rule in config.classification],
         password_cleanup=config.password_cleanup.model_dump(),
         processed_archive_cleanup=config.processed_archive_cleanup.model_dump(),
+        filter_recovery_cleanup=config.filter_recovery_cleanup.model_dump() if hasattr(config, 'filter_recovery_cleanup') else None,
         path_mapping=config.path_mapping.model_dump(),
         kikoeru_server=config.kikoeru_server.model_dump() if hasattr(config, 'kikoeru_server') else None,
         kikoeru_db=config.kikoeru_db.model_dump() if hasattr(config, 'kikoeru_db') else None,
@@ -5564,6 +5574,17 @@ async def update_configuration(request: Request):
             archive_cleanup_service = get_processed_archive_cleanup_service()
             await archive_cleanup_service.restart()
             logger.info("已处理压缩包清理服务已重启")
+
+        # 如果过滤恢复区清理配置变更，重启清理服务
+        if 'filter_recovery_cleanup' in config_data:
+            try:
+                from ..core.filter_recovery_cleanup import get_filter_recovery_cleanup_service
+
+                logger.info("过滤恢复区清理配置已变更，重启清理服务...")
+                await get_filter_recovery_cleanup_service().restart()
+                logger.info("过滤恢复区清理服务已重启")
+            except Exception:
+                logger.warning("过滤恢复区清理服务重启失败", exc_info=True)
 
         # 设置页「启用监视器」开关与监视器运行态保持同步：
         # 保存配置时显式带了 watcher.enabled，就立即应用到运行中的监视器

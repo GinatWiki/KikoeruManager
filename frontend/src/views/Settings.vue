@@ -207,7 +207,7 @@ const sectionKeyMap = {
   httpDownload: ['http_downloader'],
   baiduNetdisk: ['baidu_netdisk'],
   system: ['database', 'resource_budget'],
-  maintenance: ['password_cleanup', 'archive_cleanup', 'backup_zip'],
+  maintenance: ['password_cleanup', 'archive_cleanup', 'recovery_cleanup', 'backup_zip'],
   fts: [],
   security: ['security_gate'],
   notification: ['notification_email', 'notification_center']

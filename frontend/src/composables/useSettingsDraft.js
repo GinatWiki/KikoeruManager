@@ -173,6 +173,13 @@ export const defaultConfig = {
     min_keep_count: 10,
     cron_expression: '0 0 * * 0'
   },
+  recovery_cleanup: {
+    enabled: false,
+    preserve_days: 7,
+    max_size_gb: 20,
+    min_keep_count: 3,
+    cron_expression: '0 3 * * *'
+  },
   backup_zip: {
     enabled: false,
     source_path: '',
@@ -593,6 +600,7 @@ function hydrateConfig(data = {}) {
     rename: { ...defaultConfig.rename, ...(data?.rename || {}) },
     password_cleanup: { ...defaultConfig.password_cleanup, ...(data?.password_cleanup || {}) },
     archive_cleanup: { ...defaultConfig.archive_cleanup, ...(data?.processed_archive_cleanup || {}), min_keep_count: data?.processed_archive_cleanup?.min_keep_count ?? defaultConfig.archive_cleanup.min_keep_count },
+    recovery_cleanup: { ...defaultConfig.recovery_cleanup, ...(data?.filter_recovery_cleanup || {}) },
     backup_zip: { ...defaultConfig.backup_zip, ...(data?.backup_zip || {}) },
     path_mappings: data?.path_mapping?.rules || defaultConfig.path_mappings,
     path_mapping_enabled: data?.path_mapping?.enabled ?? defaultConfig.path_mapping_enabled,
@@ -645,6 +653,7 @@ function serializeConfig(config) {
     classification: payload.classification,
     password_cleanup: payload.password_cleanup,
     processed_archive_cleanup: payload.archive_cleanup,
+    filter_recovery_cleanup: payload.recovery_cleanup,
     backup_zip: payload.backup_zip,
     path_mapping: {
       enabled: payload.path_mapping_enabled,

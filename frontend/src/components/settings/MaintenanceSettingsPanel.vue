@@ -41,6 +41,29 @@
     </div>
 
     <div class="settings-card">
+      <div class="card-title">过滤恢复区清理</div>
+      <div class="field-stack">
+        <SettingsToggleRow v-model="config.recovery_cleanup.enabled" title="启用自动清理" subtitle="过滤恢复区位于临时目录（storage.temp_path/filter-recovery），存放被过滤文件的还原副本，长期堆积会写满磁盘。按保留天数和容量上限自动清理。" />
+        <div class="mini-grid two">
+          <SettingsFieldCard label="保留天数">
+            <SettingsRangeStepper v-model="config.recovery_cleanup.preserve_days" :min="1" :max="90" />
+          </SettingsFieldCard>
+          <SettingsFieldCard label="容量上限 (GB)">
+            <SettingsNumberStepper v-model="config.recovery_cleanup.max_size_gb" :min="1" :max="500" />
+          </SettingsFieldCard>
+        </div>
+        <div class="mini-grid two">
+          <SettingsFieldCard label="最小保留任务数">
+            <SettingsNumberStepper v-model="config.recovery_cleanup.min_keep_count" :min="0" :max="100" />
+          </SettingsFieldCard>
+          <SettingsFieldCard label="Cron 表达式">
+            <input v-model="config.recovery_cleanup.cron_expression" class="field-input" type="text" placeholder="0 3 * * *">
+          </SettingsFieldCard>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-card">
       <div class="card-title">库存打包</div>
       <div class="settings-grid two">
         <div class="field-stack">
