@@ -204,33 +204,46 @@ class KikoeruDbCleanupService:
                 logger.error("[KIKOERU-CLEANUP] 写前备份失败，整理中止: %s", exc)
                 return
 
-            # ---------- 阶段 1：title = 作品文件夹名称（重命名模板产物，纯 SQL 瞬间完成） ----------
-            # 文件夹名按「重命名与落盘」模板生成，即用户想要的展示名；
-            # dir 为空的行为避免（保持原 title）。
+            # ---------- 阶段 1：title = 文件夹名反解出的作品名 ----------
+            # 不能用整条 dir：dir 是「重命名模板产物」（如 [RJ01630673][作品名]），
+            # 需按模板逆过程只取 {work_name} 段。模板严格匹配失败时回退通用形态
+            # 反解（[RJ..][名字] / [社团][RJ..][名字] / RJ 名字 等），
+            # 反解不出的行保持原 title。
+            from .kikoeru_folder_parser import parse_work_name_by_template, parse_work_name_from_dir
+
+            rename_template = str(get_config().rename.template or "")
             state["title_total"] = len(targets)
-            conn = await asyncio.to_thread(service._connect, None, readonly=False)
-            try:
-                base_cond = "created_at > ?" if since_created_at else "1=1"
-                params = (since_created_at,) if since_created_at else ()
-                cursor = await asyncio.to_thread(
-                    conn.execute,
-                    f'UPDATE "t_work" SET title = dir '
-                    f'WHERE {base_cond} AND dir IS NOT NULL AND dir != \'\' '
-                    f"AND (title IS NULL OR title != dir)",
-                    params,
-                )
-                updated = int(cursor.rowcount or 0)
-                await asyncio.to_thread(conn.commit)
-                state["title_updated"] = updated
-                state["title_unchanged"] = max(0, len(targets) - updated)
-                state["title_missed"] = 0
-                state["title_done"] = len(targets)
-                logger.info(
-                    "[KIKOERU-CLEANUP] title 已同步为文件夹名称: 更新 %s / 目标 %s",
-                    updated, len(targets),
-                )
-            finally:
-                conn.close()
+            updates: List[tuple] = []
+            for row in targets:
+                dir_name = str(row["dir"] or "")
+                parsed = parse_work_name_by_template(dir_name, rename_template)
+                if not parsed.get("matched"):
+                    parsed = parse_work_name_from_dir(dir_name)
+                new_title = str(parsed.get("work_name") or "").strip() if parsed.get("matched") else ""
+                current_title = str(row["title"] or "").strip()
+                if not new_title:
+                    state["title_missed"] += 1
+                elif new_title == current_title:
+                    state["title_unchanged"] += 1
+                else:
+                    updates.append((new_title, row["id"]))
+                    state["title_updated"] += 1
+                state["title_done"] += 1
+            if updates:
+                conn = await asyncio.to_thread(service._connect, None, readonly=False)
+                try:
+                    await asyncio.to_thread(
+                        conn.executemany,
+                        'UPDATE "t_work" SET title = ? WHERE id = ?',
+                        updates,
+                    )
+                    await asyncio.to_thread(conn.commit)
+                finally:
+                    conn.close()
+            logger.info(
+                "[KIKOERU-CLEANUP] title 已按文件夹名反解更新: 更新 %s / 一致 %s / 未匹配 %s（目标 %s）",
+                state["title_updated"], state["title_unchanged"], state["title_missed"], len(targets),
+            )
             state["phase"] = "rating"
 
             # ---------- 阶段 2：评分异常修复（复用评分修复后台任务） ----------

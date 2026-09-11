@@ -332,16 +332,16 @@ class KikoeruScanListener:
 
     # ------------------------------------------------------------ title 重构
     async def _refresh_titles_for_new_works(self, rows: list) -> dict:
-        """对新作品补全空缺 title：DLsite 官方 work_name 只在**当前 title 为空**时写入。
+        """对新作品补全空缺 title：从文件夹名按重命名模板反解出作品名写入。
 
-        用户库的 title 多为维护好的中文汉化名，DLsite API 的 work_name 是官方
-        日文名/带宣传标记的官方名（拿不到中文翻译）——非空覆盖是降级，一律保留。
+        用户库 title 多为维护好的中文汉化名（非空一律保留）；空缺时用
+        dir 反解（模板严格匹配优先，通用形态回退）补 work_name 段，
+        不是整条 dir。
         """
-        from .dlsite_service import get_dlsite_service
-        from .kikoeru_rating_fix_service import get_kikoeru_rating_fix_service
+        from .kikoeru_folder_parser import parse_work_name_by_template, parse_work_name_from_dir
 
-        rating_fix = get_kikoeru_rating_fix_service()
-        dlsite = get_dlsite_service()
+        config = get_config()
+        rename_template = str(config.rename.template or "")
         service = get_kikoeru_db_service()
         updated, unchanged, missed = 0, 0, 0
         conn = await asyncio.to_thread(service._connect, None, readonly=False)
@@ -354,26 +354,23 @@ class KikoeruScanListener:
                     if current_title:
                         unchanged += 1
                         continue
-                    candidates = rating_fix._resolve_workno_candidates(work_id, dir_name)
-                    official_title = ""
-                    for workno in candidates:
-                        info = await dlsite.get_work_info(workno)
-                        if info and str(info.get("title") or "").strip():
-                            official_title = str(info["title"]).strip()
-                            break
-                    if not official_title:
+                    parsed = parse_work_name_by_template(dir_name, rename_template)
+                    if not parsed.get("matched"):
+                        parsed = parse_work_name_from_dir(dir_name)
+                    new_title = str(parsed.get("work_name") or "").strip() if parsed.get("matched") else ""
+                    if not new_title:
                         missed += 1
                         continue
                     await asyncio.to_thread(
                         conn.execute,
                         'UPDATE "t_work" SET title = ? WHERE id = ?',
-                        (official_title, work_id),
+                        (new_title, work_id),
                     )
                     await asyncio.to_thread(conn.commit)
                     updated += 1
                     logger.info(
-                        "[KIKOERU-SCAN] title 补全（原为空）: id=%s 新=%s",
-                        work_id, official_title[:60],
+                        "[KIKOERU-SCAN] title 补全（原为空，按文件夹名反解）: id=%s 新=%s",
+                        work_id, new_title[:60],
                     )
                 except Exception:
                     missed += 1
