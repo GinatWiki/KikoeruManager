@@ -3726,6 +3726,279 @@ async def test_start_download_task_reports_share_failure_detail(monkeypatch, tmp
     assert task.task_metadata["failed_files"]
 
 
+def test_pick_pikpak_batch_files_packs_greedily_within_safety_margin(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    gib = 1024 ** 3
+
+    files = [
+        {"file_id": "f1", "name": "RJ1.7z.001", "size": 4 * gib},
+        {"file_id": "f2", "name": "RJ1.7z.002", "size": 4 * gib},
+        {"file_id": "f3", "name": "RJ1.7z.003", "size": 4 * gib},
+        {"file_id": "f4", "name": "RJ1.7z.004", "size": 4 * gib},
+    ]
+    quota_rows = [
+        {"limit_bytes": 6 * gib, "remaining_bytes": 5 * gib},
+        {"limit_bytes": 6 * gib, "remaining_bytes": 5 * gib},
+    ]
+
+    batch = service._pick_pikpak_batch_files(files, quota_rows)
+    # 0.9 安全系数 → 每账号可用 4.5GiB：两个 4GiB 文件各放进一个账号，其余留待下一轮
+    assert [item["file_id"] for item in batch] == ["f1", "f2"]
+    # 任何文件都放不下时返回空列表（调用方转为等待空间释放）
+    assert service._pick_pikpak_batch_files(files, [{"remaining_bytes": 1 * gib}]) == []
+    # 没有任何账号容量数据时返回空列表
+    assert service._pick_pikpak_batch_files(files, []) == []
+
+
+@pytest.mark.asyncio
+async def test_plan_pikpak_multi_round_download_flags_shortage(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    gib = 1024 ** 3
+
+    class FakeAccount:
+        id = "acc-1"
+        label = "主账号"
+
+    async def fake_client(account=None, **_kwargs):
+        return object()
+
+    async def fake_close(_client):
+        return None
+
+    async def fake_collect(_client, _url):
+        return {}, [
+            {"id": "f1", "name": "RJ1.7z.001", "size": 3 * gib},
+            {"id": "f2", "name": "RJ1.7z.002", "size": 3 * gib},
+            {"id": "f3", "name": "RJ1.7z.003", "size": 3 * gib},
+        ]
+
+    async def fake_snapshot():
+        return [{"limit_bytes": 6 * gib, "remaining_bytes": 5 * gib}]
+
+    monkeypatch.setattr(service, "_select_pikpak_account", lambda: FakeAccount())
+    monkeypatch.setattr(service, "_pikpak_client", fake_client)
+    monkeypatch.setattr(service, "_close_pikpak_client", fake_close)
+    monkeypatch.setattr(service, "_collect_pikpak_share_files", fake_collect)
+    monkeypatch.setattr(service, "_pikpak_quota_snapshot", fake_snapshot)
+
+    plan = await service._plan_pikpak_multi_round_download("https://mypikpak.com/s/share", None)
+    assert plan is not None
+    assert [item["file_id"] for item in plan["files"]] == ["f1", "f2", "f3"]
+    assert plan["total_bytes"] == 9 * gib
+    # 9GiB > 5GiB * 0.9：整份装不下 → 需要多轮
+    assert plan["multi_round"] is True
+
+    # 只选中一个文件时按选择子集规划；3GiB 在安全余量内 → 不需要多轮
+    plan = await service._plan_pikpak_multi_round_download(
+        "https://mypikpak.com/s/share",
+        [{"source": "pikpak", "file_id": "f2"}],
+    )
+    assert plan is not None
+    assert [item["file_id"] for item in plan["files"]] == ["f2"]
+    assert plan["multi_round"] is False
+
+
+@pytest.mark.asyncio
+async def test_start_download_task_falls_back_to_multi_round_when_space_shortage(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    gib = 1024 ** 3
+    file_size = 4 * gib
+
+    selected_items = [
+        {"source": "pikpak", "file_id": f"f{i}", "filename": f"RJ1.7z.{i:03d}", "name": f"RJ1.7z.{i:03d}"}
+        for i in range(1, 5)
+    ]
+    plan_files = [
+        {"file_id": f"f{i}", "name": f"RJ1.7z.{i:03d}", "size": file_size}
+        for i in range(1, 5)
+    ]
+
+    preview_selected_counts = []
+
+    async def fake_preview_urls(urls, target_subdir="", conflict_policy="", *, materialize_sources=False, selected_items=None):
+        picked = list(selected_items or [])
+        preview_selected_counts.append(len(picked))
+        if len(picked) > 2:
+            # 单轮整份转存：多账号空间不足（模拟真实链路的分享级失败行）
+            return {
+                "items": [{
+                    "ok": False,
+                    "source": "pikpak",
+                    "url": "https://mypikpak.com/s/share",
+                    "masked_url": "https://mypikpak.com/s/***",
+                    "reason": "PikPak 多账号空间仍不足: 未能分配 4 个文件，共 16.0 GB。",
+                }],
+                "resolved_urls": [],
+                "source_items": [],
+                "source_modes": ["pikpak"],
+            }
+        items = []
+        source_items = []
+        for item in picked:
+            name = str(item.get("filename") or item.get("name") or "file.bin")
+            items.append({
+                "ok": True,
+                "source": "pikpak",
+                "url": f"https://dl.test/{name}",
+                "masked_url": f"https://dl.test/{name}",
+                "filename": name,
+                "relative_path": name,
+                "final_path": str(tmp_path / "downloads" / name),
+                "target_dir": str(tmp_path / "downloads"),
+                "size_bytes": file_size,
+                "file_id": item.get("file_id"),
+                "download_file_id": f"cleanup-{item.get('file_id')}",
+                "pikpak_cleanup_file_id": f"cleanup-{item.get('file_id')}",
+                "pikpak_materialized": True,
+                "pikpak_account_id": "acc-1",
+                "share_id": "share-1",
+            })
+            source_items.append({
+                "source": "pikpak",
+                "file_id": item.get("file_id"),
+                "download_file_id": f"cleanup-{item.get('file_id')}",
+                "pikpak_cleanup_file_id": f"cleanup-{item.get('file_id')}",
+                "pikpak_materialized": True,
+                "pikpak_account_id": "acc-1",
+                "share_id": "share-1",
+                "name": name,
+                "filename": name,
+                "size_bytes": file_size,
+            })
+        return {
+            "items": items,
+            "resolved_urls": [entry["url"] for entry in items],
+            "source_items": source_items,
+            "source_modes": ["pikpak"],
+        }
+
+    async def fake_plan(*_args, **_kwargs):
+        return {
+            "files": plan_files,
+            "total_bytes": 4 * file_size,
+            "total_remaining": 10 * gib,
+            "multi_round": True,
+        }
+
+    async def fake_snapshot():
+        return [
+            {"limit_bytes": 6 * gib, "remaining_bytes": 5 * gib},
+            {"limit_bytes": 6 * gib, "remaining_bytes": 5 * gib},
+        ]
+
+    rpc_counter = {"gid": 0}
+
+    async def fake_rpc(method, params):
+        if method == "aria2.addUri":
+            rpc_counter["gid"] += 1
+            return f"gid-{rpc_counter['gid']}"
+        if method == "aria2.tellStatus":
+            return {
+                "gid": params[0],
+                "status": "complete",
+                "totalLength": str(file_size),
+                "completedLength": str(file_size),
+                "downloadSpeed": "0",
+                "errorMessage": "",
+                "files": [],
+            }
+        if method in ("aria2.tellActive", "aria2.tellWaiting", "aria2.tellStopped"):
+            return []
+        if method in ("aria2.remove", "aria2.removeDownloadResult"):
+            return "ok"
+        raise AssertionError(f"unexpected rpc: {method}")
+
+    async def fake_remove_existing(_target_path):
+        return None
+
+    cleanup_calls = []
+
+    async def fake_cleanup(rows):
+        cleanup_calls.append(len(rows or []))
+        return {
+            "success": True,
+            "status": "completed",
+            "requested_count": len(rows or []),
+            "deleted_count": len(rows or []),
+            "accounts": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(service, "preview_urls", fake_preview_urls)
+    monkeypatch.setattr(service, "_plan_pikpak_multi_round_download", fake_plan)
+    monkeypatch.setattr(service, "_pikpak_quota_snapshot", fake_snapshot)
+    monkeypatch.setattr(service, "_rpc_call", fake_rpc)
+    monkeypatch.setattr(service, "_remove_existing_gids_for_target", fake_remove_existing)
+    monkeypatch.setattr(service, "cleanup_pikpak_transfer_items_from_rows", fake_cleanup)
+    monkeypatch.setattr("app.core.http_download_service._PIKPAK_MULTI_ROUND_SPACE_SETTLE_SECONDS", 0.01)
+
+    task = Task(
+        task_type=TaskType.HTTP_DOWNLOAD,
+        source_path="mypikpak.com",
+        metadata={
+            "urls": ["https://mypikpak.com/s/share"],
+            "selected_items": selected_items,
+        },
+    )
+
+    result = await service.start_download_task(task)
+
+    assert result["multi_round"] is True
+    assert result["rounds"] == 2
+    assert result["success"] is True
+    assert len(result["downloaded_files"]) == 4
+    assert all(row["status"] == "completed" for row in result["downloaded_files"])
+    # 第一次 preview 是单轮整份（4 个选中）；随后两轮各 2 个
+    assert preview_selected_counts == [4, 2, 2]
+    assert task.task_metadata["pikpak_multi_round"] is True
+    assert task.task_metadata["download_runtime"]["status"] == "completed"
+    # 每轮结束都清理了本轮转存副本
+    assert len(cleanup_calls) >= 2
+
+
+@pytest.mark.asyncio
+async def test_start_download_task_keeps_share_failure_when_multi_round_not_applicable(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+
+    async def fake_preview_urls(*_args, **_kwargs):
+        return {
+            "items": [{
+                "ok": False,
+                "source": "pikpak",
+                "url": "https://mypikpak.com/s/share",
+                "masked_url": "https://mypikpak.com/s/***",
+                "reason": "PikPak 多账号空间仍不足: 未能分配 20 个文件，共 37.4 GB。",
+            }],
+            "resolved_urls": [],
+            "source_items": [],
+            "source_modes": ["pikpak"],
+        }
+
+    async def fake_plan(*_args, **_kwargs):
+        return {"files": [], "total_bytes": 0, "total_remaining": 0, "multi_round": False}
+
+    monkeypatch.setattr(service, "preview_urls", fake_preview_urls)
+    monkeypatch.setattr(service, "_plan_pikpak_multi_round_download", fake_plan)
+
+    task = Task(
+        task_type=TaskType.HTTP_DOWNLOAD,
+        source_path="mypikpak.com",
+        metadata={
+            "urls": ["https://mypikpak.com/s/share"],
+            "selected_items": [{"source": "pikpak", "file_id": "abc"}],
+        },
+    )
+
+    with pytest.raises(HttpDownloadError, match="没有通过校验的下载项") as excinfo:
+        await service.start_download_task(task)
+
+    assert "多账号空间仍不足" in str(excinfo.value)
+
+
 def test_merge_download_attempt_rows_later_success_overrides_failed(tmp_path):
     service = HttpDownloadService()
 

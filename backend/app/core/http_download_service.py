@@ -55,6 +55,12 @@ _PIKPAK_CLEAR_ACCOUNT_CONCURRENCY = 3
 _PIKPAK_TRANSFER_CONCURRENCY = 4
 _PIKPAK_LINK_CONCURRENCY = 8
 _PIKPAK_SHARE_CONCURRENCY = 3
+# 多轮转存下载：分享总大小超过全部账号剩余空间时，逐轮「转存一批 → 下载 → 清理副本 → 下一批」。
+# 批次规划按剩余容量打 safety 折扣，避免探测与转存两个时刻的容量抖动导致贴边失败。
+_PIKPAK_MULTI_ROUND_SPACE_SAFETY_RATIO = 0.9
+# 每轮清理转存副本后，等 PikPak 服务端刷新容量数据再进入下一轮。
+_PIKPAK_MULTI_ROUND_SPACE_SETTLE_SECONDS = 5.0
+_PIKPAK_MULTI_ROUND_SPACE_WAIT_TIMEOUT_SECONDS = 180.0
 _SHARE_PREVIEW_ONLY_SOURCES = {"pikpak", "transferit"}
 _FILE_LEVEL_SELECTION_SOURCES = _SHARE_PREVIEW_ONLY_SOURCES | {"gofile", "google_drive"}
 _GOFILE_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -3934,6 +3940,155 @@ class HttpDownloadService:
             return f"{int(size)} {units[index]}"
         return f"{size:.1f} {units[index]}"
 
+    async def _pikpak_quota_snapshot(self) -> List[Dict[str, Any]]:
+        """并行读取全部可用账号的实时容量（不写缓存），供多轮下载逐轮规划批次。"""
+        accounts = self._pikpak_accounts()
+        rows: List[Dict[str, Any]] = []
+
+        async def load(account: PikPakAccount) -> None:
+            client = None
+            try:
+                client = await self._pikpak_client(account=account)
+                quota = self._normalize_pikpak_quota(await client.get_quota_info())
+            except Exception as exc:
+                logger.warning(
+                    "[PikPak] 读取账号容量失败（多轮下载规划） account=%s error=%s",
+                    account.label,
+                    self._sanitize_error(exc),
+                )
+                return
+            finally:
+                if client is not None:
+                    await self._close_pikpak_client(client)
+            if int(quota.get("limit_bytes") or 0) <= 0:
+                return
+            rows.append({
+                "account": account,
+                "limit_bytes": int(quota.get("limit_bytes") or 0),
+                "remaining_bytes": int(quota.get("remaining_bytes") or 0),
+            })
+
+        await asyncio.gather(*(load(account) for account in accounts))
+        return rows
+
+    def _pick_pikpak_batch_files(
+        self,
+        files: List[Dict[str, Any]],
+        quota_rows: List[Dict[str, Any]],
+        *,
+        safety_ratio: float = _PIKPAK_MULTI_ROUND_SPACE_SAFETY_RATIO,
+    ) -> List[Dict[str, Any]]:
+        """从待下载文件中贪心选出一批「当前账号空间能装下」的文件。
+
+        与 _copy_pikpak_share_files_multi 的分配语义一致（按大小降序、优先放入剩余最多的账号），
+        并按 safety_ratio 预留余量（转存层用实时剩余容量的 100% 判定）。
+        返回按文件名排序的选中列表；返回空列表表示当前空间放不下任何文件。
+        """
+        remaining = [int(row.get("remaining_bytes") or 0) for row in (quota_rows or [])]
+        if not remaining:
+            return []
+        remaining = [max(0, int(value * max(0.1, float(safety_ratio)))) for value in remaining]
+        picked: List[Dict[str, Any]] = []
+        for row in sorted(files or [], key=lambda item: int(item.get("size") or 0), reverse=True):
+            size = int(row.get("size") or 0)
+            best_index = max(range(len(remaining)), key=lambda index: remaining[index])
+            if remaining[best_index] <= 0:
+                continue
+            if size <= 0 or remaining[best_index] >= size:
+                remaining[best_index] -= max(0, size)
+                picked.append(row)
+        return sorted(picked, key=lambda item: str(item.get("name") or ""))
+
+    async def _wait_for_pikpak_space_release(
+        self,
+        needed_bytes: int,
+        *,
+        timeout_seconds: float = _PIKPAK_MULTI_ROUND_SPACE_WAIT_TIMEOUT_SECONDS,
+        poll_interval: float = 5.0,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """等待账号空间释放（清理转存副本后 PikPak 容量数据可能延迟刷新）。
+
+        返回满足需求的新容量快照；超时返回 None。
+        """
+        deadline = time.monotonic() + max(5.0, float(timeout_seconds))
+        while True:
+            try:
+                snapshot = await self._pikpak_quota_snapshot()
+            except Exception as exc:
+                logger.warning("[PikPak] 等待空间释放时读取容量失败: %s", self._sanitize_error(exc))
+                snapshot = []
+            total_remaining = sum(int(row.get("remaining_bytes") or 0) for row in snapshot)
+            if snapshot and total_remaining >= max(0, int(needed_bytes)):
+                return snapshot
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(max(1.0, float(poll_interval)))
+
+    async def _plan_pikpak_multi_round_download(
+        self,
+        raw_url: str,
+        selected_items: Optional[List[Dict[str, Any]]],
+    ) -> Optional[Dict[str, Any]]:
+        """探测单一 PikPak 分享是否需要切换多轮转存下载。
+
+        返回 None 表示无法判断（调用方按原单轮流程处理，错误信息仍有明细）；
+        否则返回 {"files", "total_bytes", "total_remaining", "multi_round"}。
+        files 为本次任务实际要下载的文件（有选择时是选中子集）。
+        """
+        account = self._select_pikpak_account()
+        client = await self._pikpak_client(account=account)
+        try:
+            _info, collected = await self._collect_pikpak_share_files(client, raw_url)
+        finally:
+            await self._close_pikpak_client(client)
+        selection_filter = self._selection_filter_from_items(selected_items)
+        files: List[Dict[str, Any]] = []
+        for item in collected:
+            if not isinstance(item, dict):
+                continue
+            file_id = self._pikpak_file_id(item)
+            if not file_id:
+                continue
+            if selection_filter and not self._share_item_matches_selection("pikpak", item, selection_filter):
+                continue
+            files.append({
+                "file_id": file_id,
+                "name": self._sanitize_filename(item.get("name") or item.get("file_name") or file_id),
+                "size": self._pikpak_file_size(item),
+            })
+        if not files:
+            # 选中文件在分享里匹配不到（或分享为空）：交给原流程报「匹配不上」明细。
+            return None
+        total_bytes = sum(int(item.get("size") or 0) for item in files)
+        snapshot = await self._pikpak_quota_snapshot()
+        if not snapshot:
+            return None
+        total_remaining = sum(int(row.get("remaining_bytes") or 0) for row in snapshot)
+        max_remaining = max(int(row.get("remaining_bytes") or 0) for row in snapshot)
+        min_size = min(
+            (int(item.get("size") or 0) for item in files if int(item.get("size") or 0) > 0),
+            default=0,
+        )
+        multi_round = bool(
+            total_remaining > 0
+            and min_size <= max_remaining
+            and total_bytes > int(total_remaining * _PIKPAK_MULTI_ROUND_SPACE_SAFETY_RATIO)
+        )
+        logger.info(
+            "[PikPak] 多轮下载空间探测: 文件=%s 总大小=%s 账号剩余合计=%s 单账号最大剩余=%s multi_round=%s",
+            len(files),
+            self._format_bytes_for_error(total_bytes),
+            self._format_bytes_for_error(total_remaining),
+            self._format_bytes_for_error(max_remaining),
+            multi_round,
+        )
+        return {
+            "files": files,
+            "total_bytes": total_bytes,
+            "total_remaining": total_remaining,
+            "multi_round": multi_round,
+        }
+
     async def _pikpak_download_link(self, client, file_id: str, *, allow_missing: bool = False, max_attempts: int = 5) -> Dict[str, Any]:
         # captcha/init 对副账号偶发 400，单次失败极易丢分卷。下载阶段多次重试(失败则重新登录刷新匹配 token + 退避)，
         # 预览阶段(allow_missing)只试一次保持响应速度。
@@ -6030,7 +6185,7 @@ class HttpDownloadService:
         ):
             logger.warning(
                 "[PikPak] 任务只带 selected_keys 而无 selected_items，无法按选择匹配，改为整份分享重新解析 task=%s",
-                task_id,
+                getattr(task, "id", ""),
             )
             task.task_metadata["selected_keys"] = []
         preview = await self.preview_urls(
@@ -6059,6 +6214,37 @@ class HttpDownloadService:
         ]
         failed_items = [item for item in preview.get("items") or [] if not item.get("ok")]
         if not items:
+            # PikPak 单分享「整份大小 > 全部账号剩余空间」时单轮转存必然失败。
+            # 检测到空间类失败后探测一次：可分轮则切换多轮转存下载
+            # （转存一批 → 下载 → 清理副本 → 下一批），否则保持原有报错路径。
+            if (
+                len(raw_urls) == 1
+                and self._is_pikpak_url(raw_urls[0])
+                and bool(getattr(cfg, "pikpak_auto_save_share", True))
+                and any(
+                    "空间" in str(item.get("reason") or item.get("failure_reason") or "")
+                    for item in failed_items
+                )
+            ):
+                plan: Optional[Dict[str, Any]] = None
+                try:
+                    plan = await self._plan_pikpak_multi_round_download(raw_urls[0], selected_items)
+                except Exception as exc:
+                    logger.warning("[PikPak] 多轮下载空间探测失败，按原流程报错: %s", self._sanitize_error(exc))
+                if plan and plan.get("multi_round"):
+                    logger.info(
+                        "[PikPak] 单轮转存空间不足，切换多轮转存下载 task=%s files=%s",
+                        getattr(task, "id", ""),
+                        len(plan.get("files") or []),
+                    )
+                    return await self._start_download_task_multi_round(
+                        task,
+                        share_url=raw_urls[0],
+                        target_subdir=target_subdir,
+                        conflict_policy=conflict_policy,
+                        plan=plan,
+                        selected_items=selected_items,
+                    )
             reasons = []
             for item in failed_items[:5]:
                 reason = str(item.get("reason") or item.get("failure_reason") or "").strip()
@@ -6594,6 +6780,529 @@ class HttpDownloadService:
             "downloaded_files": success_files,
             "failed_files": merged_failed_rows,
             "pikpak_cleanup_result": pikpak_cleanup_result,
+        }
+
+    async def _start_download_task_multi_round(
+        self,
+        task,
+        *,
+        share_url: str,
+        target_subdir: str,
+        conflict_policy: str,
+        plan: Dict[str, Any],
+        selected_items: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """PikPak 分享超过账号总空间时的多轮转存下载。
+
+        每轮：读取实时容量 → 选出一批能装下的文件 → 转存 + 解析直链 →
+        aria2 下载并等待本批完成 → 立即清理本批转存副本（释放空间）→ 进入下一轮。
+        某轮失败时记录明细并继续剩余轮（不重试失败文件）；全部结束后按成功/失败汇总。
+        """
+        started = time.monotonic()
+        remaining: List[Dict[str, Any]] = [
+            dict(item) for item in (plan.get("files") or []) if isinstance(item, dict)
+        ]
+        total_bytes_all = int(plan.get("total_bytes") or sum(int(item.get("size") or 0) for item in remaining))
+        overrides_by_file_id = {
+            str(item.get("file_id") or item.get("id") or "").strip(): item
+            for item in (selected_items or [])
+            if isinstance(item, dict) and str(item.get("file_id") or item.get("id") or "").strip()
+        }
+        all_download_files: List[Dict[str, Any]] = []
+        all_failed_items: List[Dict[str, Any]] = []
+        round_cleanup_results: List[Dict[str, Any]] = []
+        round_index = 0
+        max_rounds = max(1, len(remaining)) + 3
+
+        task.task_metadata["download_files"] = []
+        task.task_metadata["failed_files"] = []
+        task.task_metadata["pikpak_multi_round"] = True
+
+        def refresh_runtime() -> Dict[str, Any]:
+            completed_rows = [row for row in all_download_files if str(row.get("status") or "") == "completed"]
+            failed_rows_now = [row for row in all_download_files if str(row.get("status") or "") == "failed"]
+            active_rows = [row for row in all_download_files if str(row.get("status") or "") == "downloading"]
+            current_row = active_rows[0] if active_rows else {}
+            runtime = {
+                "status": "downloading",
+                "total_files": len(all_download_files),
+                "completed_files": len(completed_rows),
+                "failed_files": len(all_failed_items) + len(failed_rows_now),
+                "active_file_count": len(active_rows),
+                "transferred_bytes": sum(int(row.get("downloaded") or 0) for row in all_download_files),
+                "total_bytes": total_bytes_all,
+                "speed_bytes_per_sec": sum(int(row.get("speed_bytes_per_sec") or 0) for row in active_rows),
+                "current_file_name": str(current_row.get("name") or ""),
+                "current_relative_path": str(current_row.get("relative_path") or ""),
+                "multi_round": True,
+                "round_index": round_index,
+            }
+            task.task_metadata["download_files"] = all_download_files
+            task.task_metadata["download_runtime"] = runtime
+            return runtime
+
+        def current_progress() -> int:
+            transferred = sum(int(row.get("downloaded") or 0) for row in all_download_files)
+            if total_bytes_all > 1:
+                return min(99, int(transferred / total_bytes_all * 100))
+            return max(task.progress, 5)
+
+        while remaining:
+            await task.wait_if_paused()
+            if task.is_cancelled():
+                await self.cancel_task(task.id)
+                raise asyncio.CancelledError()
+            round_index += 1
+            if round_index > max_rounds:
+                all_failed_items.append({
+                    "ok": False,
+                    "source": "pikpak",
+                    "filename": "多轮下载",
+                    "reason": f"多轮下载轮次超出安全上限（{max_rounds} 轮），剩余 {len(remaining)} 个文件未处理",
+                })
+                break
+            # 1) 读取实时容量并选出本批能装下的文件
+            try:
+                snapshot = await self._pikpak_quota_snapshot()
+            except Exception as exc:
+                snapshot = []
+                logger.warning("[PikPak] 多轮下载第 %s 轮读取容量失败: %s", round_index, self._sanitize_error(exc))
+            batch = self._pick_pikpak_batch_files(remaining, snapshot) if snapshot else []
+            if not batch and snapshot:
+                # 安全余量把贴边文件掐掉时不要直接进入等待：转存层按实时剩余容量
+                # 100% 判定，这里退回满额再选一次，避免明明装得下却空等。
+                batch = self._pick_pikpak_batch_files(remaining, snapshot, safety_ratio=1.0)
+            if not batch:
+                smallest = min(
+                    (int(item.get("size") or 0) for item in remaining if int(item.get("size") or 0) > 0),
+                    default=0,
+                )
+                task.current_step = f"多轮下载 第{round_index}轮：等待账号空间释放..."
+                task.update_progress(current_progress(), task.current_step)
+                logger.info(
+                    "[PikPak] 多轮下载第 %s 轮：当前空间装不下任何剩余文件（最小 %s），等待容量释放",
+                    round_index,
+                    self._format_bytes_for_error(smallest),
+                )
+                snapshot = await self._wait_for_pikpak_space_release(max(smallest, 1))
+                if snapshot is None:
+                    need = sum(int(item.get("size") or 0) for item in remaining)
+                    raise HttpDownloadError(
+                        f"PikPak 多账号空间不足: 剩余 {len(remaining)} 个文件（{self._format_bytes_for_error(need)}）"
+                        "在清理后仍无法开始下一轮下载。请检查账号空间或添加账号。"
+                    )
+                batch = self._pick_pikpak_batch_files(remaining, snapshot)
+                if not batch:
+                    batch = self._pick_pikpak_batch_files(remaining, snapshot, safety_ratio=1.0)
+                if not batch:
+                    need = sum(int(item.get("size") or 0) for item in remaining)
+                    max_single = max((int(item.get("size") or 0) for item in remaining), default=0)
+                    raise HttpDownloadError(
+                        f"PikPak 多账号空间不足: 剩余 {len(remaining)} 个文件（{self._format_bytes_for_error(need)}）"
+                        f"无法装入当前账号空间（单个文件最大 {self._format_bytes_for_error(max_single)}）。"
+                        "请添加账号或升级空间。"
+                    )
+            batch_ids = {str(item.get("file_id") or "") for item in batch}
+            batch_bytes = sum(int(item.get("size") or 0) for item in batch)
+            task.current_step = (
+                f"多轮下载 第{round_index}轮：转存 {len(batch)} 个文件"
+                f"（{self._format_bytes_for_error(batch_bytes)}，剩余 {len(remaining)} 个）"
+            )
+            task.update_progress(current_progress(), task.current_step)
+            logger.info(
+                "[PikPak] 多轮下载第 %s 轮开始: 文件=%s 总大小=%s 剩余待处理=%s",
+                round_index,
+                [str(item.get("name") or "") for item in batch],
+                self._format_bytes_for_error(batch_bytes),
+                len(remaining),
+            )
+
+            # 2) 本批 preview（转存 + 解析直链），带上用户对文件的自定义命名等覆盖项
+            round_selected_items: List[Dict[str, Any]] = []
+            for item in batch:
+                base = {
+                    "source": "pikpak",
+                    "file_id": item.get("file_id"),
+                    "filename": item.get("name"),
+                    "name": item.get("name"),
+                }
+                overrides = overrides_by_file_id.get(str(item.get("file_id") or ""))
+                if overrides:
+                    for field in (
+                        "custom_name",
+                        "custom_filename",
+                        "custom_extract_password",
+                        "extract_password",
+                        "custom_group_folder",
+                    ):
+                        if overrides.get(field) not in (None, ""):
+                            base[field] = overrides[field]
+                round_selected_items.append(base)
+            round_items: List[Dict[str, Any]] = []
+            round_failed: List[Dict[str, Any]] = []
+            round_source_items: List[Dict[str, Any]] = []
+            preview = None
+            try:
+                preview = await self.preview_urls(
+                    [share_url],
+                    target_subdir=target_subdir,
+                    conflict_policy=conflict_policy,
+                    materialize_sources=True,
+                    selected_items=round_selected_items,
+                )
+            except Exception as exc:
+                round_failed.append({
+                    "ok": False,
+                    "source": "pikpak",
+                    "filename": f"第{round_index}轮（{len(batch)} 个文件）",
+                    "reason": f"第 {round_index} 轮转存/解析失败：{self._sanitize_error(exc)}",
+                    "multi_round_index": round_index,
+                })
+            if preview is not None:
+                round_source_items = [
+                    item for item in list(preview.get("source_items") or [])
+                    if isinstance(item, dict)
+                ]
+                for item in list(preview.get("items") or []):
+                    if not isinstance(item, dict):
+                        continue
+                    if not item.get("ok"):
+                        round_failed.append(item)
+                        continue
+                    overrides = overrides_by_file_id.get(str(item.get("file_id") or ""))
+                    if overrides:
+                        for field in (
+                            "custom_name",
+                            "custom_filename",
+                            "custom_extract_password",
+                            "extract_password",
+                            "custom_group_folder",
+                        ):
+                            if overrides.get(field) not in (None, ""):
+                                item[field] = overrides[field]
+                    try:
+                        round_items.append(
+                            self._apply_custom_download_name_to_item(item, conflict_policy=conflict_policy)
+                        )
+                    except Exception as exc:
+                        round_failed.append({
+                            "ok": False,
+                            "source": "pikpak",
+                            "filename": str(item.get("filename") or item.get("name") or ""),
+                            "reason": self._sanitize_error(exc),
+                            "file_id": item.get("file_id", ""),
+                            "pikpak_cleanup_file_id": item.get("pikpak_cleanup_file_id", ""),
+                            "pikpak_materialized": bool(item.get("pikpak_materialized")),
+                            "share_id": item.get("share_id", ""),
+                            "pikpak_account_id": item.get("pikpak_account_id", ""),
+                            "pikpak_account_label": item.get("pikpak_account_label", ""),
+                            "pikpak_transfer_dir": item.get("pikpak_transfer_dir", ""),
+                            "multi_round_index": round_index,
+                        })
+            # 每轮结束都要能找到本轮已转存的副本（供本轮清理与异常收口清理）
+            task.task_metadata["source_items"] = (
+                [item for item in list(task.task_metadata.get("source_items") or []) if isinstance(item, dict)]
+                + [sanitize_http_download_item(item) for item in round_source_items]
+            )[-_PIKPAK_MAX_SHARE_FILES * 4:]
+
+            # 3) 提交本批 aria2 下载
+            round_gids: List[str] = []
+            round_rows: List[Dict[str, Any]] = []
+            for item in round_items:
+                try:
+                    os.makedirs(item["target_dir"], exist_ok=True)
+                    await self._remove_existing_gids_for_target(item["final_path"])
+                    existing_row = self._prepare_existing_aria2_target(item)
+                    if existing_row is not None:
+                        round_rows.append(existing_row)
+                        all_download_files.append(existing_row)
+                        continue
+                    options = self._aria2_options(item, item["target_dir"])
+                    gid = await self._rpc_call("aria2.addUri", [[item["url"]], options])
+                    round_gids.append(str(gid))
+                    row = {
+                        "gid": str(gid),
+                        "name": item["filename"],
+                        "relative_path": item["relative_path"],
+                        "local_path": item["final_path"],
+                        "url": item["masked_url"],
+                        "original_url": item["url"],
+                        "source": item.get("source", "pikpak"),
+                        "status": "pending",
+                        "progress": 0,
+                        "downloaded": 0,
+                        "total": int(item.get("size_bytes") or 0),
+                        "size": int(item.get("size_bytes") or 0),
+                        "expected_size_bytes": int(item.get("size_bytes") or 0),
+                        "file_id": item.get("file_id", ""),
+                        "download_file_id": item.get("download_file_id", ""),
+                        "pikpak_cleanup_file_id": item.get("pikpak_cleanup_file_id", ""),
+                        "pikpak_materialized": bool(item.get("pikpak_materialized")),
+                        "share_id": item.get("share_id", ""),
+                        "pikpak_account_id": item.get("pikpak_account_id", ""),
+                        "pikpak_account_label": item.get("pikpak_account_label", ""),
+                        "pikpak_transfer_dir": item.get("pikpak_transfer_dir", ""),
+                        "pikpak_reset_partial_bytes": int(item.get("pikpak_reset_partial_bytes") or 0),
+                        "multi_round_index": round_index,
+                    }
+                    round_rows.append(row)
+                    all_download_files.append(row)
+                except Exception as exc:
+                    failed_row = {
+                        "gid": str(item.get("gid") or f"pikpak:{item.get('file_id') or item.get('filename') or ''}"),
+                        "name": item.get("filename") or "pikpak-file",
+                        "relative_path": item.get("relative_path") or "",
+                        "local_path": item.get("final_path") or "",
+                        "url": item.get("masked_url") or self._mask_url(str(item.get("url") or "")),
+                        "source": "pikpak",
+                        "status": "failed",
+                        "failure_reason": f"第 {round_index} 轮提交下载失败：{self._sanitize_error(exc)}",
+                        "progress": 0,
+                        "downloaded": 0,
+                        "total": int(item.get("size_bytes") or 0),
+                        "size": int(item.get("size_bytes") or 0),
+                        "speed_bytes_per_sec": 0,
+                        "file_id": item.get("file_id", ""),
+                        "download_file_id": item.get("download_file_id", ""),
+                        "pikpak_cleanup_file_id": item.get("pikpak_cleanup_file_id", ""),
+                        "pikpak_materialized": bool(item.get("pikpak_materialized")),
+                        "share_id": item.get("share_id", ""),
+                        "pikpak_account_id": item.get("pikpak_account_id", ""),
+                        "pikpak_account_label": item.get("pikpak_account_label", ""),
+                        "pikpak_transfer_dir": item.get("pikpak_transfer_dir", ""),
+                        "multi_round_index": round_index,
+                    }
+                    round_rows.append(failed_row)
+                    all_download_files.append(failed_row)
+            if round_gids:
+                self._task_gids[task.id] = round_gids
+            refresh_runtime()
+
+            # 4) 等待本批下载完成
+            if round_gids:
+                last_log_at = 0.0
+                while True:
+                    await task.wait_if_paused()
+                    if task.is_cancelled():
+                        await self.cancel_task(task.id)
+                        raise asyncio.CancelledError()
+                    gid_set = set(round_gids)
+                    aria_rows = [row for row in round_rows if str(row.get("gid") or "") in gid_set]
+                    try:
+                        rows, _runtime, done, _failed = await self._poll_task(round_gids, aria_rows)
+                    except Exception as exc:
+                        logger.warning(
+                            "[PikPak] 多轮下载第 %s 轮状态轮询失败: %s",
+                            round_index,
+                            self._sanitize_error(exc),
+                        )
+                        for row in aria_rows:
+                            if str(row.get("status") or "") not in ("completed", "failed"):
+                                row["status"] = "failed"
+                                row["failure_reason"] = f"状态轮询失败：{self._sanitize_error(exc)}"
+                        break
+                    for row in rows:
+                        for existing in all_download_files:
+                            if existing.get("gid") == row.get("gid"):
+                                existing.update(row)
+                                break
+                    refresh_runtime()
+                    progress = current_progress()
+                    now = time.monotonic()
+                    if now - last_log_at > 5:
+                        last_log_at = now
+                        task.update_progress(
+                            progress,
+                            f"多轮下载 第{round_index}轮：下载中（本批 {len(round_gids)} 个）",
+                        )
+                    else:
+                        task.progress = max(task.progress, progress)
+                        task.mark_changed("progress")
+                    if done:
+                        break
+                    await asyncio.sleep(1.0)
+
+            # 5) 清理本批转存副本，为下一轮释放空间
+            cleanup_rows = [*round_rows, *round_failed, *round_source_items]
+            try:
+                cleanup_result = await self.cleanup_pikpak_transfer_items_from_rows(cleanup_rows)
+            except Exception as exc:
+                cleanup_result = {
+                    "success": False,
+                    "status": "failed",
+                    "requested_count": 0,
+                    "deleted_count": 0,
+                    "accounts": [],
+                    "errors": [{"message": self._sanitize_error(exc)}],
+                }
+            round_cleanup_results.append(cleanup_result)
+            logger.info(
+                "[PikPak] 多轮下载第 %s 轮转存副本清理: requested=%s deleted=%s success=%s",
+                round_index,
+                cleanup_result.get("requested_count"),
+                cleanup_result.get("deleted_count"),
+                cleanup_result.get("success"),
+            )
+
+            # 6) 本批收尾：失败明细入账；无论成败本批文件都从待下载集合移除（不重试失败文件）
+            for item in round_failed:
+                if isinstance(item, dict):
+                    all_failed_items.append(item)
+            round_success_count = len([row for row in round_rows if str(row.get("status") or "") == "completed"])
+            round_failed_count = len([row for row in round_rows if str(row.get("status") or "") == "failed"]) + len(round_failed)
+            remaining = [item for item in remaining if str(item.get("file_id") or "") not in batch_ids]
+            task.task_metadata["pikpak_multi_round_progress"] = {
+                "rounds_completed": round_index,
+                "files_remaining": len(remaining),
+                "last_round_success": round_success_count,
+                "last_round_failed": round_failed_count,
+            }
+            logger.info(
+                "[PikPak] 多轮下载第 %s 轮结束: 成功=%s 失败=%s 剩余=%s",
+                round_index,
+                round_success_count,
+                round_failed_count,
+                len(remaining),
+            )
+            if remaining and int(cleanup_result.get("requested_count") or 0) > 0:
+                # 删除后 PikPak 容量数据可能延迟刷新，短等后再规划下一轮。
+                await asyncio.sleep(_PIKPAK_MULTI_ROUND_SPACE_SETTLE_SECONDS)
+
+        # ===== 全部轮次结束，按与单轮流程一致的语义汇总 =====
+        success_files = [row for row in all_download_files if row.get("status") == "completed"]
+        failed_rows = [row for row in all_download_files if row.get("status") == "failed"]
+        merged_failed_rows = [*all_failed_items, *[row for row in failed_rows if row not in all_failed_items]]
+        duration_ms = int((time.monotonic() - started) * 1000)
+        downloaded_bytes = sum(int(row.get("downloaded") or row.get("size") or 0) for row in success_files)
+        transferred_bytes = sum(int(row.get("downloaded") or 0) for row in all_download_files)
+        task.task_metadata.update({
+            "download_files": all_download_files,
+            "failed_files": [
+                sanitize_http_download_item(item)
+                for item in merged_failed_rows
+                if isinstance(item, dict)
+            ],
+            "final_output_path": self._download_root(),
+            "performance_metrics": {
+                "duration_ms": duration_ms,
+                "downloaded_bytes": downloaded_bytes,
+                "transferred_bytes": transferred_bytes,
+                "success_count": len(success_files),
+                "failed_count": len(merged_failed_rows),
+                "average_speed_bytes": int(downloaded_bytes / max(duration_ms / 1000, 1)) if downloaded_bytes else 0,
+            },
+        })
+        if success_files and not merged_failed_rows:
+            final_status = "completed"
+        elif success_files:
+            final_status = "partial_failed"
+        else:
+            final_status = "failed"
+        try:
+            from .task_phase_metric_service import get_task_phase_metric_service
+
+            task_type = getattr(getattr(task, "type", None), "value", getattr(task, "type", ""))
+            await get_task_phase_metric_service().record_async(
+                task_id=str(getattr(task, "id", "") or ""),
+                task_type=str(task_type or ""),
+                phase="http_download",
+                resource="network_download",
+                status=final_status,
+                duration_ms=duration_ms,
+                bytes_total=downloaded_bytes,
+                items_total=len(success_files),
+                detail={
+                    "failed_count": len(merged_failed_rows),
+                    "transferred_bytes": transferred_bytes,
+                    "source": "http_download_service",
+                    "multi_round": True,
+                    "rounds": round_index,
+                },
+            )
+        except Exception:
+            logger.warning("[HTTP下载] 记录任务阶段指标失败 task_id=%s", getattr(task, "id", ""), exc_info=True)
+
+        # 兜底清理：逐轮已清理，这里扫尾残留与清理失败重试
+        try:
+            final_cleanup = await self.cleanup_pikpak_transfer_items_from_rows(
+                [*all_download_files, *all_failed_items]
+            )
+        except Exception as exc:
+            final_cleanup = {
+                "success": False,
+                "status": "failed",
+                "requested_count": 0,
+                "deleted_count": 0,
+                "accounts": [],
+                "errors": [{"message": self._sanitize_error(exc)}],
+            }
+        cleanup_results_all = [*round_cleanup_results, final_cleanup]
+        cleanup_requested_total = sum(int(item.get("requested_count") or 0) for item in cleanup_results_all)
+        cleanup_deleted_total = sum(int(item.get("deleted_count") or 0) for item in cleanup_results_all)
+        cleanup_errors = [
+            error
+            for item in cleanup_results_all
+            for error in list(item.get("errors") or [])
+        ]
+        pikpak_cleanup_result = {
+            "success": all(bool(item.get("success")) for item in cleanup_results_all),
+            "status": "completed" if cleanup_requested_total and not cleanup_errors else ("failed" if cleanup_errors else "skipped"),
+            "requested_count": cleanup_requested_total,
+            "deleted_count": cleanup_deleted_total,
+            "accounts": [entry for item in cleanup_results_all for entry in list(item.get("accounts") or [])],
+            "errors": cleanup_errors,
+            "multi_round": True,
+            "rounds": round_index,
+        }
+        task.task_metadata["pikpak_cleanup_result"] = pikpak_cleanup_result
+        self._task_gids.pop(task.id, None)
+
+        runtime = task.task_metadata.get("download_runtime") or {}
+        runtime.update({
+            "total_files": len(all_download_files),
+            "completed_files": len(success_files),
+            "failed_files": len(merged_failed_rows),
+            "transferred_bytes": transferred_bytes,
+            "total_bytes": total_bytes_all,
+        })
+        runtime["status"] = final_status
+        runtime["speed_bytes_per_sec"] = 0
+        task.task_metadata["download_runtime"] = runtime
+        if not success_files:
+            reasons = []
+            for row in merged_failed_rows[:5]:
+                if not isinstance(row, dict):
+                    continue
+                reason = str(row.get("failure_reason") or row.get("reason") or "").strip()
+                target = str(row.get("name") or row.get("filename") or row.get("relative_path") or "").strip()
+                if reason:
+                    reasons.append(f"{target}: {reason}" if target else reason)
+            detail = "；".join(reason for reason in reasons if reason)
+            task.task_metadata["failure_reason"] = f"没有任何文件下载成功：{detail}" if detail else "没有任何文件下载成功"
+            raise HttpDownloadError(f"没有任何文件下载成功：{detail}" if detail else "没有任何文件下载成功")
+        if task.is_cancelled():
+            raise asyncio.CancelledError()
+        cleanup_suffix = ""
+        if cleanup_requested_total > 0 and pikpak_cleanup_result.get("success"):
+            cleanup_suffix = f"，PikPak 已清理 {cleanup_deleted_total} 个"
+        elif cleanup_errors:
+            first_error = str((cleanup_errors[0] or {}).get("message") or "").strip()
+            cleanup_suffix = f"，PikPak 清理失败: {first_error or '请在设置页手动清理'}"
+        final_message = "下载完成" if not merged_failed_rows else "下载部分成功"
+        task.update_progress(
+            100,
+            f"{final_message}（多轮 {round_index} 轮），成功 {len(success_files)} 个，失败 {len(merged_failed_rows)} 个{cleanup_suffix}",
+        )
+        return {
+            "success": not bool(merged_failed_rows),
+            "partial_success": bool(success_files and merged_failed_rows),
+            "status": final_status,
+            "download_root": self._download_root(),
+            "downloaded_files": success_files,
+            "failed_files": merged_failed_rows,
+            "pikpak_cleanup_result": pikpak_cleanup_result,
+            "multi_round": True,
+            "rounds": round_index,
         }
 
     def _content_length_from_headers(self, headers: Dict[str, str]) -> int:
