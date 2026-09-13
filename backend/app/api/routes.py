@@ -18833,7 +18833,16 @@ def _serialize_http_download_task(task, *, compact: bool = False) -> dict:
         success_count = len([item for item in download_files if str((item or {}).get("status") or "") == "completed"])
     if compact and download_files_truncated:
         download_files = download_files[:_TRANSFER_STATUS_PREVIEW_LIMIT]
-    display_status = "partial_failed" if failed_files and success_count > 0 else status_value
+    # 任务仍在运行（pending/processing/paused/等待重试）时不报「部分失败」：
+    # 多轮下载中途出现个别失败文件属正常过程（后续轮次仍在继续），
+    # 若提前标记 partial_failed，前端会把进行中的任务当已结束的部分失败展示。
+    display_status = status_value
+    if (
+        failed_files
+        and success_count > 0
+        and status_value not in _TASK_RUNTIME_ACTIVE_STATUSES
+    ):
+        display_status = "partial_failed"
     work_title = (
         metadata.get("batch_name")
         or metadata.get("source_label")

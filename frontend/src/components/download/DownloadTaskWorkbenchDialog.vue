@@ -137,6 +137,10 @@
                       <component :is="getTaskStatusMetaIcon(task)" :size="12" class="v1-status-icon" />
                       {{ getDownloadTaskStatusLabel(task) }}
                     </span>
+                    <span v-if="getMultiRoundLabel(task)" class="v1-round-chip" title="PikPak 多轮下载：整份分享超出账号空间，自动分批转存并下载">
+                      <Layers :size="11" />
+                      {{ getMultiRoundLabel(task) }}
+                    </span>
                     <span>{{ getPrimarySizeText(task) }}</span>
                     <span>{{ getPrimaryFileProgressLabel(task) }}</span>
                     <span v-if="showDownloadMetrics && getVisibleDownloadSpeed(task) > 0" class="v1-speed-line">
@@ -325,7 +329,7 @@
 
 <script setup>
 import { DotLottieVue } from '@lottiefiles/dotlottie-vue'
-import { Archive, AlertCircle, ArrowUpToLine, CheckCircle2, Clock3, Cloud, CloudDownload, Download, HardDriveUpload, Minimize2, Pause, Play, RefreshCw, Search, TriangleAlert, X, XCircle, Zap } from 'lucide-vue-next'
+import { Archive, AlertCircle, ArrowUpToLine, CheckCircle2, Clock3, Cloud, CloudDownload, Download, HardDriveUpload, Layers, Minimize2, Pause, Play, RefreshCw, Search, TriangleAlert, X, XCircle, Zap } from 'lucide-vue-next'
 import { computed, nextTick, ref, watch } from 'vue'
 import { useVirtualizer } from '@tanstack/vue-virtual'
 import downloadIconAnimation from '../../assets/anime/download-icon-clean.json?url'
@@ -1192,6 +1196,20 @@ function getTaskSummaryStepText(task) {
   return currentStep
 }
 
+// PikPak 多轮下载轮次标记：runtime.multi_round/round_index 由后端多轮执行器写入。
+// 运行中显示当前轮次（防止界面停留在第一轮），结束且确实跑了多轮时显示总轮数。
+function getMultiRoundLabel(task) {
+  const runtime = getDownloadRuntime(task)
+  if (runtime?.multi_round !== true) return ''
+  const roundIndex = Number(runtime?.round_index || 0)
+  if (!roundIndex) return ''
+  const status = String(task?.display_status || task?.status || '')
+  if (['completed', 'partial_failed', 'failed'].includes(status)) {
+    return roundIndex > 1 ? `多轮 共 ${roundIndex} 轮` : ''
+  }
+  return `多轮 第 ${roundIndex} 轮`
+}
+
 function getTaskTone(task) {
   const status = String(task?.display_status || task?.status || '')
   if (status === 'failed') return 'danger'
@@ -1726,6 +1744,7 @@ function buildUnifiedFileRows(task) {
 .v1-status-line.upload-success { color: #52525b; }
 .v1-status-line.warning { color: #9a5b00; }
 .v1-status-line.danger { color: #b91c1c; }
+.v1-round-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 999px; border: 1px solid rgba(37, 99, 235, 0.28); background: rgba(37, 99, 235, 0.08); color: #1d4ed8; font-size: 10px; font-weight: 700; line-height: 1.5; }
 .v1-status-icon { flex-shrink: 0; opacity: .92; }
 .v1-strip-track { width: 100%; height: 5px; overflow: hidden; border-radius: 999px; background: rgba(24, 24, 27, 0.08); }
 .v1-strip-fill { height: 100%; border-radius: 999px; background: #52525b; transition: width 0.8s cubic-bezier(0.22, 1, 0.36, 1), background 0.4s ease; }
@@ -2017,6 +2036,12 @@ function buildUnifiedFileRows(task) {
 :global(html.kikoerumanager-dark .v1-task-icon.warning),
 :global(html.kikoerumanager-dark .v1-status-line.warning) {
   color: #fbbf24;
+}
+
+:global(html.kikoerumanager-dark .v1-round-chip) {
+  border-color: rgba(96, 165, 250, 0.32);
+  background: rgba(37, 99, 235, 0.18);
+  color: #93c5fd;
 }
 
 :global(html.kikoerumanager-dark .v1-task-icon.danger) {
