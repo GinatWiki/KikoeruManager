@@ -61,6 +61,49 @@ _PIKPAK_MULTI_ROUND_SPACE_SAFETY_RATIO = 0.9
 # 每轮清理转存副本后，等 PikPak 服务端刷新容量数据再进入下一轮。
 _PIKPAK_MULTI_ROUND_SPACE_SETTLE_SECONDS = 5.0
 _PIKPAK_MULTI_ROUND_SPACE_WAIT_TIMEOUT_SECONDS = 180.0
+# 直链刷新续传：下载中途直链过期(No URI available)/SSL 抖动导致文件失败时，
+# 用行内 download_file_id 重新解析直链并按原路径重提交，aria2 凭 .aria2 控制文件断点续传。
+# 每文件最多刷新次数、两次刷新尝试的最小间隔、单次刷新的直链解析尝试次数。
+_PIKPAK_LINK_REFRESH_MAX_PER_FILE = 3
+_PIKPAK_LINK_REFRESH_MIN_INTERVAL_SECONDS = 30.0
+_PIKPAK_LINK_RESOLVE_MAX_ATTEMPTS = 3
+# 直链刷新可救回的失败特征（小写子串匹配）：URL 失效、TLS/连接抖动、超时、限流类状态码，
+# 以及本服务判定的「无进度」停滞——用新直链原路径重提交即可续传；
+# 文件本身不存在、校验失败等错误不在此列（刷新救不回，直接如实报失败）。
+_PIKPAK_REFRESHABLE_FAILURE_MARKERS = (
+    "no uri available",
+    "ssl",
+    "tls",
+    "handshake",
+    "certificate",
+    "timeout",
+    "timed out",
+    "超时",
+    "network",
+    "connection reset",
+    "reset by peer",
+    "connection aborted",
+    "connection refused",
+    "connection closed",
+    "unable to connect",
+    "cannot connect",
+    "connect failed",
+    "eof",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "gateway time-out",
+    "error: 403",
+    "403 forbidden",
+    "too many requests",
+    "无进度",
+)
+# PikPak 直链下载的网络抖动容忍下限（与用户配置取较大值）：连接/传输超时与自动重试次数上调，
+# 避免短时网络波动被 aria2 直接判失败；URL 彻底失效由直链刷新机制兜底。
+_PIKPAK_ARIA2_MIN_TRIES = 10
+_PIKPAK_ARIA2_MIN_RETRY_WAIT = 10
+_PIKPAK_ARIA2_MIN_CONNECT_TIMEOUT = 30
+_PIKPAK_ARIA2_MIN_TIMEOUT = 120
 _SHARE_PREVIEW_ONLY_SOURCES = {"pikpak", "transferit"}
 _FILE_LEVEL_SELECTION_SOURCES = _SHARE_PREVIEW_ONLY_SOURCES | {"gofile", "google_drive"}
 _GOFILE_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -389,6 +432,8 @@ class HttpDownloadService:
         self._daemon_lock = asyncio.Lock()
         self._task_gids: Dict[str, List[str]] = {}
         self._aria2_progress_state: Dict[str, tuple[int, float]] = {}
+        # 直链刷新预算：key 为本地目标路径（跨 GID 稳定），value 为 (已刷新次数, 上次刷新时间)
+        self._pikpak_link_refresh_state: Dict[str, tuple[int, float]] = {}
         self._active_download_tasks: Dict[str, asyncio.Task] = {}
         self._rpc_id = 0
         self._gofile_guest_token_cache: tuple[str, float] = ("", 0.0)
@@ -1203,9 +1248,10 @@ class HttpDownloadService:
             "httpx_client_args": httpx_args,
             # PikPak SDK 的请求重试不是文件下载重试。复用下载重试配置会让
             # 分享读取/转存接口在失败时退避近一分钟，任务表现成“卡死”。
-            # API 层最多重试 3 次，短退避后把明确阶段错误交给任务重试层。
-            "request_max_retries": max(1, min(3, int(getattr(cfg, "retry_count", 3) or 3))),
-            "request_initial_backoff": max(0.5, min(2.0, float(getattr(cfg, "retry_wait_seconds", 1) or 1))),
+            # API 层最多重试 5 次（v2.6.36 起放宽，容忍服务端短时抖动），
+            # 短退避后仍失败再把明确阶段错误交给任务重试层。
+            "request_max_retries": max(1, min(5, int(getattr(cfg, "retry_count", 3) or 3))),
+            "request_initial_backoff": max(0.5, min(3.0, float(getattr(cfg, "retry_wait_seconds", 1) or 1))),
             "token_refresh_callback": lambda callback_client, **kwargs: self._save_pikpak_token_callback(callback_client, account=account, **kwargs),
         }
         client = PikPakApi(**kwargs)
@@ -5393,6 +5439,10 @@ class HttpDownloadService:
         }
         if source == "pikpak":
             options["user-agent"] = _GOFILE_USER_AGENT
+            options["max-tries"] = str(max(int(options["max-tries"]), _PIKPAK_ARIA2_MIN_TRIES))
+            options["retry-wait"] = str(max(int(options["retry-wait"]), _PIKPAK_ARIA2_MIN_RETRY_WAIT))
+            options["connect-timeout"] = str(max(int(options["connect-timeout"]), _PIKPAK_ARIA2_MIN_CONNECT_TIMEOUT))
+            options["timeout"] = str(max(int(options["timeout"]), _PIKPAK_ARIA2_MIN_TIMEOUT))
         elif source == "gofile":
             gofile_split = self._gofile_split_limit()
             retry_attempt = max(0, int(item.get("gofile_retry_attempt") or 0))
@@ -7438,6 +7488,145 @@ class HttpDownloadService:
                 row["status"] = "failed"
                 row["failure_reason"] = self._sanitize_error(exc) or exc.__class__.__name__
 
+    def _pikpak_failure_is_refreshable(self, row: Dict[str, Any]) -> bool:
+        """失败原因是否属于「刷新直链可能救回」的 URL/网络类。"""
+        reason = str(row.get("failure_reason") or "").strip().lower()
+        if not reason:
+            return False
+        return any(marker in reason for marker in _PIKPAK_REFRESHABLE_FAILURE_MARKERS)
+
+    def _append_pikpak_refresh_reason(self, row: Dict[str, Any], note: str) -> None:
+        """把刷新失败说明追加到失败原因（同一条说明只追加一次）。"""
+        reason = str(row.get("failure_reason") or "").strip()
+        if note and note in reason:
+            return
+        row["failure_reason"] = f"{reason}{note}" if reason else note.strip("（）")
+
+    async def _resolve_pikpak_download_url_for_refresh(self, file_id: str, account_id: str) -> str:
+        """用转存副本的 file_id 重新解析一条直链（沿用解析重试/重登逻辑）。"""
+        client = await self._pikpak_client(account_id)
+        try:
+            info = await self._pikpak_download_link(
+                client,
+                file_id,
+                max_attempts=_PIKPAK_LINK_RESOLVE_MAX_ATTEMPTS,
+            )
+            url = str(info.get("_download_url") or "").strip()
+            if not url:
+                raise HttpDownloadError("PikPak 直链刷新未返回可下载链接")
+            return url
+        finally:
+            await self._close_pikpak_client(client)
+
+    async def _refresh_pikpak_failed_download_rows(self, rows: List[Dict[str, Any]], gids: List[str]) -> int:
+        """直链刷新续传：URL/网络类失败的行用转存副本重新解析直链并原地断点续传。
+
+        - 单轮与多轮下载共用 `_poll_task`，因此刷新对两种流程同时生效；
+        - 仅处理 pikpak 源、失败原因命中 `_PIKPAK_REFRESHABLE_FAILURE_MARKERS` 的行；
+        - 每文件最多 `_PIKPAK_LINK_REFRESH_MAX_PER_FILE` 次，两次刷新间隔不小于
+          `_PIKPAK_LINK_REFRESH_MIN_INTERVAL_SECONDS`；
+        - 新直链按原目标路径重新提交 aria2（continue=true 复用 .aria2 控制文件续传），
+          并把轮询集合中的旧 GID 替换为新 GID。
+        返回本次成功重新提交的行数。
+        """
+        targets: List[tuple] = []
+        now = time.monotonic()
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("source") or "").strip().lower() != "pikpak":
+                continue
+            if str(row.get("status") or "").strip().lower() != "failed":
+                continue
+            if not self._pikpak_failure_is_refreshable(row):
+                continue
+            local_path = str(row.get("local_path") or "").strip()
+            file_id = str(row.get("download_file_id") or "").strip()
+            if not local_path or not file_id:
+                continue
+            attempts, last_at = self._pikpak_link_refresh_state.get(local_path, (0, 0.0))
+            if attempts >= _PIKPAK_LINK_REFRESH_MAX_PER_FILE:
+                self._append_pikpak_refresh_reason(
+                    row,
+                    f"（自动直链刷新已达上限 {_PIKPAK_LINK_REFRESH_MAX_PER_FILE} 次）",
+                )
+                continue
+            if last_at and now - last_at < _PIKPAK_LINK_REFRESH_MIN_INTERVAL_SECONDS:
+                continue
+            targets.append((row, local_path, file_id, attempts))
+        refreshed = 0
+        for row, local_path, file_id, attempts in targets:
+            attempt_no = attempts + 1
+            self._pikpak_link_refresh_state[local_path] = (attempt_no, time.monotonic())
+            name = str(row.get("name") or os.path.basename(local_path) or "pikpak-file")
+            try:
+                new_url = await self._resolve_pikpak_download_url_for_refresh(
+                    file_id,
+                    str(row.get("pikpak_account_id") or "").strip(),
+                )
+            except Exception as exc:
+                detail = self._sanitize_error(exc)
+                row["pikpak_link_refresh_count"] = attempt_no
+                self._append_pikpak_refresh_reason(
+                    row,
+                    f"（直链刷新第 {attempt_no}/{_PIKPAK_LINK_REFRESH_MAX_PER_FILE} 次失败：{detail}）",
+                )
+                logger.warning(
+                    "[PikPak] 直链刷新第 %s/%s 次失败: %s -> %s",
+                    attempt_no,
+                    _PIKPAK_LINK_REFRESH_MAX_PER_FILE,
+                    name,
+                    detail,
+                )
+                continue
+            old_gid = str(row.get("gid") or "").strip()
+            try:
+                if old_gid:
+                    await self._remove_aria2_gid(old_gid)
+                options = self._aria2_options(
+                    {
+                        "source": "pikpak",
+                        "filename": str(row.get("name") or os.path.basename(local_path)),
+                        "final_path": local_path,
+                        "size_bytes": int(row.get("size") or row.get("total") or 0),
+                        "url": new_url,
+                    },
+                    os.path.dirname(local_path),
+                )
+                new_gid = str(await self._rpc_call("aria2.addUri", [[new_url], options]))
+            except Exception as exc:
+                detail = self._sanitize_error(exc)
+                row["pikpak_link_refresh_count"] = attempt_no
+                self._append_pikpak_refresh_reason(
+                    row,
+                    f"（直链刷新后重新提交失败：{detail}）",
+                )
+                logger.warning("[PikPak] 直链刷新重新提交失败: %s -> %s", name, detail)
+                continue
+            self._aria2_progress_state.pop(new_gid, None)
+            row["gid"] = new_gid
+            row["url"] = self._mask_url(new_url)
+            row["original_url"] = new_url
+            row["status"] = "downloading"
+            row["failure_reason"] = ""
+            row["pikpak_link_refresh_count"] = attempt_no
+            row["pikpak_link_refresh_note"] = (
+                f"直链已自动刷新（第 {attempt_no}/{_PIKPAK_LINK_REFRESH_MAX_PER_FILE} 次），从断点继续下载"
+            )
+            if old_gid and old_gid in gids:
+                gids.remove(old_gid)
+            if new_gid not in gids:
+                gids.append(new_gid)
+            refreshed += 1
+            logger.info(
+                "[PikPak] 直链刷新成功: %s（第 %s/%s 次），新 GID=%s，从断点续传",
+                name,
+                attempt_no,
+                _PIKPAK_LINK_REFRESH_MAX_PER_FILE,
+                new_gid,
+            )
+        return refreshed
+
     async def _poll_task(self, gids: List[str], rows: List[Dict[str, Any]]):
         row_by_gid = {str(row.get("gid")): row for row in rows}
         total_bytes = 0
@@ -7551,6 +7740,20 @@ class HttpDownloadService:
                 if not active_name:
                     active_name = str(row.get("name") or "")
                     active_rel = str(row.get("relative_path") or "")
+        # 直链刷新续传：URL/网络类失败的行尝试重新解析直链并原地续传（单轮与多轮共用）。
+        # 刷新成功的行从 failed 回到 downloading，需同步重算统计与完成状态。
+        refreshed = await self._refresh_pikpak_failed_download_rows(rows, gids)
+        if refreshed:
+            completed = sum(1 for row in rows if str(row.get("status") or "") == "completed")
+            failed_count = sum(1 for row in rows if str(row.get("status") or "") == "failed")
+            active_count = sum(
+                1 for row in rows if str(row.get("status") or "") in {"downloading", "pending"}
+            )
+            for candidate in rows:
+                if str(candidate.get("status") or "") == "downloading":
+                    active_name = str(candidate.get("name") or "")
+                    active_rel = str(candidate.get("relative_path") or "")
+                    break
         runtime = {
             "status": "downloading",
             "total_files": len(rows),

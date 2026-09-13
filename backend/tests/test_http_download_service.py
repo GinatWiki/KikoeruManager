@@ -4908,3 +4908,175 @@ async def test_poll_task_fails_stalled_pikpak_download(monkeypatch):
     assert rows[0]["status"] == "failed"
     assert "重新转存" in rows[0]["failure_reason"]
     assert ("aria2.remove", ["gid-1"]) in calls
+
+
+@pytest.mark.asyncio
+async def test_pikpak_link_refresh_resubmits_failed_url_row(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    local_path = str(tmp_path / "pack.7z.001")
+    calls = []
+
+    async def fake_rpc(method, params):
+        calls.append((method, params))
+        if method == "aria2.addUri":
+            return "gid-new"
+        return "OK"
+
+    async def fake_resolve(file_id, account_id):
+        assert file_id == "fid-1"
+        assert account_id == "acc-1"
+        return "https://dl.example/refreshed-url"
+
+    monkeypatch.setattr(service, "_rpc_call", fake_rpc)
+    monkeypatch.setattr(service, "_resolve_pikpak_download_url_for_refresh", fake_resolve)
+
+    row = {
+        "gid": "gid-old",
+        "source": "pikpak",
+        "name": "pack.7z.001",
+        "status": "failed",
+        "failure_reason": "No URI available.",
+        "local_path": local_path,
+        "download_file_id": "fid-1",
+        "pikpak_account_id": "acc-1",
+        "size": 2048,
+        "total": 2048,
+        "downloaded": 1024,
+    }
+    gids = ["gid-old"]
+
+    refreshed = await service._refresh_pikpak_failed_download_rows([row], gids)
+
+    assert refreshed == 1
+    assert row["status"] == "downloading"
+    assert row["gid"] == "gid-new"
+    assert gids == ["gid-new"]
+    assert row["pikpak_link_refresh_count"] == 1
+    assert "直链已自动刷新" in row["pikpak_link_refresh_note"]
+    assert ("aria2.remove", ["gid-old"]) in calls
+    add_uri_calls = [call for call in calls if call[0] == "aria2.addUri"]
+    assert len(add_uri_calls) == 1
+    assert add_uri_calls[0][1][0] == ["https://dl.example/refreshed-url"]
+    assert add_uri_calls[0][1][1]["continue"] == "true"
+    assert add_uri_calls[0][1][1]["out"] == "pack.7z.001"
+
+
+@pytest.mark.asyncio
+async def test_pikpak_link_refresh_stops_at_limit(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    local_path = str(tmp_path / "pack.7z.002")
+    service._pikpak_link_refresh_state[local_path] = (3, 0.0)
+    resolved = []
+
+    async def fake_resolve(file_id, account_id):
+        resolved.append(file_id)
+        return "https://dl.example/should-not-resolve"
+
+    monkeypatch.setattr(service, "_resolve_pikpak_download_url_for_refresh", fake_resolve)
+
+    row = {
+        "gid": "gid-old",
+        "source": "pikpak",
+        "name": "pack.7z.002",
+        "status": "failed",
+        "failure_reason": "No URI available.",
+        "local_path": local_path,
+        "download_file_id": "fid-2",
+    }
+
+    refreshed = await service._refresh_pikpak_failed_download_rows([row], ["gid-old"])
+
+    assert refreshed == 0
+    assert resolved == []
+    assert row["status"] == "failed"
+    assert row["gid"] == "gid-old"
+    assert "已达上限" in row["failure_reason"]
+
+
+@pytest.mark.asyncio
+async def test_pikpak_link_refresh_respects_min_interval(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    local_path = str(tmp_path / "pack.7z.003")
+    service._pikpak_link_refresh_state[local_path] = (1, 100.0)
+    monkeypatch.setattr("app.core.http_download_service.time.monotonic", lambda: 120.0)
+    resolved = []
+
+    async def fake_resolve(file_id, account_id):
+        resolved.append(file_id)
+        return "https://dl.example/should-not-resolve"
+
+    monkeypatch.setattr(service, "_resolve_pikpak_download_url_for_refresh", fake_resolve)
+
+    row = {
+        "gid": "gid-old",
+        "source": "pikpak",
+        "name": "pack.7z.003",
+        "status": "failed",
+        "failure_reason": "SSL handshake failure",
+        "local_path": local_path,
+        "download_file_id": "fid-3",
+    }
+
+    refreshed = await service._refresh_pikpak_failed_download_rows([row], ["gid-old"])
+
+    assert refreshed == 0
+    assert resolved == []
+    assert row["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_poll_task_refreshes_pikpak_url_failure_in_place(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    local_path = str(tmp_path / "pack.7z.001")
+    calls = []
+
+    async def fake_rpc(method, params):
+        calls.append((method, params))
+        if method == "aria2.tellStatus":
+            return {
+                "gid": "gid-old",
+                "status": "error",
+                "totalLength": "2048",
+                "completedLength": "1024",
+                "downloadSpeed": "0",
+                "files": [],
+                "errorMessage": "No URI available.",
+            }
+        if method == "aria2.addUri":
+            return "gid-new"
+        return "OK"
+
+    async def fake_resolve(file_id, account_id):
+        return "https://dl.example/refreshed-url"
+
+    monkeypatch.setattr(service, "_rpc_call", fake_rpc)
+    monkeypatch.setattr(service, "_resolve_pikpak_download_url_for_refresh", fake_resolve)
+
+    row = {
+        "gid": "gid-old",
+        "source": "pikpak",
+        "name": "pack.7z.001",
+        "status": "downloading",
+        "downloaded": 1024,
+        "total": 2048,
+        "size": 2048,
+        "local_path": local_path,
+        "download_file_id": "fid-1",
+        "pikpak_account_id": "acc-1",
+    }
+    gids = ["gid-old"]
+
+    rows, runtime, done, failed = await service._poll_task(gids, [row])
+
+    assert done is False
+    assert failed == 0
+    assert rows[0]["status"] == "downloading"
+    assert rows[0]["gid"] == "gid-new"
+    assert gids == ["gid-new"]
+    assert ("aria2.remove", ["gid-old"]) in calls
+    assert any(call[0] == "aria2.addUri" for call in calls)
+    assert runtime["active_file_count"] == 1
