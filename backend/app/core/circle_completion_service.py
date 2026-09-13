@@ -688,7 +688,7 @@ class CircleCompletionService:
 
     def normalize_rjcode(self, value: Any) -> str:
         text = str(value or "").strip().upper()
-        match = re.search(r"[RVB]J(\d{6}|\d{8})(?!\d)", text, re.IGNORECASE)
+        match = re.search(r"[RVB]J(\d{6,8})(?!\d)", text, re.IGNORECASE)
         return match.group(0).upper() if match else text
 
     def _normalize_lang_code(self, value: Any) -> str:
@@ -1525,7 +1525,7 @@ class CircleCompletionService:
 
     def _build_dlsite_cover_url(self, rjcode: Any, is_unreleased: bool = False, resized: bool = False) -> str:
         normalized = self.normalize_rjcode(rjcode)
-        match = re.match(r"RJ(\d{6}|\d{8})$", normalized)
+        match = re.match(r"RJ(\d{6,8})$", normalized)
         if not match:
             return ""
         number = int(match.group(1))
@@ -5515,9 +5515,9 @@ class CircleCompletionService:
                             failure_reason = f"DLsite maker 预告页返回 HTTP {response.status_code}"
                         break
                     text = response.text or ""
-                    matches = re.findall(r"/announce/=/product_id/([RVB]J(?:\d{8}|\d{6}))\.html", text, re.IGNORECASE)
+                    matches = re.findall(r"/announce/=/product_id/([RVB]J(?:\d{6,8}))\.html", text, re.IGNORECASE)
                     if not matches:
-                        matches = re.findall(r"product_id/([RVB]J(?:\d{8}|\d{6}))\.html", text, re.IGNORECASE)
+                        matches = re.findall(r"product_id/([RVB]J(?:\d{6,8}))\.html", text, re.IGNORECASE)
                 except Exception as exc:
                     failure_reason = f"DLsite maker 预告页抓取失败: {str(exc)}"
                     logger.warning("[社团补全] DLsite maker 预告页抓取异常 maker_id=%s page=%s url=%s: %s", normalized_maker_id, page, url, exc)

@@ -417,7 +417,7 @@ class LibraryFolderCompletionService:
         data = dict(item or {})
         folder_path = self._normalize_local_path(library, str(data.get("folder_path") or ""))
         rjcode = self.resource_service.normalize_rjcode(data.get("actual_rjcode") or data.get("rjcode") or "")
-        if not re.fullmatch(r"[RVB]J(?:\d{6}|\d{8})", rjcode, re.IGNORECASE):
+        if not re.fullmatch(r"[RVB]J(?:\d{6,8})", rjcode, re.IGNORECASE):
             raise ValueError("缺少有效 RJ 号")
         selected_resources = [
             self._sanitize_resource_for_task(resource)

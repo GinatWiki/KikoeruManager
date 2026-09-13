@@ -304,7 +304,7 @@ class CircleImageCacheService:
 
     @staticmethod
     def _dlsite_folder_for(rjcode: str) -> str:
-        match = re.fullmatch(r"[RVB]J(\d{6}|\d{8})", str(rjcode or "").strip().upper())
+        match = re.fullmatch(r"[RVB]J(\d{6,8})", str(rjcode or "").strip().upper())
         if not match:
             return ""
         digits = match.group(1)

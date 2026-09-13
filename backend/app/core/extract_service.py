@@ -4667,7 +4667,7 @@ class ExtractService:
         - RJ123456 → RJ123456
         """
         # 先匹配标准RJ号格式，8位优先于6位
-        rj_match = re.search(r'[RVB]J(\d{8}|\d{6})(?!\d)', filename, re.IGNORECASE)
+        rj_match = re.search(r'[RVB]J(\d{6,8})(?!\d)', filename, re.IGNORECASE)
         if rj_match:
             normalized_rj = rj_match.group(0).upper()
             # 下载工作台会按“作品名(密码)”模板把用户指定的解压密码写进文件名。
@@ -4687,7 +4687,7 @@ class ExtractService:
             return normalized_rj
 
         # 匹配纯数字，8位优先于6位
-        num_match = re.search(r'(\d{8}|\d{6})(?!\d)', filename)
+        num_match = re.search(r'(\d{6,8})(?!\d)', filename)
         if num_match:
             return f"RJ{num_match.group(1)}"
 
@@ -6475,7 +6475,7 @@ class ExtractService:
                 candidates.append(value)
 
         normalized_text = str(text or "")
-        for match in re.finditer(r'[RVB]J\s*[-_.]?\s*(\d{6}|\d{8})(?!\d)', normalized_text, re.IGNORECASE):
+        for match in re.finditer(r'[RVB]J\s*[-_.]?\s*(\d{6,8})(?!\d)', normalized_text, re.IGNORECASE):
             add_code(f"RJ{match.group(1)}")
 
         path_parts = re.split(r"[\\/]", normalized_text)
@@ -6489,7 +6489,7 @@ class ExtractService:
                 part_candidates.append(stem)
             for item in part_candidates:
                 cleaned = re.sub(r'^\d+[._-]', '', item)
-                number_match = re.fullmatch(r'(\d{6}|\d{8})', cleaned)
+                number_match = re.fullmatch(r'(\d{6,8})', cleaned)
                 if number_match:
                     add_code(f"RJ{number_match.group(1)}")
 
@@ -6506,7 +6506,7 @@ class ExtractService:
                 candidates.append(code)
 
         path_text = str(archive_path)
-        for match in re.finditer(r'[RVB]J\s*[-_.]?\s*(\d{6}|\d{8})(?!\d)', path_text, re.IGNORECASE):
+        for match in re.finditer(r'[RVB]J\s*[-_.]?\s*(\d{6,8})(?!\d)', path_text, re.IGNORECASE):
             digits = match.group(1)
             add_code(f"RJ{digits}")
 
@@ -6516,7 +6516,7 @@ class ExtractService:
             parts.append(path_obj.stem)
         for part in parts:
             cleaned = re.sub(r'^\d+[._-]', '', part)
-            number_match = re.fullmatch(r'(\d{6}|\d{8})', cleaned)
+            number_match = re.fullmatch(r'(\d{6,8})', cleaned)
             if number_match:
                 add_code(f"RJ{number_match.group(1)}")
 
@@ -7133,7 +7133,7 @@ class ExtractService:
 
         返回的 list 按 RJ 字典序稳定排序，方便日志和单测断言。
         """
-        rj_pattern = re.compile(r'[RVB]J(\d{8}|\d{6})(?!\d)', re.IGNORECASE)
+        rj_pattern = re.compile(r'[RVB]J(\d{6,8})(?!\d)', re.IGNORECASE)
         found: set = set()
         for item in file_list or []:
             name = str((item or {}).get("name") or "").strip()

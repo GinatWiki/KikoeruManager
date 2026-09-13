@@ -134,7 +134,7 @@ class LinkedSubtitleImportService:
     def _extract_all_rjcodes(self, value: str) -> List[str]:
         return [
             match.group(0).upper()
-            for match in re.finditer(r"[RVB]J(?:\d{8}|\d{6})(?!\d)", str(value or ""), re.IGNORECASE)
+            for match in re.finditer(r"[RVB]J(?:\d{6,8})(?!\d)", str(value or ""), re.IGNORECASE)
         ]
 
     def _has_multiple_rjcodes(self, value: str) -> bool:

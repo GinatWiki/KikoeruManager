@@ -13011,7 +13011,7 @@ class LibraryManager:
     def _extract_rjcode(self, value: str) -> Optional[str]:
         import re
 
-        match = re.search(r"[RVB]J(\d{6}|\d{8})(?!\d)", value, re.IGNORECASE)
+        match = re.search(r"[RVB]J(\d{6,8})(?!\d)", value, re.IGNORECASE)
         return match.group(0).upper() if match else None
 
 

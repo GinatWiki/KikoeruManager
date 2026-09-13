@@ -345,7 +345,7 @@ class SubtitleSyncService:
             RJ 号（如 RJ123456）或 None
         """
         # 匹配 RJ + 6位或8位数字
-        pattern = r'[RVB]J(\d{6}|\d{8})(?!\d)'
+        pattern = r'[RVB]J(\d{6,8})(?!\d)'
         match = re.search(pattern, folder_name, re.IGNORECASE)
         if match:
             return match.group(0).upper()

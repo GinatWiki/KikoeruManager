@@ -173,7 +173,7 @@ def _build_dlsite_cover_url(rjcode: Any) -> str:
         return ""
     import re
 
-    matched = re.match(r"RJ(\d{6}|\d{8})$", normalized)
+    matched = re.match(r"RJ(\d{6,8})$", normalized)
     if not matched:
         return ""
     digits = matched.group(1)

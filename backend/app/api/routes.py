@@ -6129,7 +6129,7 @@ async def find_password_for_archive(archive_path: str):
         filename = Path(archive_path).name
         
         # 提取RJ号
-        rj_match = re.search(r'[RVB]J(\d{6}|\d{8})(?!\d)', filename, re.IGNORECASE)
+        rj_match = re.search(r'[RVB]J(\d{6,8})(?!\d)', filename, re.IGNORECASE)
         rjcode = rj_match.group(0).upper() if rj_match else None
         
         # 首先尝试精确匹配RJ号
@@ -8966,7 +8966,7 @@ async def scan_processed_archives():
 
             # 提取RJ号
             rjcode = None
-            match = re.search(r'[RVB]J(\d{6}|\d{8})(?!\d)', filename, re.IGNORECASE)
+            match = re.search(r'[RVB]J(\d{6,8})(?!\d)', filename, re.IGNORECASE)
             if match:
                 rjcode = match.group(0).upper()
 
@@ -13558,7 +13558,7 @@ async def get_library_files():
                             continue
                         try:
                             st = os.stat(subitem_path)
-                            rj_match = re.search(r'[RVB]J(\d{6}|\d{8})(?!\d)', subitem, re.IGNORECASE)
+                            rj_match = re.search(r'[RVB]J(\d{6,8})(?!\d)', subitem, re.IGNORECASE)
                             rjcode = rj_match.group(0).upper() if rj_match else None
 
                             # 计算文件夹大小或获取文件大小
@@ -13598,7 +13598,7 @@ async def get_library_files():
                     # 根目录下的文件
                     try:
                         st = os.stat(item_path)
-                        rj_match = re.search(r'[RVB]J(\d{6}|\d{8})(?!\d)', item, re.IGNORECASE)
+                        rj_match = re.search(r'[RVB]J(\d{6,8})(?!\d)', item, re.IGNORECASE)
                         rjcode = rj_match.group(0).upper() if rj_match else None
 
                         if item in archive_times:
@@ -22909,7 +22909,7 @@ def _duplicate_version_root(relative_path: str, parent_path: Optional[str], entr
 # ── 查重详情：版本语言识别与版本内文件列表 ──
 
 # 与 library_index._helpers._RJ_PATTERN 同源，供 SQL 过滤噪声条目使用
-_DUPLICATE_NOISE_RJ_SQL_PATTERN = r"[rvb]j(\d{6}|\d{8})(?!\d)"
+_DUPLICATE_NOISE_RJ_SQL_PATTERN = r"[rvb]j(\d{6,8})(?!\d)"
 
 
 def _duplicate_is_noise_entry(

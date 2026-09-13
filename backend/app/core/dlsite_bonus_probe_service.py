@@ -136,7 +136,7 @@ class DLsiteBonusProbeService:
 
     def normalize_rjcode(self, value: Any) -> str:
         text = str(value or "").strip().upper()
-        match = re.search(r"RJ(\d{6}|\d{8})(?!\d)", text, re.IGNORECASE)
+        match = re.search(r"RJ(\d{6,8})(?!\d)", text, re.IGNORECASE)
         return f"RJ{match.group(1)}" if match else text
 
     def normalize_date(self, value: Any) -> str:
@@ -217,7 +217,7 @@ class DLsiteBonusProbeService:
 
     def _rj_number(self, rjcode: Any) -> Optional[Tuple[int, int]]:
         normalized = self.normalize_rjcode(rjcode)
-        match = re.fullmatch(r"RJ(\d{6}|\d{8})", normalized)
+        match = re.fullmatch(r"RJ(\d{6,8})", normalized)
         if not match:
             return None
         digits = match.group(1)

@@ -9,7 +9,7 @@ _ZERO_WIDTH_TRANSLATION = {
     ord("\u2060"): None,  # word joiner
 }
 
-_RJCODE_PATTERN = re.compile(r"([RVB]J)\s*[-_.]?\s*(\d{6}|\d{8})(?!\d)", re.IGNORECASE)
+_RJCODE_PATTERN = re.compile(r"([RVB]J)\s*[-_.]?\s*(\d{6,8})(?!\d)", re.IGNORECASE)
 
 
 def normalize_optional_text(value: Optional[str]) -> Optional[str]:

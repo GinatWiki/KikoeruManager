@@ -122,22 +122,22 @@ class CircleExternalSearchService:
 
     @staticmethod
     def _normalize_rjcode(value: Any) -> str:
-        match = re.search(r"[RVB]J(?:\d{6}|\d{8})(?!\d)", str(value or ""), re.IGNORECASE)
+        match = re.search(r"[RVB]J(?:\d{6,8})(?!\d)", str(value or ""), re.IGNORECASE)
         return match.group(0).upper() if match else ""
 
     @classmethod
     def _matches_nearby_rjcode(cls, target: str, *values: Any) -> bool:
         """外站 RJ 允许 +/-1，避免标题文本相似造成误命中。"""
         normalized_target = cls._normalize_rjcode(target)
-        target_match = re.fullmatch(r"([RVB]J)(\d{6}|\d{8})", normalized_target, re.IGNORECASE)
+        target_match = re.fullmatch(r"([RVB]J)(\d{6,8})", normalized_target, re.IGNORECASE)
         if not target_match:
             return False
         prefix, digits = target_match.groups()
         target_number = int(digits)
         for value in values:
-            for candidate in re.findall(r"[RVB]J(?:\d{6}|\d{8})(?!\d)", str(value or ""), re.IGNORECASE):
+            for candidate in re.findall(r"[RVB]J(?:\d{6,8})(?!\d)", str(value or ""), re.IGNORECASE):
                 normalized = cls._normalize_rjcode(candidate)
-                match = re.fullmatch(r"([RVB]J)(\d{6}|\d{8})", normalized, re.IGNORECASE)
+                match = re.fullmatch(r"([RVB]J)(\d{6,8})", normalized, re.IGNORECASE)
                 if not match or match.group(1).upper() != prefix.upper() or len(match.group(2)) != len(digits):
                     continue
                 if abs(int(match.group(2)) - target_number) <= 1:

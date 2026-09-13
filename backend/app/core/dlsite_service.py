@@ -344,7 +344,7 @@ class DLsiteApiService:
 
     def _normalize_workno(self, rjcode: str) -> str:
         value = str(rjcode or '').strip().upper()
-        match = re.search(r'[RVB]J(?:\d{8}|\d{6})(?!\d)', value, re.IGNORECASE)
+        match = re.search(r'[RVB]J(?:\d{6,8})(?!\d)', value, re.IGNORECASE)
         return match.group(0).upper() if match else value
 
     def _safe_product_int(self, value: Any, *, field: str, workno: str) -> int:
@@ -524,7 +524,7 @@ class DLsiteApiService:
 
     def _extract_product_codes_from_url(self, url: str) -> Dict[str, str]:
         parsed = urlparse(str(url or ''))
-        path_match = re.search(r'/product_id/([RVB]J(?:\d{8}|\d{6}))\.html', parsed.path, re.IGNORECASE)
+        path_match = re.search(r'/product_id/([RVB]J(?:\d{6,8}))\.html', parsed.path, re.IGNORECASE)
         query = parse_qs(parsed.query)
         return {
             'product_workno': path_match.group(1).upper() if path_match else '',
@@ -565,9 +565,9 @@ class DLsiteApiService:
         seen = set()
         result: List[str] = []
         patterns = [
-            r'/(?:work|announce)/=/product_id/([RVB]J(?:\d{8}|\d{6}))(?:\.html)?',
-            r'product_id["\']?\s*[:=]\s*["\']([RVB]J(?:\d{8}|\d{6}))["\']',
-            r'workno["\']?\s*[:=]\s*["\']([RVB]J(?:\d{8}|\d{6}))["\']',
+            r'/(?:work|announce)/=/product_id/([RVB]J(?:\d{6,8}))(?:\.html)?',
+            r'product_id["\']?\s*[:=]\s*["\']([RVB]J(?:\d{6,8}))["\']',
+            r'workno["\']?\s*[:=]\s*["\']([RVB]J(?:\d{6,8}))["\']',
         ]
         for pattern in patterns:
             for matched in re.findall(pattern, text, re.IGNORECASE):
@@ -582,7 +582,7 @@ class DLsiteApiService:
             return []
         seen = set()
         result: List[str] = []
-        for matched in re.findall(r'[RVB]J(?:\d{8}|\d{6})', text, re.IGNORECASE):
+        for matched in re.findall(r'[RVB]J(?:\d{6,8})', text, re.IGNORECASE):
             workno = self._normalize_workno(matched)
             if workno and workno not in seen:
                 seen.add(workno)
@@ -631,7 +631,7 @@ class DLsiteApiService:
                 continue
         # 当所有模板都没匹到时（DLsite 改版 / 极简 SSR），fallback：以 product_id 锚点切片。
         if not chunks:
-            anchors = list(re.finditer(r'/(?:work|announce)/=/product_id/([RVB]J(?:\d{8}|\d{6}))', text, re.IGNORECASE))
+            anchors = list(re.finditer(r'/(?:work|announce)/=/product_id/([RVB]J(?:\d{6,8}))', text, re.IGNORECASE))
             for i, m in enumerate(anchors):
                 start = max(0, m.start() - 400)
                 end = min(len(text), (anchors[i + 1].start() if i + 1 < len(anchors) else m.end() + 1200))
@@ -642,12 +642,12 @@ class DLsiteApiService:
         for chunk in chunks:
             workno = ""
             # 1) data-product_id 属性优先（HTML5 自定义属性）
-            m = re.search(r'data-product_id\s*=\s*["\']([RVB]J(?:\d{8}|\d{6}))["\']', chunk, re.IGNORECASE)
+            m = re.search(r'data-product_id\s*=\s*["\']([RVB]J(?:\d{6,8}))["\']', chunk, re.IGNORECASE)
             if m:
                 workno = self._normalize_workno(m.group(1))
             # 2) href 上 product_id/RJxxx
             if not workno:
-                m = re.search(r'/(?:work|announce)/=/product_id/([RVB]J(?:\d{8}|\d{6}))', chunk, re.IGNORECASE)
+                m = re.search(r'/(?:work|announce)/=/product_id/([RVB]J(?:\d{6,8}))', chunk, re.IGNORECASE)
                 if m:
                     workno = self._normalize_workno(m.group(1))
             if not workno or workno in seen:
@@ -788,7 +788,7 @@ class DLsiteApiService:
         # 提取 URL 编码或原始格式的 not_product_ids 值
         # 示例: not_product_ids%5B0%5D/RJ01234567 或 not_product_ids[0]/RJ01234567
         pattern = re.compile(
-            r'not_product_ids(?:%5B|\[)\d+(?:%5D|\])[/=]([RVB]J(?:\d{8}|\d{6}))',
+            r'not_product_ids(?:%5B|\[)\d+(?:%5D|\])[/=]([RVB]J(?:\d{6,8}))',
             re.IGNORECASE,
         )
         seen: set = set()
@@ -806,7 +806,7 @@ class DLsiteApiService:
             return {}
 
         pattern = re.compile(
-            r'product_id/([RVB]J(?:\d{8}|\d{6}))\.html[^"\'>\s]*translation=([RVB]J(?:\d{8}|\d{6}))',
+            r'product_id/([RVB]J(?:\d{6,8}))\.html[^"\'>\s]*translation=([RVB]J(?:\d{6,8}))',
             re.IGNORECASE,
         )
         for match in pattern.finditer(str(html or '')):
@@ -827,7 +827,7 @@ class DLsiteApiService:
         seen = set()
         result: List[str] = []
         pattern = re.compile(
-            r'product_id/([RVB]J(?:\d{8}|\d{6}))\.html[^"\'>\s]*translation=([RVB]J(?:\d{8}|\d{6}))',
+            r'product_id/([RVB]J(?:\d{6,8}))\.html[^"\'>\s]*translation=([RVB]J(?:\d{6,8}))',
             re.IGNORECASE,
         )
         for match in pattern.finditer(str(html or '')):
@@ -937,7 +937,7 @@ class DLsiteApiService:
 
     def _extract_recommend_reject_target(self, text: str) -> Dict[str, str]:
         match = re.search(
-            r'/type/viewsales2/reject/(RG\d+)/product_id/([RVB]J(?:\d{8}|\d{6}))\.html',
+            r'/type/viewsales2/reject/(RG\d+)/product_id/([RVB]J(?:\d{6,8}))\.html',
             str(text or ''),
             re.IGNORECASE,
         )
@@ -950,7 +950,7 @@ class DLsiteApiService:
 
     def _extract_image_workno(self, image_url: str) -> str:
         match = re.search(
-            r'/([RVB]J(?:\d{8}|\d{6}))_img_main\.(?:jpg|jpeg|png|webp)(?:[?#]|$)',
+            r'/([RVB]J(?:\d{6,8}))_img_main\.(?:jpg|jpeg|png|webp)(?:[?#]|$)',
             str(image_url or ''),
             re.IGNORECASE,
         )

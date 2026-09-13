@@ -3,8 +3,8 @@ import re
 from typing import Any, Dict, List, Optional
 
 
-RJ_CODE_PATTERN = re.compile(r"[RVB]J(\d{8}|\d{6})(?!\d)", re.IGNORECASE)
-NUMERIC_RJ_PATTERN = re.compile(r"^(\d{8}|\d{6})$")
+RJ_CODE_PATTERN = re.compile(r"[RVB]J(\d{6,8})(?!\d)", re.IGNORECASE)
+NUMERIC_RJ_PATTERN = re.compile(r"^(\d{6,8})$")
 IGNORED_SCAN_DIRS = {"__macosx", "_conflicts", "subtitles", ".git", ".svn"}
 
 

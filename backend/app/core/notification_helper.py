@@ -7,7 +7,7 @@ from typing import Any
 from .failure_reason_formatter import format_problem_failure_message
 
 
-_DLSITE_RJ_RE = re.compile(r'^RJ(\d{6}|\d{8})$', re.IGNORECASE)
+_DLSITE_RJ_RE = re.compile(r'^RJ(\d{6,8})$', re.IGNORECASE)
 
 
 def dlsite_cover_url(rjcode: Any, *, hd: bool = True) -> str:

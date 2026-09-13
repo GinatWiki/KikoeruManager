@@ -251,7 +251,10 @@ class MetadataService:
                     logger.info("元数据服务使用任务上下文中的 RJ 号回退: %s", rjcode)
                     break
         if not rjcode:
-            raise Exception(f"无法从路径中提取 RJ 号: {path}")
+            raise Exception(
+                f"无法从路径中提取 RJ 号: {path}"
+                "（支持 RJ/VJ/BJ + 6~8 位数字，如 RJ01295710 / RJ1295710）"
+            )
 
         task.update_progress(65, f"获取元数据 {rjcode}")
 
@@ -457,6 +460,19 @@ class MetadataService:
 
         return maker_fields
     
+    @staticmethod
+    def _normalize_rjcode(code: str) -> str:
+        """规范 RJ 号：7 位号补前导零成 8 位（老库存在丢零的历史数据，
+        DLsite 使用的是 8 位标准形式）；6 位真实号与 8 位号原样返回。"""
+        text = str(code or "").strip().upper()
+        match = re.match(r'^([RVB]J)(\d+)$', text)
+        if not match:
+            return text
+        prefix, num = match.group(1), match.group(2)
+        if len(num) == 7:
+            num = num.zfill(8)
+        return f"{prefix}{num}"
+
     def _extract_rjcode(self, path: str, search_subfolders: bool = True) -> Optional[str]:
         """从路径中提取 RJ 号。
 
@@ -472,19 +488,19 @@ class MetadataService:
             path: 要提取的路径
             search_subfolders: 是否递归搜索子目录
         """
-        pattern = r'[RVB]J(\d{8}|\d{6})(?!\d)'
+        pattern = r'[RVB]J(\d{6,8})(?!\d)'
         match = re.search(pattern, path, re.IGNORECASE)
         if match:
-            return match.group(0).upper()
+            return self._normalize_rjcode(match.group(0))
 
         path_parts = re.split(r'[\\/]', path)
         if path_parts:
             last_part = path_parts[-1]
             clean_name = re.sub(r'^\d+\.', '', last_part)
-            num_match = re.match(r'^(\d{8}|\d{6})$', clean_name)
+            num_match = re.match(r'^(\d{6,8})$', clean_name)
             if num_match:
                 num = num_match.group(1)
-                return f"RJ{num}"
+                return self._normalize_rjcode(f"RJ{num}")
 
         if search_subfolders and os.path.isdir(path):
             logger.debug("当前路径未直接提取到 RJ 号，尝试搜索子目录: %s", path)
@@ -573,7 +589,7 @@ class MetadataService:
         metadata.rjcode = rjcode
 
         path_name = os.path.basename(os.path.normpath(path or ''))
-        display_name = re.sub(r'^[RVB]J(?:\d{8}|\d{6})(?!\d)[\s._-]*', '', path_name, flags=re.IGNORECASE)
+        display_name = re.sub(r'^[RVB]J(?:\d{6,8})(?!\d)[\s._-]*', '', path_name, flags=re.IGNORECASE)
         display_name = re.sub(r'^\d+\.', '', display_name).strip()
 
         metadata.work_name = display_name or rjcode
@@ -640,7 +656,7 @@ class MetadataService:
             if not value:
                 continue
             # 统一抽出 RJxxxx 形式，兼容上游传过来夹杂前缀 / 文件名片段的情况。
-            match = re.search(r"[RVB]J(\d{6}|\d{8})(?!\d)", value)
+            match = re.search(r"[RVB]J(\d{6,8})(?!\d)", value)
             value = match.group(0) if match else value
             if value in seen:
                 continue
