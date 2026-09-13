@@ -975,7 +975,7 @@ function getPagedItems(items = [], page = 1, pageSize = PENDING_LIST_PAGE_SIZE) 
 function getDisplayRJCode(value = '') {
   const normalized = String(value || '').trim().toUpperCase()
   if (!normalized) return ''
-  const match = normalized.match(/[RVB]J(?:\d{8}|\d{6})(?!\d)/)
+  const match = normalized.match(/[RVB]J(?:\d{6,8})(?!\d)/)
   return match ? match[0] : normalized
 }
 

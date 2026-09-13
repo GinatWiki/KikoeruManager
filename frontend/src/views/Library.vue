@@ -9842,7 +9842,7 @@ function extractRJCode (value) {
 
   if (!value) return null
 
-  const match = String(value).match(/[RVB]J(\d{6}|\d{8})(?!\d)/i)
+  const match = String(value).match(/[RVB]J(\d{6,8})(?!\d)/i)
 
   return match ? match[0].toUpperCase() : null
 

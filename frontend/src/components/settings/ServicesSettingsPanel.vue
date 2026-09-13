@@ -776,7 +776,7 @@ function formatKikoeruOwnedLabel(hitRows = []) {
 
 function buildDlsiteCoverUrl(rjcode = '', variant = 'main') {
   const normalized = normalizeRJCode(rjcode)
-  const match = normalized.match(/^RJ(\d{6}|\d{8})$/)
+  const match = normalized.match(/^RJ(\d{6,8})$/)
   if (!match) return ''
   const folderUpper = (Math.floor(Number(match[1]) / 1000) + 1) * 1000
   const folder = match[1].length === 8

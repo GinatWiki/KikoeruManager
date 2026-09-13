@@ -209,7 +209,7 @@ function uniqueImageUrls(values) {
 
 function buildDlsiteCoverUrl(rjcode, unreleased = false, variant = 'sam') {
   const normalized = String(rjcode || '').trim().toUpperCase()
-  const match = normalized.match(/^RJ(\d{6}|\d{8})$/)
+  const match = normalized.match(/^RJ(\d{6,8})$/)
   if (!match) return ''
   const number = Number(match[1])
   const folderUpper = (Math.floor(number / 1000) + 1) * 1000

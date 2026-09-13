@@ -52,7 +52,7 @@ function formatReleaseDate(value) {
 
 function buildDlsiteCoverUrl(rjcode) {
   const normalized = String(rjcode || '').trim().toUpperCase()
-  const m = normalized.match(/^RJ(\d{6}|\d{8})$/)
+  const m = normalized.match(/^RJ(\d{6,8})$/)
   if (!m) return ''
   const folderUpper = (Math.floor(Number(m[1]) / 1000) + 1) * 1000
   const folder = m[1].length === 8

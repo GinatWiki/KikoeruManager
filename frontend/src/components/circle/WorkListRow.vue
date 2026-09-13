@@ -120,7 +120,7 @@ const cvLabel = computed(() => {
  */
 function dlsiteUrl(rjcode, suffix = '_img_sam.jpg') {
   const normalized = String(rjcode || '').trim().toUpperCase()
-  const m = normalized.match(/^RJ(\d{6}|\d{8})$/)
+  const m = normalized.match(/^RJ(\d{6,8})$/)
   if (!m) return null
   const digits = m[1]
   const num = Number(digits)

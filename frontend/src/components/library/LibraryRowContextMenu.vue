@@ -176,6 +176,7 @@
           type="button"
           class="menu-item"
           :disabled="disableAiTitle"
+          :title="disableAiTitle ? 'AI 标题汉化仅支持含 RJ 号的作品目录' : ''"
           @click="emit('action', 'ai_title')"
         >
           <Languages :size="14" :stroke-width="2.2" class="menu-item-icon text-cyan-600" />

@@ -692,7 +692,7 @@ function pickMetricValue(item, label) {
 }
 
 function containsRJ(value) {
-  return /[RVB]J(?:\d{8}|\d{6})(?!\d)/i.test(String(value || ''))
+  return /[RVB]J(?:\d{6,8})(?!\d)/i.test(String(value || ''))
 }
 
 function formatRJCode(value) {

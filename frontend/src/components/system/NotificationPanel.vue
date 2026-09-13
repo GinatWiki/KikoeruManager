@@ -170,7 +170,7 @@ function splitRoutePath(path, query) {
 
 function normalizeNotificationRjcode(value) {
   const text = String(value || '').trim().toUpperCase()
-  const match = text.match(/[RVB]J(\d{6}|\d{8})(?!\d)/i)
+  const match = text.match(/[RVB]J(\d{6,8})(?!\d)/i)
   return match ? match[0].toUpperCase() : text
 }
 

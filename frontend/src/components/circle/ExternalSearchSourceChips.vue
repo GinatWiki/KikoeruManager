@@ -73,7 +73,7 @@ function asmrOnePayload() {
 
 function fallbackSearchResult(source) {
   const rjcode = variantRjcode()
-  if (!/^RJ(?:\d{6}|\d{8})$/.test(rjcode)) return null
+  if (!/^RJ(?:\d{6,8})$/.test(rjcode)) return null
   let url = ''
   if (source === 'anime_share') {
     url = `https://www.anime-sharing.com/search/3528560/?q=${encodeURIComponent(rjcode)}&o=relevance`

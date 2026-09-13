@@ -76,7 +76,7 @@ function isStrictTrue(value) {
 
 function normalizeRjcode(value) {
   const text = String(value || '').trim().toUpperCase()
-  const match = text.match(/[RVB]J(\d{6}|\d{8})(?!\d)/i)
+  const match = text.match(/[RVB]J(\d{6,8})(?!\d)/i)
   return match ? match[0] : text
 }
 
@@ -676,7 +676,7 @@ function onBonusCoverError(event, item, key) {
 
 function buildDlsiteImageUrl(rjcode, variant = 'main') {
   const normalized = normalizeRjcode(rjcode)
-  const match = normalized.match(/^RJ(\d{6}|\d{8})$/)
+  const match = normalized.match(/^RJ(\d{6,8})$/)
   if (!match) return ''
   const number = Number(match[1])
   const folderUpper = (Math.floor(number / 1000) + 1) * 1000
