@@ -83,6 +83,9 @@
           </SettingsFieldCard>
           <SettingsFieldCard label="7-Zip 路径">
             <input v-model="config.extract.seven_zip_path" class="field-input" type="text" placeholder="例如 C:\Program Files\7-Zip\7z.exe">
+            <template #hint>
+              填 <b>7z.exe</b>（或 7za.exe）的完整路径，路径不要带引号；留空或填 7z 时自动在 PATH / 默认安装目录查找。请勿填 7zG.exe（图形解压器）或 7zFM.exe（文件管理器）——它们是 GUI 版，不能执行命令行解压。
+            </template>
           </SettingsFieldCard>
           <SettingsFieldCard label="7-Zip ZS 路径">
             <input v-model="config.extract.seven_zip_zstd_path" class="field-input" type="text" placeholder="可选：例如 C:\Program Files\7-Zip-Zstandard\7z.exe">

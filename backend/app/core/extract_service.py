@@ -1414,21 +1414,41 @@ class ExtractService:
         """查找 7z 可执行文件"""
         import shutil
 
-        # 首先尝试配置的路径
-        configured_path = self.config.extract.seven_zip_path
+        # 首先尝试配置的路径。清洗首尾空白与引号：用户从资源管理器「复制路径」
+        # 常带引号（"C:\...\7z.exe"），os.path.exists 会直接判不存在，
+        # 表现为“填了正确路径仍报找不到 7z”。
+        configured_path = str(getattr(self.config.extract, "seven_zip_path", "") or "").strip().strip('"\'')
         if configured_path and configured_path != "7z":
-            if os.path.exists(configured_path):
+            basename = os.path.basename(configured_path).lower()
+            if basename in ("7zg.exe", "7zfm.exe"):
+                # GUI 版（7zG 图形解压器 / 7zFM 文件管理器）不接受命令行解压，
+                # 填了也不能用——明确提示，继续走自动查找。
+                logger.warning(
+                    "配置的 7-Zip 路径是 GUI 版（%s）不支持命令行解压，已忽略；请在设置中改填 7z.exe 完整路径",
+                    os.path.basename(configured_path),
+                )
+            elif os.path.exists(configured_path):
                 return configured_path
+            else:
+                found = shutil.which(configured_path)
+                if found:
+                    return found
+                logger.warning(
+                    "配置的 7-Zip 路径不存在（原始值=%r，请检查是否有拼写错误/是否已安装），继续自动查找",
+                    str(getattr(self.config.extract, "seven_zip_path", "") or ""),
+                )
 
         # 尝试在 PATH 中查找，Docker 优先使用官方 7zz 以支持 RAR5
-        seven_zip_path = shutil.which("7zz") or shutil.which("7z")
+        seven_zip_path = shutil.which("7zz") or shutil.which("7z") or shutil.which("7za")
         if seven_zip_path:
             return seven_zip_path
 
-        # Windows 默认安装路径
+        # Windows 默认安装路径（7za.exe 是官方精简命令行版，同样可用）
         default_paths = [
             r"C:\Program Files\7-Zip\7z.exe",
             r"C:\Program Files (x86)\7-Zip\7z.exe",
+            r"C:\Program Files\7-Zip\7za.exe",
+            r"C:\Program Files (x86)\7-Zip\7za.exe",
         ]
 
         for path in default_paths:
@@ -1436,7 +1456,13 @@ class ExtractService:
                 return path
 
         # 如果都找不到，返回配置的值（后续会报错）
-        logger.error("找不到 7z 可执行文件。请安装 7-Zip 并确保它在 PATH 中，或在配置中指定正确路径。")
+        logger.error(
+            "找不到 7z 可执行文件。配置路径=%r（存在=%s）；PATH 中 7zz/7z/7za 均未找到；"
+            "默认路径均不存在。请在设置中填写 7z.exe 的完整路径"
+            "（不要用 7zG.exe/7zFM.exe 这类 GUI 版，路径不要带引号）。",
+            str(getattr(self.config.extract, "seven_zip_path", "") or ""),
+            bool(configured_path) and os.path.exists(configured_path),
+        )
         return "7z"
 
     def _find_7z_zstd_executable(self) -> str:
@@ -1598,13 +1624,29 @@ class ExtractService:
                 return bool(self.__class__._seven_zip_available_cache)
 
             try:
-                result = await asyncio.to_thread(
-                    subprocess.run,
-                    [executable, "--help"],
-                    capture_output=True,
-                    timeout=5
-                )
-                available = result.returncode == 0
+                # 多命令探测：个别 7-Zip 构建（第三方 ZS 版/精简版）对 --help
+                # 返回非 0 但完全可用，再用 `i`（信息命令）复核一次，避免误判。
+                available = False
+                last_detail = ""
+                for probe_args in ([executable, "--help"], [executable, "i"]):
+                    try:
+                        result = await asyncio.to_thread(
+                            subprocess.run,
+                            probe_args,
+                            capture_output=True,
+                            timeout=5
+                        )
+                        if result.returncode == 0:
+                            available = True
+                            break
+                        last_detail = f"{probe_args[-1]} 返回码 {result.returncode}"
+                    except Exception as probe_exc:
+                        last_detail = f"{probe_args[-1]} 异常 {probe_exc}"
+                if not available:
+                    logger.error(
+                        "7z 可用性探测失败: executable=%r %s",
+                        executable, last_detail,
+                    )
             except Exception as e:
                 logger.error(f"检查 7z 可用性失败: {e}")
                 available = False

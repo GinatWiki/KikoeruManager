@@ -406,7 +406,13 @@ class AITitleTranslationService:
         # 慢速推理模型 / 高延迟代理不再被固定的 15 秒上限误杀；wait_for 只做总时长兜底。
         probe_timeout = max(5, min(_safe_int(config.get("timeout_seconds"), 30), 300))
         kwargs = self._completion_kwargs(config, messages, timeout_seconds=probe_timeout)
-        from .ai_subtitle_match_service import _extract_litellm_stream_delta, _is_stream_unsupported_error
+        from .ai_subtitle_match_service import (
+            _extract_litellm_stream_delta,
+            _is_stream_unsupported_error,
+            _litellm_stream_chunk_seen,
+        )
+
+        saw_chunk_ref = {"seen": False}
 
 
         async def _stream_probe() -> Tuple[str, Dict[str, int]]:
@@ -416,6 +422,8 @@ class AITitleTranslationService:
             usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             stream = await litellm.acompletion(**stream_kwargs)
             async for chunk in stream:
+                if _litellm_stream_chunk_seen(chunk):
+                    saw_chunk_ref["seen"] = True
                 delta, chunk_usage = _extract_litellm_stream_delta(chunk)
                 if delta:
                     parts.append(delta)
@@ -440,10 +448,16 @@ class AITitleTranslationService:
             if not _safe_text(content):
                 total_tokens = _safe_int((usage or {}).get("total_tokens"))
                 completion_tokens = _safe_int((usage or {}).get("completion_tokens"))
-                if total_tokens <= 0 and completion_tokens <= 0:
+                if saw_chunk_ref["seen"]:
+                    # 收到过带 choices 的流式响应即证明链路连通：推理模型（如智谱
+                    # GLM 思考版）在小 max_tokens 下思考占满额度、正文为空，且
+                    # 部分服务（智谱流式）不返回 usage——不能判失败。
+                    content = "（模型服务有响应但未输出正文，可能是推理模型的思考占满了输出额度：连接正常）"
+                elif total_tokens <= 0 and completion_tokens <= 0:
                     raise ValueError("empty_response: 模型未返回内容")
-                # 推理模型常见：思考消耗了全部输出额度导致正文为空，但服务确实有响应，判定连接正常。
-                content = "（模型服务有响应但未输出正文，可能是推理模型的思考占满了输出额度：连接正常）"
+                else:
+                    # 推理模型常见：思考消耗了全部输出额度导致正文为空，但服务确实有响应，判定连接正常。
+                    content = "（模型服务有响应但未输出正文，可能是推理模型的思考占满了输出额度：连接正常）"
             duration_ms = int((time.perf_counter() - started) * 1000)
             return {
                 "success": True,

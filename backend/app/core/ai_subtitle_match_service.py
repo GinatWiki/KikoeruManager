@@ -98,6 +98,17 @@ def _extract_litellm_content(response: Any) -> Tuple[str, Dict[str, int]]:
     }
 
 
+def _litellm_stream_chunk_seen(chunk: Any) -> bool:
+    """chunk 是否携带有效响应（有 choices 即视为服务端已回应）。
+
+    用于连接探测：推理模型（如智谱 GLM 思考版）在小 max_tokens 下会
+    把额度全部用于 reasoning_content，正文 delta 为空且流式响应不带
+    usage——此时只要收到过带 choices 的 chunk 就证明链路连通。
+    """
+    choices = chunk.get("choices") if isinstance(chunk, dict) else getattr(chunk, "choices", None)
+    return bool(choices)
+
+
 def _extract_litellm_stream_delta(chunk: Any) -> Tuple[str, Dict[str, int]]:
     usage_obj = chunk.get("usage") if isinstance(chunk, dict) else getattr(chunk, "usage", None)
     if usage_obj is None:
@@ -219,6 +230,13 @@ def _normalize_error(exc: Exception) -> Dict[str, str]:
         code, title, suggestion = "json_output_failed", "JSON 输出不可用", "换用支持 JSON 输出的模型，或调整提示词"
     elif "request was blocked" in lowered or "blocked" in lowered:
         code, title, suggestion = "provider_error", "模型服务拦截请求", "当前 Key/Base URL 已连到上游，但上游拒绝了这次聊天请求；可尝试刷新模型列表后选择原始模型 ID，或检查中转站模型权限/风控"
+    elif "empty_response" in lowered:
+        code, title, suggestion = (
+            "empty_response",
+            "模型未返回内容",
+            "服务已连通但未输出正文：常见于推理模型（如 GLM 思考版）用很小的 max_tokens "
+            "被思考占满额度，请调大「最大输出 tokens」，或换用非推理模型重试",
+        )
     elif raw:
         code, title, suggestion = "provider_error", "模型服务返回错误", "查看 raw_summary 并按上游服务错误处理"
 
@@ -353,6 +371,7 @@ class AISubtitleMatchService:
         kwargs: Dict[str, Any],
         *,
         request_label: str,
+        stats: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, Dict[str, int]]:
         stream_kwargs = dict(kwargs)
         stream_kwargs["stream"] = True
@@ -360,9 +379,12 @@ class AISubtitleMatchService:
         first_chunk_ms: Optional[int] = None
         content_parts: List[str] = []
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        saw_chunk = False
 
         stream = await litellm.acompletion(**stream_kwargs)
         async for chunk in stream:
+            if _litellm_stream_chunk_seen(chunk):
+                saw_chunk = True
             delta, chunk_usage = _extract_litellm_stream_delta(chunk)
             if delta:
                 if first_chunk_ms is None:
@@ -371,6 +393,8 @@ class AISubtitleMatchService:
                 content_parts.append(delta)
             if any(chunk_usage.values()):
                 usage = chunk_usage
+        if stats is not None:
+            stats["saw_chunk"] = saw_chunk
         duration_ms = int((time.perf_counter() - started) * 1000)
         logger.info(
             "[AI字幕] %s 流式完成: duration_ms=%s first_chunk_ms=%s output_chars=%s tokens=%s",
@@ -508,6 +532,7 @@ class AISubtitleMatchService:
         )
         # 此前探测漏掉了 _temporary_proxy，用户配置代理时测试连接不走代理，这里补上。
         stream_used = True
+        probe_stats: Dict[str, Any] = {}
         try:
             async with _temporary_proxy(config.get("proxy_url", "")):
                 try:
@@ -516,6 +541,7 @@ class AISubtitleMatchService:
                             litellm,
                             kwargs,
                             request_label=request_label,
+                            stats=probe_stats,
                         ),
                         timeout=hard_timeout,
                     )
@@ -545,7 +571,16 @@ class AISubtitleMatchService:
         if not response_text:
             total_tokens = _safe_int((usage or {}).get("total_tokens"))
             completion_tokens = _safe_int((usage or {}).get("completion_tokens"))
-            if total_tokens > 0 or completion_tokens > 0:
+            if probe_stats.get("saw_chunk"):
+                # 收到过带 choices 的流式响应就证明链路连通：推理模型（如智谱 GLM
+                # 思考版）在小 max_tokens 下思考占满额度、正文为空，且部分服务
+                # （智谱流式）不返回 usage——此时不能判失败。
+                logger.info(
+                    "[AI字幕] %s hi 探测正文为空但收到过响应块，判定连接正常（推理模型空正文）",
+                    request_label,
+                )
+                response_text = "（模型服务有响应但未输出正文，可能是推理模型的思考占满了输出额度：连接正常）"
+            elif total_tokens > 0 or completion_tokens > 0:
                 # 推理模型常见：思考消耗了全部输出额度导致正文为空，但模型服务确实有响应，
                 # 连接测试的目标是验证连通性，按成功处理。
                 logger.info(
