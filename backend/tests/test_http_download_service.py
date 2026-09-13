@@ -2414,6 +2414,31 @@ def test_filter_preview_selection_reports_unrecoverable_transferit_selection():
     assert "文件标识已变化" in filtered["items"][0]["reason"]
 
 
+def test_filter_preview_selection_preserves_source_failure_rows_without_keys():
+    service = HttpDownloadService()
+    preview = {
+        "success": False,
+        "items": [{
+            "ok": False,
+            "source": "pikpak",
+            "masked_url": "https://mypikpak.com/s/****",
+            "reason": "PikPak 多账号空间仍不足: 未能分配 11 个文件，共 20.5 GB。",
+        }],
+        "ok_count": 0,
+        "failed_count": 1,
+    }
+
+    filtered = service.filter_preview_selection(
+        preview,
+        selected_keys=["pikpak:selected-file"],
+        selected_items=[{"ok": True, "source": "pikpak", "file_id": "abc", "filename": "RJ01675713.7z.001"}],
+    )
+
+    assert filtered["ok_count"] == 0
+    assert filtered["failed_count"] == 1
+    assert filtered["items"][0]["reason"] == preview["items"][0]["reason"]
+
+
 @pytest.mark.asyncio
 async def test_transferit_reparse_keeps_candidates_for_unrecoverable_selection(monkeypatch, tmp_path):
     bind_config(monkeypatch, tmp_path)
@@ -3659,6 +3684,46 @@ async def test_start_download_task_marks_failed_when_all_gids_fail(monkeypatch, 
     assert task.task_metadata["download_runtime"]["status"] == "failed"
     assert task.task_metadata["performance_metrics"]["success_count"] == 0
     assert task.task_metadata["performance_metrics"]["failed_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_start_download_task_reports_share_failure_detail(monkeypatch, tmp_path):
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+
+    async def fake_preview_urls(*_args, **_kwargs):
+        return {
+            "items": [{
+                "ok": False,
+                "source": "pikpak",
+                "url": "https://mypikpak.com/s/share",
+                "masked_url": "https://mypikpak.com/s/***",
+                "reason": "PikPak 多账号空间仍不足: 未能分配 11 个文件，共 20.5 GB。",
+                "selection_key": "pikpak:deadbeef",
+            }],
+            "resolved_urls": [],
+            "source_items": [],
+            "failed_items": [],
+            "source_modes": ["pikpak"],
+        }
+
+    monkeypatch.setattr(service, "preview_urls", fake_preview_urls)
+
+    task = Task(
+        task_type=TaskType.HTTP_DOWNLOAD,
+        source_path="mypikpak.com",
+        metadata={
+            "urls": ["https://mypikpak.com/s/share"],
+            "selected_keys": ["pikpak:selected-file"],
+            "selected_items": [{"ok": True, "source": "pikpak", "file_id": "abc", "filename": "RJ01675713.7z.001"}],
+        },
+    )
+
+    with pytest.raises(HttpDownloadError, match="没有通过校验的下载项") as excinfo:
+        await service.start_download_task(task)
+
+    assert "多账号空间仍不足" in str(excinfo.value)
+    assert task.task_metadata["failed_files"]
 
 
 def test_merge_download_attempt_rows_later_success_overrides_failed(tmp_path):

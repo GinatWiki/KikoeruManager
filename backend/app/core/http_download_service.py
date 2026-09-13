@@ -963,6 +963,17 @@ class HttpDownloadService:
             if overrides:
                 merged.update(overrides)
             items.append(merged)
+        if not items:
+            # 分享级失败行（如「PikPak 多账号空间仍不足」「分享中没有可下载文件」）没有
+            # 可匹配的选择键，会被上面的按键过滤丢弃；但它们承载了失败的真实原因，
+            # 必须透传给上层，否则任务层只能报出没有任何明细的「没有通过校验的下载项」。
+            items.extend([
+                dict(item)
+                for item in list(out.get("items") or [])
+                if isinstance(item, dict)
+                and not item.get("ok")
+                and str(item.get("reason") or item.get("failure_reason") or "").strip()
+            ])
         if not items and selected_transferit_items:
             transferit_candidates = [
                 item for item in list(out.get("items") or [])
