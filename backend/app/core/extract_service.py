@@ -1414,12 +1414,15 @@ class ExtractService:
         """查找 7z 可执行文件"""
         import shutil
 
-        # 首先尝试配置的路径。清洗首尾空白与引号：用户从资源管理器「复制路径」
-        # 常带引号（"C:\...\7z.exe"），os.path.exists 会直接判不存在，
-        # 表现为“填了正确路径仍报找不到 7z”。
-        configured_path = str(getattr(self.config.extract, "seven_zip_path", "") or "").strip().strip('"\'')
+        # 首先尝试配置的路径。兼容三类填法：
+        #   ① 完整路径（含 \ 或 /）：直接判断文件是否存在；
+        #   ② 裸文件名（如 7z.exe）：按 PATH 查找；
+        #   ③ 目录路径（如 C:\Program Files\7-Zip）：自动拼 7z.exe/7za.exe。
+        # 另清洗首尾空白与引号（从资源管理器复制路径可能带引号）。
+        configured_raw = str(getattr(self.config.extract, "seven_zip_path", "") or "").strip()
+        configured_path = configured_raw.strip('"\'')
         if configured_path and configured_path != "7z":
-            basename = os.path.basename(configured_path).lower()
+            basename = os.path.basename(configured_path.rstrip("\\/")).lower()
             if basename in ("7zg.exe", "7zfm.exe"):
                 # GUI 版（7zG 图形解压器 / 7zFM 文件管理器）不接受命令行解压，
                 # 填了也不能用——明确提示，继续走自动查找。
@@ -1427,15 +1430,26 @@ class ExtractService:
                     "配置的 7-Zip 路径是 GUI 版（%s）不支持命令行解压，已忽略；请在设置中改填 7z.exe 完整路径",
                     os.path.basename(configured_path),
                 )
-            elif os.path.exists(configured_path):
-                return configured_path
             else:
+                # 裸文件名（无路径分隔符）：PATH 优先
+                if not any(sep in configured_path for sep in ("/", "\\")):
+                    found = shutil.which(configured_path)
+                    if found:
+                        return found
+                if os.path.isfile(configured_path):
+                    return configured_path
+                # 目录路径：自动拼可执行文件名
+                if os.path.isdir(configured_path):
+                    for exe_name in ("7z.exe", "7za.exe", "7zz.exe", "7z"):
+                        candidate = os.path.join(configured_path, exe_name)
+                        if os.path.isfile(candidate):
+                            return candidate
                 found = shutil.which(configured_path)
                 if found:
                     return found
                 logger.warning(
-                    "配置的 7-Zip 路径不存在（原始值=%r，请检查是否有拼写错误/是否已安装），继续自动查找",
-                    str(getattr(self.config.extract, "seven_zip_path", "") or ""),
+                    "配置的 7-Zip 路径未找到（值=%r：既不是存在的文件，也不是目录，PATH 中也未命中），继续自动查找",
+                    configured_raw,
                 )
 
         # 尝试在 PATH 中查找，Docker 优先使用官方 7zz 以支持 RAR5
@@ -1454,6 +1468,25 @@ class ExtractService:
         for path in default_paths:
             if os.path.exists(path):
                 return path
+
+        # 目录名不完全标准的安装（如 7-Zip ZS / 便携版装在 Program Files 下）
+        base_dirs = [Path(r"C:\Program Files"), Path(r"C:\Program Files (x86)")]
+        for base in base_dirs:
+            if not base.is_dir():
+                continue
+            for pattern in ("7-Zip*", "*7-Zip*", "7zip*", "*7zip*"):
+                try:
+                    directories = sorted(base.glob(pattern))
+                except OSError:
+                    continue
+                for directory in directories:
+                    if not directory.is_dir():
+                        continue
+                    for exe_name in ("7z.exe", "7za.exe", "7zz.exe"):
+                        candidate = directory / exe_name
+                        if candidate.exists():
+                            logger.info("自动发现 7-Zip: %s", candidate)
+                            return str(candidate)
 
         # 如果都找不到，返回配置的值（后续会报错）
         logger.error(
