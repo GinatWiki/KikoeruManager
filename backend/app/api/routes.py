@@ -11115,10 +11115,13 @@ async def browse_library_listing(
     cursor: str = "",
     mode: str = "index",
 ):
-    """重构阶段 1 的统一读入口：列一层目录，统一序列化（见 docs/library-browser-refactor-plan.md）。
+    """重构统一读入口：列一层目录，统一序列化（见 docs/library-browser-refactor-plan.md）。
 
     - 复用 ``service.list_children_page``（与 browser/files 本地索引分支同一实现）。
-    - ``mode=index`` 读快照；``mode=verify`` 本阶段等价于 index 并原样返回，仅回显 ``mode``/``source``。
+    - ``mode=index`` 读快照，零磁盘 IO；``mode=verify`` 快照读后对当前层做一层
+      os.stat 浅扫（不递归）：与磁盘不一致的条目标 ``stale``，磁盘新条目以
+      ``disk_only`` 补进响应并入队子树 reconcile；stat 失败回落快照并标
+      ``verify_failed``。仅本地库存生效，远程库存 verify 等价 index。
     - 开关 ``KIKOERU_LIBRARY_LISTING_NEW=0`` 时回退（501），便于线上随时回滚。
     """
     from app.core.library_index.listing_service import (

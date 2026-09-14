@@ -9212,7 +9212,68 @@ async function refreshCurrentPageIndexStatus () {
   try {
     markCurrentPageIndexRefreshing()
     await nextTick()
-    await refreshLibrary({ silent: true, forceRefresh: true, throwOnError: true })
+    // 重构阶段 2：「刷新本页索引」优先走 listing verify——后端对当前层做一层
+    // 浅扫，立即返回磁盘真实现状（stale / disk_only / verify_failed），不再
+    // 依赖 browseFiles forceRefresh 的全链路重取。verify 失败时回落旧链路。
+    let verifyApplied = false
+    try {
+      const verifyData = await libraryApi.browseListing({
+        libraryId: selectedLibraryId.value,
+        relativePath: currentPath.value || '',
+        mode: 'verify',
+      })
+      if (verifyData && !verifyData.verify_failed && Array.isArray(verifyData.items)) {
+        // listing 的 relative_path 是索引坐标（相对库存根，如 "RJ1/a.wav"）；
+        // 当前页行（browseFiles）的 relative_path 是相对当前层的短路径（如 "a.wav"）。
+        // 对齐时把索引坐标剥掉当前层前缀。currentPath 可能是绝对路径或
+        // browse_root 相对路径，两种情况都兼容。
+        const layerPrefix = String(currentPath.value || '').replace(/\\/g, '/').replace(/\/+$/, '')
+        const rootPrefix = String(browseRootPath.value || '').replace(/\\/g, '/').replace(/\/+$/, '')
+        const toLayerRelative = (relPath) => {
+          let rel = String(relPath || '').replace(/\\/g, '/')
+          if (layerPrefix && rel.startsWith(layerPrefix + '/')) {
+            return rel.slice(layerPrefix.length + 1)
+          }
+          if (rootPrefix && rel.startsWith(rootPrefix + '/')) {
+            rel = rel.slice(rootPrefix.length + 1)
+            if (layerPrefix && rel.startsWith(layerPrefix + '/')) {
+              return rel.slice(layerPrefix.length + 1)
+            }
+          }
+          return rel
+        }
+        const verifiedByPath = new Map(
+          verifyData.items.map(item => [toLayerRelative(item.relative_path), item])
+        )
+        const diskOnlyCount = verifyData.items.filter(item => item.stale && item.source === 'verify').length
+        files.value = files.value.map(row => {
+          if (!row?.path || row?.circle_virtual) return row
+          const verified = verifiedByPath.get(String(row?.relative_path || ''))
+          if (!verified) return row
+          return {
+            ...row,
+            index_refresh_pending: false,
+            size_status: verified.stale ? 'stale' : 'ready'
+          }
+        })
+        verifyApplied = true
+        const staleCount = files.value.filter(row => row?.size_status === 'stale').length
+        if (diskOnlyCount > 0) {
+          ElMessage.info(`发现 ${diskOnlyCount} 个索引未收录的磁盘新条目，已提交后台重建`)
+        } else if (staleCount > 0) {
+          ElMessage.info(`当前页 ${staleCount} 项与磁盘不一致（已标记），子树正在后台重建`)
+        } else {
+          ElMessage.success('当前页索引与磁盘一致')
+          currentPageIndexRefreshNotice.value = null
+        }
+      }
+    } catch (_verifyError) {
+      // listing verify 不可用（老版本后端/网络失败）→ 静默回落旧链路
+      verifyApplied = false
+    }
+    if (!verifyApplied) {
+      await refreshLibrary({ silent: true, forceRefresh: true, throwOnError: true })
+    }
     await refreshStats(false, { silent: true, refreshLibraryId: selectedLibraryId.value })
     const pendingCount = files.value.filter(row => row?.index_refresh_pending).length
     if (pendingCount > 0) {

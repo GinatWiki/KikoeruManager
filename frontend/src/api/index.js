@@ -1044,6 +1044,30 @@ export const libraryApi = {
     return response.data
   },
 
+  // 库存浏览统一读入口（重构阶段 2）：mode=verify 时后端对当前层做一层浅扫，
+  // 与磁盘不一致的条目标 stale、磁盘新条目补进响应；verify 失败回落快照并标
+  // verify_failed。响应为统一形状（items/source/generation/fresh_at/cursor/has_more）。
+  browseListing: async ({
+    libraryId = null,
+    relativePath = '',
+    cursor = '',
+    mode = 'index',
+    pageSize = 500,
+    signal = undefined,
+  } = {}) => {
+    const response = await apiClient.get('/library/browser/listing', {
+      params: {
+        library_id: libraryId,
+        relative_path: relativePath || undefined,
+        cursor: cursor || undefined,
+        mode,
+        page_size: pageSize || undefined,
+      },
+      signal,
+    })
+    return response.data
+  },
+
   listCircleGroups: async ({
     page = 1,
     pageSize = 50,

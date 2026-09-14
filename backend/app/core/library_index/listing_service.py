@@ -225,9 +225,10 @@ def build_library_listing(
     verify_failed = False
     stale_paths: set[str] = set()
     disk_only_raws: list[dict[str, Any]] = []
+    valid_entries: list[Any] = list(entries)
 
     if want_verify and library.type == "local":
-        verify_failed, stale_paths, disk_only_raws = _verify_current_layer(
+        verify_failed, valid_entries, stale_paths, disk_only_raws = _verify_current_layer(
             library, service, parent_path, entries
         )
         if disk_only_raws:
@@ -243,7 +244,7 @@ def build_library_listing(
         return raw
 
     response = build_listing_response(
-        [_raw_with_stale(entry) for entry in entries] + disk_only_raws,
+        [_raw_with_stale(entry) for entry in valid_entries] + disk_only_raws,
         source=source,
         base_relative_path=parent_path,
         generation=generation,
@@ -262,19 +263,20 @@ def _verify_current_layer(
     service: Any,
     parent_path: str,
     entries: List[Any],
-) -> tuple[bool, set[str], list[dict[str, Any]]]:
+) -> tuple[bool, List[Any], set[str], list[dict[str, Any]]]:
     """对当前层做一层浅扫。
 
-    返回 ``(verify_failed, stale_relative_paths, disk_only_raws)``：
+    返回 ``(verify_failed, valid_entries, stale_relative_paths, disk_only_raws)``：
     - stat 异常（目录不可达/远程盘）→ verify_failed=True，调用方回落 index；
-    - 快照条目 stat 不一致 → 标 stale；
+    - 快照条目 stat 不一致 → 标 stale（但保留在 valid_entries 里）；
+    - 快照条目磁盘已消失/类型变化 → **幽灵条目，不进 valid_entries、不进响应**；
     - 磁盘有而快照没有 → disk_only_raws（统一形状 raw，附进响应）。
     """
     verify_failed = False
     stale_paths: set[str] = set()
     disk_only_raws: list[dict[str, Any]] = []
 
-    # 1) 快照条目逐个 stat：缺失/类型变化/内容不一致 → stale（缺失条目直接丢弃，不显示幽灵行）
+    # 1) 快照条目逐个 stat：缺失/类型变化 → 幽灵条目（丢弃）；内容不一致 → 标 stale 保留
     valid_entries: List[Any] = []
     root_abs = os.path.abspath(library.root_path)
     for entry in entries:
@@ -321,6 +323,6 @@ def _verify_current_layer(
                 })
     except OSError:
         # 当前层不可达：verify 失败，回落 index 模式（stale 不标，快照行原样返回）
-        return True, set(), []
+        return True, list(entries), set(), []
 
-    return verify_failed, stale_paths, disk_only_raws
+    return verify_failed, valid_entries, stale_paths, disk_only_raws

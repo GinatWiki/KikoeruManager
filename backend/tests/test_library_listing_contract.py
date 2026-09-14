@@ -129,3 +129,107 @@ def test_listing_relative_path_root_maps_to_empty_parent():
         library=_fake_library(), relative_path="a/b", cursor="", mode="index", get_service=lambda: svc
     )
     assert svc.captured_parent_path == "a/b"
+
+
+# ---------------------------------------------------------------------------
+# 阶段 2：mode=verify 浅扫（真目录 + tmp_path，不连库）
+# ---------------------------------------------------------------------------
+
+
+def _make_disk_tree(root):
+    """建一个磁盘树：RJ1/(a.wav=100B, b.jpg=200B) + stray_new/(c.wav)。"""
+    rj = root / "RJ1"
+    rj.mkdir(parents=True)
+    (rj / "a.wav").write_bytes(b"x" * 100)
+    (rj / "b.jpg").write_bytes(b"y" * 200)
+    stray = root / "stray_new"
+    stray.mkdir()
+    (stray / "c.wav").write_bytes(b"z" * 50)
+
+
+def test_verify_marks_size_mismatch_stale(tmp_path):
+    disk_root = tmp_path / "lib"
+    _make_disk_tree(disk_root)
+    # 快照声称 a.wav 是 999 字节，磁盘是 100 → stale；目录 size 滞后允许
+    entries = [
+        FakeEntry("RJ1", "dir", "RJ1", size=300, file_count=2, mtime=0),
+        FakeEntry("a.wav", "file", "RJ1/a.wav", size=999, mtime=0),
+        FakeEntry("b.jpg", "file", "RJ1/b.jpg", size=200, mtime=0),
+    ]
+    svc = FakeService(entries)
+    lib = _fake_library(root_path=str(disk_root))
+    data = listing_service.build_library_listing(
+        library=lib, relative_path="RJ1", mode="verify", get_service=lambda: svc
+    )
+    assert data["mode"] == "verify" and data["source"] == "verify"
+    assert not data.get("verify_failed")
+    by_name = {i["name"]: i for i in data["items"]}
+    assert by_name["a.wav"]["stale"] is True
+    assert by_name["b.jpg"]["stale"] is False
+    assert by_name["RJ1"]["stale"] is False  # 目录 size 允许滞后
+
+
+def test_verify_appends_disk_only_and_drops_ghosts(tmp_path):
+    disk_root = tmp_path / "lib"
+    _make_disk_tree(disk_root)
+    entries = [
+        # RJ1 快照只有 a.wav；b.jpg 是磁盘新文件 → disk_only
+        FakeEntry("RJ1", "dir", "RJ1", size=0, file_count=1, mtime=0),
+        FakeEntry("a.wav", "file", "RJ1/a.wav", size=100, mtime=0),
+        # ghost_file 磁盘上已删除 → 幽灵条目，不进响应
+        FakeEntry("ghost_file", "file", "RJ1/ghost_file", size=1, mtime=0),
+    ]
+    svc = FakeService(entries)
+    lib = _fake_library(root_path=str(disk_root))
+    data = listing_service.build_library_listing(
+        library=lib, relative_path="RJ1", mode="verify", get_service=lambda: svc
+    )
+    names = [i["name"] for i in data["items"]]
+    assert "ghost_file" not in names, names          # 幽灵条目被剔除
+    assert "b.jpg" in names                          # 磁盘新文件补进来
+    b = next(i for i in data["items"] if i["name"] == "b.jpg")
+    assert b["source"] == "verify" and b["stale"] is True
+    assert b["size"] == 200 and b["is_dir"] is False
+    assert b["relative_path"] == "RJ1/b.jpg"
+
+
+def test_verify_root_lists_disk_only_top_level(tmp_path):
+    disk_root = tmp_path / "lib"
+    _make_disk_tree(disk_root)
+    # 快照只有 RJ1；stray_new 是磁盘新目录
+    entries = [FakeEntry("RJ1", "dir", "RJ1", size=0, file_count=2, mtime=0)]
+    svc = FakeService(entries)
+    lib = _fake_library(root_path=str(disk_root))
+    data = listing_service.build_library_listing(
+        library=lib, relative_path="", mode="verify", get_service=lambda: svc
+    )
+    names = {i["name"] for i in data["items"]}
+    assert names == {"RJ1", "stray_new"}
+
+
+def test_verify_fails_when_dir_unreachable(tmp_path):
+    disk_root = tmp_path / "lib"
+    _make_disk_tree(disk_root)
+    entries = [FakeEntry("RJ1", "dir", "RJ1", size=0, file_count=2, mtime=0)]
+    svc = FakeService(entries)
+    lib = _fake_library(root_path=str(disk_root))
+    data = listing_service.build_library_listing(
+        library=lib, relative_path="not_exist_dir", mode="verify", get_service=lambda: svc
+    )
+    # 当前层不可达 → 回落 index：纯快照原样返回（无 stale 标记、无 disk_only），标 verify_failed
+    assert data["verify_failed"] is True
+    assert [i["name"] for i in data["items"]] == ["RJ1"]
+    assert all(i["stale"] is False for i in data["items"])
+
+
+def test_verify_skipped_for_remote_library():
+    entries = [FakeEntry("x", "file", "sub/x", size=1, mtime=0)]
+    svc = FakeService(entries)
+    lib = _fake_library(lib_type="smb", root_path="/mnt/lib")
+    data = listing_service.build_library_listing(
+        library=lib, relative_path="sub", mode="verify", get_service=lambda: svc
+    )
+    # 非本地库存：verify 不做 stat，等价 index 读
+    assert data["source"] == "verify"
+    assert not data.get("verify_failed")
+    assert data["items"][0]["relative_path"] == "sub/x"
