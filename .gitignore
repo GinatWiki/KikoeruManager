@@ -136,3 +136,6 @@ backend/tests/test_library_index_snapshot_store.py
 backend/tests/test_library_index_performance_behavior.py
 backend/scripts/view.txt
 frontend/vitest.config.js.timestamp-*.mjs
+
+# GitNexus 本地知识图谱索引
+.gitnexus/

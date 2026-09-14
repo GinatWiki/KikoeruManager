@@ -11108,6 +11108,44 @@ async def browse_library_files(
         raise HTTPException(status_code=_synology_http_status(e), detail=f"库存浏览失败: {str(e)}")
 
 
+@app.get("/api/library/browser/listing")
+async def browse_library_listing(
+    library_id: Optional[str] = None,
+    relative_path: str = "",
+    cursor: str = "",
+    mode: str = "index",
+):
+    """重构阶段 1 的统一读入口：列一层目录，统一序列化（见 docs/library-browser-refactor-plan.md）。
+
+    - 复用 ``service.list_children_page``（与 browser/files 本地索引分支同一实现）。
+    - ``mode=index`` 读快照；``mode=verify`` 本阶段等价于 index 并原样返回，仅回显 ``mode``/``source``。
+    - 开关 ``KIKOERU_LIBRARY_LISTING_NEW=0`` 时回退（501），便于线上随时回滚。
+    """
+    from app.core.library_index.listing_service import (
+        build_library_listing,
+        listing_new_enabled,
+    )
+
+    if not listing_new_enabled():
+        raise HTTPException(
+            status_code=501,
+            detail="listing 端点已禁用（KIKOERU_LIBRARY_LISTING_NEW=0），请回退旧实现",
+        )
+    try:
+        manager = get_library_manager()
+        library = manager.get_library_definition(library_id)
+        return build_library_listing(
+            library=library,
+            relative_path=relative_path,
+            cursor=cursor,
+            mode=mode,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"库存 listing 失败: {str(e)}")
+
+
 @app.get("/api/library/browser/stats")
 async def get_library_browser_stats(force_refresh: bool = False, library_id: Optional[str] = None):
     try:

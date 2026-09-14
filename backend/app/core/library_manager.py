@@ -3981,7 +3981,13 @@ class LibraryManager:
         search_root: str,
         entry,
     ) -> dict[str, Any]:
-        """IndexEntry → list_files 输出格式的 file dict。"""
+        """IndexEntry → list_files 输出格式的 file dict。
+
+        重构阶段 1：字段构造收敛到统一序列化层（listing_view），
+        由 canonical 形状派生旧行，响应结构与旧实现逐字段一致（契约快照测试锁定）。
+        """
+        from .library_index.listing_view import legacy_browser_file_row, normalize_listing_item
+
         is_directory = entry.entry_type == 'dir'
         full_path = entry.absolute_path
 
@@ -3993,20 +3999,11 @@ class LibraryManager:
                 relative_path = full_path[len(norm_search) + 1:]
             else:
                 relative_path = entry.relative_path or entry.name
-            try:
-                parent_path = (
-                    str(PurePosixPath(full_path).parent)
-                    if full_path and full_path != "/"
-                    else "/"
-                )
-            except Exception:
-                parent_path = ""
         else:
             try:
                 relative_path = os.path.relpath(full_path, search_root).replace("\\", "/")
             except ValueError:
                 relative_path = entry.relative_path or entry.name
-            parent_path = os.path.dirname(full_path)
 
         if entry.mtime:
             try:
@@ -4027,27 +4024,42 @@ class LibraryManager:
             size = int(entry.size or 0)
             size_status = "ready"
 
-        return {
+        canonical = normalize_listing_item(
+            {
+                "name": entry.name,
+                "is_dir": is_directory,
+                "mtime": (entry.mtime / 1000.0) if entry.mtime else 0.0,
+                "relative_path": relative_path,
+                "file_count": int(entry.file_count or 0) if is_directory else 1,
+                "rjcode": entry.rjcode,
+                "modified_time": mtime_iso,
+                "size_status": size_status,
+                "browse_via_index": True,
+                # 原始 size 值透传（synology 目录可为 None）；canonical 层会按
+                # 新端点契约把目录 size 钳成 0，legacy 派生行用 raw_size 恢复。
+                "raw_size": size,
+            },
+            source="index",
+            keep_optional=True,
+        ) or {}
+        row = legacy_browser_file_row(canonical)
+        row.update({
             "id": f"{library.id}:search:{item_id}",
-            "name": entry.name,
             "path": full_path,
-            "relative_path": relative_path,
-            "parent_path": parent_path,
-            "rjcode": entry.rjcode,
-            "size": size,
-            "size_status": size_status,
-            "modified_time": mtime_iso,
-            "unzip_time": mtime_iso,
-            "is_directory": is_directory,
+            "parent_path": (
+                str(PurePosixPath(full_path).parent)
+                if (library.type == "synology_filestation" and full_path and full_path != "/")
+                else os.path.dirname(full_path)
+            ),
             "library_id": library.id,
             "library_name": library.name,
-            "file_count": int(entry.file_count or 0) if is_directory else 1,
             "folder_count": None if is_directory else 0,
             "folder_count_status": "lazy" if is_directory else "ready",
             "size_via_index": bool(is_directory and library.type == "local"),
             "search_hit": True,
             "search_via_index": True,
-        }
+        })
+        return row
 
     def _index_entry_stat_is_stale(self, entry: Any, stat_result: os.stat_result) -> bool:
         indexed_mtime = getattr(entry, "mtime", None)
@@ -9551,6 +9563,14 @@ class LibraryManager:
         parent_relative_path: str,
         descendant_folder_count: Optional[int],
     ) -> dict[str, Any]:
+        """IndexEntry → folder-contents/list-folders 的 items[] 行。
+
+        重构阶段 1：字段构造收敛到统一序列化层（listing_view），
+        由 canonical 形状派生旧行（超集行，含 type/has_children/children_loaded），
+        响应结构与旧实现逐字段一致（契约快照测试锁定）。
+        """
+        from .library_index.listing_view import legacy_folder_row, normalize_listing_item
+
         is_directory = entry.entry_type == "dir"
         relative_path = self._index_relative_path_under_target(entry.relative_path, parent_relative_path)
         try:
@@ -9561,23 +9581,30 @@ class LibraryManager:
         folder_count = int(descendant_folder_count or 0) if descendant_folder_count is not None else None
         size_value = int(entry.size or 0)
         has_children = bool(is_directory and (file_count > 0 or int(folder_count or 0) > 0))
-        return {
-            "id": f"{library.id}:content:index:{item_id}",
-            "name": entry.name,
-            "path": entry.absolute_path,
-            "relative_path": relative_path,
-            "size": size_value,
-            "size_status": "ready",
-            "modified_time": modified_time,
-            "type": "dir" if is_directory else "file",
-            "is_directory": is_directory,
-            "has_children": has_children,
-            "children_loaded": False if has_children else True,
-            "file_count": file_count,
-            "folder_count": folder_count if is_directory else 0,
-            "folder_count_status": "ready" if (not is_directory or descendant_folder_count is not None) else "lazy",
-            "browse_via_index": True,
-        }
+
+        canonical = normalize_listing_item(
+            {
+                "name": entry.name,
+                "is_dir": is_directory,
+                "mtime": (entry.mtime / 1000.0) if entry.mtime else 0.0,
+                "relative_path": relative_path,
+                "file_count": file_count,
+                "folder_count": folder_count if is_directory else 0,
+                "modified_time": modified_time,
+                "size_status": "ready",
+                "has_children": has_children,
+                "children_loaded": False if has_children else True,
+                "folder_count_status": "ready" if (not is_directory or descendant_folder_count is not None) else "lazy",
+                "browse_via_index": True,
+                "absolute_path": entry.absolute_path,
+                "raw_size": size_value,
+            },
+            source="index",
+            keep_optional=True,
+        ) or {}
+        row = legacy_folder_row(canonical)
+        row["id"] = f"{library.id}:content:index:{item_id}"
+        return row
 
     def _index_relative_path_under_target(self, entry_relative_path: str, target_relative_path: str) -> str:
         entry_relative = str(entry_relative_path or "").strip("/")
