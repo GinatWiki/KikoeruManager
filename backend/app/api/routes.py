@@ -11769,7 +11769,62 @@ async def flatten_library_browser_single_chains(request: Request):
                 for op in (cleanup.get("operations") or [])
                 if isinstance(op, dict) and str(op.get("removed_segment") or "").strip("/")
             ]
-            result = service.apply_directory_cleanup(path, empty_dirs, operations)
+            # 阶段 3 写入即失效：apply 改了 FS（删空目录+单链合并）却从未登记 mutation，
+            # 索引更新只能赌 watcher（Docker 下不可靠）。对操作根做一次 reconcile+subtree，
+            # 覆盖全部变化（目录删除/合并上提/空目录清理），物化器经 LocalScanner 重扫。
+            prepared = None
+            mutation_service = None
+            if library.type == "local":
+                mutation_service = get_library_index_mutation_service()
+                prepared = mutation_service.prepare(
+                    kind="flatten_single_chains",
+                    effects_by_library={
+                        library.id: [
+                            {
+                                "kind": "reconcile",
+                                "relative_path": _local_relative_path(library, path),
+                                "scope": "subtree",
+                            }
+                        ]
+                    },
+                    idempotency_key=_request_idempotency_key(request),
+                )
+                replay = _prepared_replay_response(prepared)
+                if replay is not None:
+                    return replay
+            try:
+                if prepared is not None:
+                    mutation_service.mark_filesystem_started(prepared.operation_id)
+                result = service.apply_directory_cleanup(path, empty_dirs, operations)
+            except Exception as exc:
+                if prepared is not None:
+                    mutation_service.fail_prepared(prepared.operation_id, exc)
+                raise
+            if prepared is not None:
+                flatten_effect = {
+                    "kind": "reconcile",
+                    "relative_path": _local_relative_path(library, path),
+                    "scope": "subtree",
+                }
+                try:
+                    finalized = mutation_service.finalize(
+                        prepared.operation_id,
+                        actual_effects_by_library={library.id: [flatten_effect]},
+                        actual_result={"mode": "apply"},
+                    )
+                    if finalized is not None:
+                        result = {
+                            **result,
+                            "operation_id": prepared.operation_id,
+                        }
+                except Exception as exc:
+                    mutation_service.mark_reconcile_required(prepared.operation_id, exc)
+                    result = {
+                        **result,
+                        "operation_id": prepared.operation_id,
+                        "operation_state": "reconcile_required",
+                        "reconciliation_pending": True,
+                    }
             logger.info(
                 f"过滤删除后目录整理执行完成: {path}（删空目录 {result['removed_empty_dir_count']} 个、合并单链 {result['applied_count']} 条）"
             )
