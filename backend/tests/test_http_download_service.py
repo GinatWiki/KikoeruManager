@@ -3960,6 +3960,174 @@ async def test_start_download_task_falls_back_to_multi_round_when_space_shortage
 
 
 @pytest.mark.asyncio
+async def test_multi_round_counts_prefiltered_complete_rows(monkeypatch, tmp_path):
+    """多轮里「转存前预检」命中的本地完整分卷要计入成功，并带上轮次标记。"""
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    gib = 1024 ** 3
+    file_size = 4 * gib
+
+    selected_items = [
+        {"source": "pikpak", "file_id": f"f{i}", "filename": f"RJ1.7z.{i:03d}", "name": f"RJ1.7z.{i:03d}"}
+        for i in range(1, 5)
+    ]
+    plan_files = [
+        {"file_id": f"f{i}", "name": f"RJ1.7z.{i:03d}", "size": file_size}
+        for i in range(1, 5)
+    ]
+
+    async def fake_preview_urls(urls, target_subdir="", conflict_policy="", *, materialize_sources=False, selected_items=None):
+        picked = list(selected_items or [])
+        if len(picked) > 2:
+            return {
+                "items": [{
+                    "ok": False,
+                    "source": "pikpak",
+                    "url": "https://mypikpak.com/s/share",
+                    "masked_url": "https://mypikpak.com/s/***",
+                    "reason": "PikPak 多账号空间仍不足: 未能分配 4 个文件，共 16.0 GB。",
+                }],
+                "resolved_urls": [],
+                "source_items": [],
+                "source_modes": ["pikpak"],
+            }
+        # 每轮：首个文件本地已完整（预检命中），其余照常转存 + 下载
+        complete = picked[0]
+        complete_name = str(complete.get("filename") or complete.get("name"))
+        existing_rows = [{
+            "gid": f"existing:pikpak:{complete.get('file_id')}",
+            "name": complete_name,
+            "relative_path": complete_name,
+            "local_path": str(tmp_path / "downloads" / complete_name),
+            "url": "https://mypikpak.com/s/***",
+            "source": "pikpak",
+            "status": "completed",
+            "progress": 100,
+            "downloaded": file_size,
+            "total": file_size,
+            "size": file_size,
+            "file_id": complete.get("file_id"),
+            "existing_file_reused": True,
+            "prefiltered_complete": True,
+        }]
+        items = []
+        source_items = []
+        for item in picked[1:]:
+            name = str(item.get("filename") or item.get("name") or "file.bin")
+            items.append({
+                "ok": True,
+                "source": "pikpak",
+                "url": f"https://dl.test/{name}",
+                "masked_url": f"https://dl.test/{name}",
+                "filename": name,
+                "relative_path": name,
+                "final_path": str(tmp_path / "downloads" / name),
+                "target_dir": str(tmp_path / "downloads"),
+                "size_bytes": file_size,
+                "file_id": item.get("file_id"),
+                "download_file_id": f"cleanup-{item.get('file_id')}",
+                "pikpak_cleanup_file_id": f"cleanup-{item.get('file_id')}",
+                "pikpak_materialized": True,
+                "pikpak_account_id": "acc-1",
+                "share_id": "share-1",
+            })
+            source_items.append({
+                "source": "pikpak",
+                "file_id": item.get("file_id"),
+                "download_file_id": f"cleanup-{item.get('file_id')}",
+                "pikpak_cleanup_file_id": f"cleanup-{item.get('file_id')}",
+                "pikpak_materialized": True,
+                "pikpak_account_id": "acc-1",
+                "share_id": "share-1",
+                "name": name,
+                "filename": name,
+                "size_bytes": file_size,
+            })
+        return {
+            "items": items,
+            "resolved_urls": [entry["url"] for entry in items],
+            "source_items": source_items,
+            "source_modes": ["pikpak"],
+            "existing_rows": existing_rows,
+        }
+
+    async def fake_plan(*_args, **_kwargs):
+        return {
+            "files": plan_files,
+            "total_bytes": 4 * file_size,
+            "total_remaining": 10 * gib,
+            "multi_round": True,
+        }
+
+    async def fake_snapshot():
+        return [
+            {"limit_bytes": 6 * gib, "remaining_bytes": 5 * gib},
+            {"limit_bytes": 6 * gib, "remaining_bytes": 5 * gib},
+        ]
+
+    rpc_counter = {"gid": 0}
+
+    async def fake_rpc(method, params):
+        if method == "aria2.addUri":
+            rpc_counter["gid"] += 1
+            return f"gid-{rpc_counter['gid']}"
+        if method == "aria2.tellStatus":
+            return {
+                "gid": params[0],
+                "status": "complete",
+                "totalLength": str(file_size),
+                "completedLength": str(file_size),
+                "downloadSpeed": "0",
+                "errorMessage": "",
+                "files": [],
+            }
+        if method in ("aria2.tellActive", "aria2.tellWaiting", "aria2.tellStopped"):
+            return []
+        if method in ("aria2.remove", "aria2.removeDownloadResult"):
+            return "ok"
+        raise AssertionError(f"unexpected rpc: {method}")
+
+    async def fake_cleanup(rows):
+        return {
+            "success": True,
+            "status": "completed",
+            "requested_count": len(rows or []),
+            "deleted_count": len(rows or []),
+            "accounts": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(service, "preview_urls", fake_preview_urls)
+    monkeypatch.setattr(service, "_plan_pikpak_multi_round_download", fake_plan)
+    monkeypatch.setattr(service, "_pikpak_quota_snapshot", fake_snapshot)
+    monkeypatch.setattr(service, "_rpc_call", fake_rpc)
+    monkeypatch.setattr(service, "_remove_existing_gids_for_target", lambda _target: asyncio.sleep(0))
+    monkeypatch.setattr(service, "cleanup_pikpak_transfer_items_from_rows", fake_cleanup)
+    monkeypatch.setattr("app.core.http_download_service._PIKPAK_MULTI_ROUND_SPACE_SETTLE_SECONDS", 0.01)
+
+    task = Task(
+        task_type=TaskType.HTTP_DOWNLOAD,
+        source_path="mypikpak.com",
+        metadata={
+            "urls": ["https://mypikpak.com/s/share"],
+            "selected_items": selected_items,
+        },
+    )
+
+    result = await service.start_download_task(task)
+
+    assert result["multi_round"] is True
+    assert result["rounds"] == 2
+    assert result["success"] is True
+    rows = result["downloaded_files"]
+    pre_rows = [row for row in rows if row.get("prefiltered_complete")]
+    assert len(pre_rows) == 2
+    assert all(row["status"] == "completed" for row in pre_rows)
+    assert sorted(int(row.get("multi_round_index") or 0) for row in pre_rows) == [1, 2]
+    assert len(rows) == 4
+
+
+@pytest.mark.asyncio
 async def test_start_download_task_keeps_share_failure_when_multi_round_not_applicable(monkeypatch, tmp_path):
     bind_config(monkeypatch, tmp_path)
     service = HttpDownloadService()
@@ -4391,6 +4559,198 @@ def test_prepare_existing_pikpak_target_preserves_aria2_resume_pair(monkeypatch,
     assert service._prepare_existing_aria2_target(item) is None
     assert final_path.read_bytes() == b"partial"
     assert "pikpak_reset_partial_bytes" not in item
+
+
+def test_pikpak_prefilter_skips_complete_file_before_transfer(monkeypatch, tmp_path):
+    """转存前预检：本地字节精确完整且无 .aria2 控制文件的分卷跳过转存。"""
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    complete = Path(service._download_root()) / "RJ01675713.7z.001"
+    complete.parent.mkdir(parents=True, exist_ok=True)
+    complete.write_bytes(b"x" * 10)
+
+    pending, rows = service._pikpak_prefilter_completed_files(
+        [
+            {"id": "file-001", "name": "RJ01675713.7z.001", "size": 10},
+            {"id": "file-002", "name": "RJ01675713.7z.002", "size": 20},
+        ],
+        conflict_policy="resume",
+        share_id="share-id",
+        share_url="https://mypikpak.com/s/share-id",
+    )
+
+    assert [item["id"] for item in pending] == ["file-002"]
+    assert len(rows) == 1
+    assert rows[0]["status"] == "completed"
+    assert rows[0]["existing_file_reused"] is True
+    assert rows[0]["prefiltered_complete"] is True
+    assert rows[0]["file_id"] == "file-001"
+    assert rows[0]["local_path"] == str(complete)
+    assert rows[0]["size"] == 10
+
+
+def test_pikpak_prefilter_keeps_resumable_partial(monkeypatch, tmp_path):
+    """有 .aria2 控制文件的残片必须留给 aria2 续传，不能被预检吞掉或删除。"""
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    partial = Path(service._download_root()) / "RJ01675713.7z.003"
+    partial.parent.mkdir(parents=True, exist_ok=True)
+    partial.write_bytes(b"part")
+    Path(str(partial) + ".aria2").write_bytes(b"control")
+
+    pending, rows = service._pikpak_prefilter_completed_files(
+        [{"id": "file-003", "name": "RJ01675713.7z.003", "size": 100}],
+        conflict_policy="resume",
+    )
+
+    assert [item["id"] for item in pending] == ["file-003"]
+    assert rows == []
+    assert partial.read_bytes() == b"part"
+
+
+def test_pikpak_prefilter_disabled_for_rename_policy_and_custom_naming(monkeypatch, tmp_path):
+    """rename 策略与自定义重命名都会改变最终路径，预检必须保守退出。"""
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    complete = Path(service._download_root()) / "RJ01675713.7z.001"
+    complete.parent.mkdir(parents=True, exist_ok=True)
+    complete.write_bytes(b"x" * 10)
+
+    files = [{"id": "file-001", "name": "RJ01675713.7z.001", "size": 10}]
+
+    pending, rows = service._pikpak_prefilter_completed_files(files, conflict_policy="rename")
+    assert [item["id"] for item in pending] == ["file-001"]
+    assert rows == []
+
+    pending, rows = service._pikpak_prefilter_completed_files(
+        files,
+        conflict_policy="resume",
+        selected_items=[{
+            "source": "pikpak",
+            "file_id": "file-001",
+            "custom_name": "RJ01675713",
+            "custom_extract_password": "1234",
+        }],
+    )
+    assert [item["id"] for item in pending] == ["file-001"]
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_source_urls_prefilters_complete_before_transfer(monkeypatch, tmp_path):
+    """端到端：本地已完整的分卷不参与转存，也不解析直链，只留在 existing_rows。"""
+    bind_config(
+        monkeypatch,
+        tmp_path,
+        pikpak_enabled=True,
+        pikpak_accounts=[{
+            "id": "acc-a",
+            "label": "A",
+            "enabled": True,
+            "username": "a",
+            "password": "p",
+        }],
+    )
+    service = HttpDownloadService()
+    complete = Path(service._download_root()) / "RJ01632789.7z.001"
+    complete.parent.mkdir(parents=True, exist_ok=True)
+    complete.write_bytes(b"y" * 10)
+    calls = {"copy_ids": [], "download_ids": []}
+
+    class Client:
+        pass
+
+    async def fake_collect(_client, raw_url):
+        return (
+            {"share_id": "share-id", "pass_code_token": ""},
+            [
+                {"id": "file-001", "name": "RJ01632789.7z.001", "size": 10},
+                {"id": "file-004", "name": "RJ01632789.7z.004", "size": 20},
+            ],
+        )
+
+    async def fake_copy(_client, file_ids, files, **_kwargs):
+        calls["copy_ids"].extend(file_ids)
+        return (
+            {file_id: f"copy-{file_id}" for file_id in file_ids},
+            {file_id: service._select_pikpak_account("acc-a") for file_id in file_ids},
+            {},
+        )
+
+    async def fake_download_link(_client, file_id, allow_missing=False):
+        calls["download_ids"].append(file_id)
+        return {
+            "_download_url": f"https://cdn.example.com/{file_id}",
+            "name": "RJ01632789.7z.004",
+            "size": 20,
+        }
+
+    monkeypatch.setattr(service, "_pikpak_client", lambda *args, **kwargs: asyncio.sleep(0, result=Client()))
+    monkeypatch.setattr(service, "_close_pikpak_client", lambda _client: asyncio.sleep(0))
+    monkeypatch.setattr(service, "_collect_pikpak_share_files", fake_collect)
+    monkeypatch.setattr(service, "_copy_pikpak_share_files_multi", fake_copy)
+    monkeypatch.setattr(service, "_pikpak_download_link", fake_download_link)
+
+    result = await service.resolve_source_urls(
+        ["https://mypikpak.com/s/share-id"],
+        materialize=True,
+    )
+
+    assert calls["copy_ids"] == ["file-004"]
+    assert calls["download_ids"] == ["copy-file-004"]
+    assert [item["file_id"] for item in result["source_items"]] == ["file-004"]
+    assert [row["file_id"] for row in result["existing_rows"]] == ["file-001"]
+    assert result["existing_rows"][0]["prefiltered_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_source_urls_skips_transfer_when_all_complete(monkeypatch, tmp_path):
+    """整份分享都已在本地完整时，连转存调用都不该发生。"""
+    bind_config(
+        monkeypatch,
+        tmp_path,
+        pikpak_enabled=True,
+        pikpak_accounts=[{
+            "id": "acc-a",
+            "label": "A",
+            "enabled": True,
+            "username": "a",
+            "password": "p",
+        }],
+    )
+    service = HttpDownloadService()
+    complete = Path(service._download_root()) / "RJ01632789.7z.001"
+    complete.parent.mkdir(parents=True, exist_ok=True)
+    complete.write_bytes(b"z" * 10)
+    calls = {"copy_ids": []}
+
+    class Client:
+        pass
+
+    async def fake_collect(_client, raw_url):
+        return (
+            {"share_id": "share-id", "pass_code_token": ""},
+            [{"id": "file-001", "name": "RJ01632789.7z.001", "size": 10}],
+        )
+
+    async def fake_copy(_client, file_ids, files, **_kwargs):
+        calls["copy_ids"].extend(file_ids)
+        return ({}, {}, {})
+
+    monkeypatch.setattr(service, "_pikpak_client", lambda *args, **kwargs: asyncio.sleep(0, result=Client()))
+    monkeypatch.setattr(service, "_close_pikpak_client", lambda _client: asyncio.sleep(0))
+    monkeypatch.setattr(service, "_collect_pikpak_share_files", fake_collect)
+    monkeypatch.setattr(service, "_copy_pikpak_share_files_multi", fake_copy)
+
+    result = await service.resolve_source_urls(
+        ["https://mypikpak.com/s/share-id"],
+        materialize=True,
+    )
+
+    assert calls["copy_ids"] == []
+    assert result["source_items"] == []
+    assert result["failed_items"] == []
+    assert [row["file_id"] for row in result["existing_rows"]] == ["file-001"]
 
 
 @pytest.mark.asyncio

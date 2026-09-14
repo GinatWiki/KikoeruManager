@@ -4458,10 +4458,14 @@ class HttpDownloadService:
         *,
         materialize: bool = False,
         selected_items: Optional[List[Dict[str, Any]]] = None,
+        target_subdir: str = "",
+        conflict_policy: str = "",
     ) -> Dict[str, Any]:
         resolved: List[str] = []
         source_items: List[Dict[str, Any]] = []
         failed: List[Dict[str, Any]] = []
+        # 本地已完整、无需转存/下载的行（转存前预检产出），由调用方并入下载行。
+        existing_rows: List[Dict[str, Any]] = []
         selection_filter = self._selection_filter_from_items(selected_items)
         direct_links = [
             url
@@ -4605,6 +4609,29 @@ class HttpDownloadService:
                                     "source": "pikpak",
                                 })
                                 continue
+                        if materialize and bool(getattr(self._config(), "pikpak_auto_save_share", True)):
+                            # 转存前先排掉本地已完整的分卷：既不占账号空间，也不用解析直链。
+                            files, prefiltered_rows = self._pikpak_prefilter_completed_files(
+                                files,
+                                target_subdir=target_subdir,
+                                conflict_policy=conflict_policy,
+                                share_id=share_id,
+                                share_url=raw_url,
+                                selected_items=selected_items,
+                            )
+                            if prefiltered_rows:
+                                existing_rows.extend(prefiltered_rows)
+                                logger.info(
+                                    "[PikPak] 转存前预检跳过本地已完整分卷 %s 个（分享 %s）",
+                                    len(prefiltered_rows),
+                                    self._mask_url(raw_url),
+                                )
+                            if not files:
+                                logger.info(
+                                    "[PikPak] 分享内文件已全部在本地完整，跳过转存与直链解析: %s",
+                                    self._mask_url(raw_url),
+                                )
+                                continue
                         file_ids = []
                         for item in files:
                             file_id = str(item.get("id") or item.get("file_id") or "")
@@ -4717,7 +4744,13 @@ class HttpDownloadService:
             mode = self._provider_source(url)
             if mode not in modes:
                 modes.append(mode)
-        return {"urls": resolved, "source_items": source_items, "failed_items": failed, "source_modes": modes}
+        return {
+            "urls": resolved,
+            "source_items": source_items,
+            "failed_items": failed,
+            "source_modes": modes,
+            "existing_rows": existing_rows,
+        }
 
     def _sanitize_filename(self, name: str, fallback: str = "download.bin") -> str:
         text = unquote(str(name or "").strip()).replace("\\", "/").rsplit("/", 1)[-1].strip()
@@ -4943,9 +4976,15 @@ class HttpDownloadService:
                 urls,
                 materialize=materialize_sources,
                 selected_items=selected_items,
+                target_subdir=target_subdir,
+                conflict_policy=conflict_policy,
             )
         except TypeError as exc:
-            if "selected_items" not in str(exc):
+            # 兼容不支持这些关键字的实现（含测试替身）：退回最小参数调用。
+            if not any(
+                keyword in str(exc)
+                for keyword in ("selected_items", "target_subdir", "conflict_policy")
+            ):
                 raise
             source = await self.resolve_source_urls(urls, materialize=materialize_sources)
         items = []
@@ -5218,6 +5257,7 @@ class HttpDownloadService:
             "resolved_urls": source.get("urls") or [],
             "source_items": source.get("source_items") or [],
             "source_modes": source.get("source_modes") or [],
+            "existing_rows": source.get("existing_rows") or [],
             "needs_materialize": any(bool(item.get("preview_only")) for item in source.get("source_items") or [] if isinstance(item, dict)),
         }
 
@@ -5535,6 +5575,111 @@ class HttpDownloadService:
 
     def _prepare_existing_gofile_target(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return self._prepare_existing_aria2_target(item)
+
+    def _local_file_is_complete(self, final_path: str, expected_size: int) -> bool:
+        """纯检测：目标文件是否已「字节精确完整」且没有 aria2 续传控制文件。
+
+        只有这种状态才允许跳过下载。存在 `.aria2` 控制文件的残片必须交给 aria2
+        断点续传（多连接分片不是合法前缀，做长度续传会损坏文件），所以不算完整。
+        """
+        if not final_path or int(expected_size or 0) <= 0:
+            return False
+        if not os.path.isfile(final_path):
+            return False
+        if os.path.exists(str(final_path) + ".aria2"):
+            return False
+        try:
+            return int(os.path.getsize(final_path)) == int(expected_size)
+        except OSError:
+            return False
+
+    def _pikpak_prefilter_completed_files(
+        self,
+        files: List[Dict[str, Any]],
+        *,
+        target_subdir: str = "",
+        conflict_policy: str = "",
+        share_id: str = "",
+        share_url: str = "",
+        selected_items: Optional[List[Dict[str, Any]]] = None,
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """转存前预检：本地已完整的分卷不再转存，直接产出 completed 行，省账号空间。
+
+        只在默认 `resume` 冲突策略、且该文件没有自定义重命名时生效——否则预判路径
+        可能与后续真正下载的目标不一致（rename 会追加序号、自定义命名会换目录），
+        宁可照常转存。残片一律保留原流程：有 `.aria2` 控制文件的交给 aria2 续传，
+        孤儿的由下载提交阶段删除后重下。
+        """
+        source_files = [item for item in list(files or []) if isinstance(item, dict)]
+        rows: List[Dict[str, Any]] = []
+        pending: List[Dict[str, Any]] = []
+        if not source_files:
+            return source_files, rows
+        policy = str(
+            conflict_policy or getattr(self._config(), "conflict_policy", "resume") or "resume"
+        ).strip().lower()
+        if policy != "resume":
+            return source_files, rows
+        renamed_keys = set()
+        for selected in selected_items or []:
+            if not isinstance(selected, dict):
+                continue
+            if not self._http_selected_item_overrides(selected):
+                continue
+            key = self._preview_item_selection_key(selected)
+            if key:
+                renamed_keys.add(key)
+        masked_share_url = self._mask_url(str(share_url or ""))
+        for item in source_files:
+            try:
+                file_id = str(item.get("id") or item.get("file_id") or "").strip()
+                expected_size = int(item.get("size") or item.get("size_bytes") or 0)
+                filename = self._sanitize_filename(
+                    item.get("name") or item.get("filename") or "pikpak-file"
+                )
+                relative_dir = str(item.get("_relative_dir") or "").strip("/")
+                selection_key = self._preview_item_selection_key({
+                    "source": "pikpak",
+                    "file_id": file_id,
+                    "relative_dir": relative_dir,
+                })
+                if expected_size <= 0 or (selection_key and selection_key in renamed_keys):
+                    pending.append(item)
+                    continue
+                subdir = "/".join(
+                    part for part in (target_subdir, relative_dir) if str(part or "").strip()
+                )
+                target = self._resolve_target(filename, subdir, policy)
+                final_path = str(target.get("final_path") or "")
+                if not self._local_file_is_complete(final_path, expected_size):
+                    pending.append(item)
+                    continue
+                row = self._prepare_existing_aria2_target({
+                    "source": "pikpak",
+                    "final_path": final_path,
+                    "relative_path": str(target.get("relative_path") or ""),
+                    "filename": filename,
+                    "name": filename,
+                    "size_bytes": expected_size,
+                    "file_id": file_id,
+                    "share_id": share_id,
+                    "masked_url": masked_share_url,
+                })
+                if row is None:
+                    pending.append(item)
+                    continue
+                row["prefiltered_complete"] = True
+                rows.append(row)
+                logger.info(
+                    "[PikPak] 转存前预检命中本地完整分卷，跳过转存: file=%s size=%s path=%s",
+                    filename,
+                    self._format_bytes_for_error(expected_size),
+                    final_path,
+                )
+            except Exception:
+                # 预检只是省配额的优化，任何异常都退回正常转存流程。
+                pending.append(item)
+        return pending, rows
 
     async def _download_google_drive_item(self, item: Dict[str, Any], task=None, progress_callback=None) -> Dict[str, Any]:
         async with get_resource_budget_service().acquire("network_download", reason="http.google_drive"):
@@ -6263,7 +6408,13 @@ class HttpDownloadService:
             if item.get("ok")
         ]
         failed_items = [item for item in preview.get("items") or [] if not item.get("ok")]
-        if not items:
+        # 转存前预检判定「本地已完整、无需转存与下载」的分卷（PikPak），
+        # 直接作为 completed 行并入结果，不能因为 items 为空就误报失败。
+        pre_completed_rows = [
+            row for row in list(preview.get("existing_rows") or [])
+            if isinstance(row, dict)
+        ]
+        if not items and not pre_completed_rows:
             # PikPak 单分享「整份大小 > 全部账号剩余空间」时单轮转存必然失败。
             # 检测到空间类失败后探测一次：可分轮则切换多轮转存下载
             # （转存一批 → 下载 → 清理副本 → 下一批），否则保持原有报错路径。
@@ -6376,6 +6527,14 @@ class HttpDownloadService:
         download_files = []
         total_bytes = 0
         existing_aria2_count = 0
+        for row in pre_completed_rows:
+            # 转存前预检命中的本地完整分卷：已下载完成，直接计入成功，不再转存/提交下载。
+            if str(row.get("status") or "") != "completed":
+                row["status"] = "completed"
+                row["progress"] = 100
+            existing_aria2_count += 1
+            total_bytes += int(row.get("size") or row.get("total") or 0)
+            download_files.append(row)
         for item in google_drive_items:
             total_bytes += int(item.get("size_bytes") or 0)
             gid = f"google_drive:{item.get('file_id') or item.get('filename')}"
@@ -7058,6 +7217,17 @@ class HttpDownloadService:
             # 3) 提交本批 aria2 下载
             round_gids: List[str] = []
             round_rows: List[Dict[str, Any]] = []
+            # 转存前预检命中的本地完整分卷：不占本轮空间，直接作为 completed 行入账
+            for pre_row in list((preview or {}).get("existing_rows") or []):
+                if not isinstance(pre_row, dict):
+                    continue
+                row = dict(pre_row)
+                if str(row.get("status") or "") != "completed":
+                    row["status"] = "completed"
+                    row["progress"] = 100
+                row["multi_round_index"] = round_index
+                round_rows.append(row)
+                all_download_files.append(row)
             for item in round_items:
                 try:
                     os.makedirs(item["target_dir"], exist_ok=True)
