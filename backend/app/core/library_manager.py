@@ -4352,9 +4352,12 @@ class LibraryManager:
                     entries,
                     return_stale_paths=True,
                 )
-                # 完整性探测：磁盘直接子项多于索引快照 => 物化滞后或 watcher 漏事件。
-                # 记录诊断日志、入队子树 reconcile，并回退文件系统扫描保证本次显示完整。
-                # （对比的是目录子项总数而非当前页，分页浏览下同样成立）
+                # 完整性探测（v2.6.41）：磁盘名字级 diff 替代旧的计数比较。
+                # 旧逻辑 len(fs_names) > index_total 对「重命名/移动」（-1+1 计数守恒）
+                # 永远不触发——用户实测进入目录显示旧名，等 2s 轮询自纠。
+                # 现在：任何一侧多出的名字（磁盘新条目 / 快照幽灵）都回退文件系统扫描
+                # 保证本次显示正确，并入队子树 reconcile 修复快照。
+                # （一层 readdir，无递归；分页浏览下对比的仍是目录全量子项）
                 fs_names: list[str] = []
                 try:
                     fs_names = [
@@ -4363,13 +4366,20 @@ class LibraryManager:
                     ]
                 except OSError:
                     fs_names = []
-                index_total = max(0, int(payload.get("total") or len(entries)))
-                if len(fs_names) > index_total:
-                    self._report_incomplete_dir_and_reconcile(
+                fs_name_set = set(fs_names)
+                index_name_set = {
+                    str(getattr(entry, "name", "") or "")
+                    for entry in entries
+                    if str(getattr(entry, "name", "") or "")
+                }
+                if fs_name_set != index_name_set:
+                    disk_only = fs_name_set - index_name_set
+                    ghost_only = index_name_set - fs_name_set
+                    self._report_browse_mismatch_and_reconcile(
                         library,
                         current_path or parent_path,
-                        index_total=index_total,
-                        fs_total=len(fs_names),
+                        disk_only=sorted(disk_only),
+                        ghost_only=sorted(ghost_only),
                     )
                     return None
             if force_refresh and library.type == "local":
@@ -4482,6 +4492,52 @@ class LibraryManager:
         cache[key] = now
         try:
             self._record_index_reconcile_by_path(library, dir_path, source="browse_completeness")
+        except Exception:
+            logger.warning(
+                "[索引完整性] reconcile 入队失败: lib=%s path=%s",
+                library.id,
+                dir_path,
+                exc_info=True,
+            )
+
+    def _report_browse_mismatch_and_reconcile(
+        self,
+        library: LibraryDefinition,
+        dir_path: str,
+        *,
+        disk_only: list[str],
+        ghost_only: list[str],
+    ) -> None:
+        """浏览名字级 diff 命中（磁盘与快照集合不一致）：回退 FS 扫描 + 入队 reconcile。
+
+        与旧计数探测的区别：重命名/移动是 -1+1 计数守恒，旧探测永远打不中；
+        名字 diff 对任何一侧的单条差异都敏感。回退本身保证**本次**响应正确，
+        reconcile 负责把快照修对，后续浏览恢复索引快速路径。
+        """
+        disk_preview = ", ".join(disk_only[:5]) + ("…" if len(disk_only) > 5 else "")
+        ghost_preview = ", ".join(ghost_only[:5]) + ("…" if len(ghost_only) > 5 else "")
+        logger.warning(
+            "[索引完整性] 浏览目录磁盘与快照名字不一致，回退文件系统并入队 reconcile:"
+            " lib=%s path=%s disk_only(%d)=[%s] ghost_only(%d)=[%s]",
+            library.id,
+            dir_path,
+            len(disk_only),
+            disk_preview,
+            len(ghost_only),
+            ghost_preview,
+        )
+        cache = getattr(self, "_browse_mismatch_reconcile_at", None)
+        if cache is None:
+            cache = {}
+            self._browse_mismatch_reconcile_at = cache
+        now = time.monotonic()
+        key = (str(library.id), str(dir_path))
+        last = cache.get(key)
+        if last is not None and now - last < 60.0:
+            return
+        cache[key] = now
+        try:
+            self._record_index_reconcile_by_path(library, dir_path, source="browse_name_diff")
         except Exception:
             logger.warning(
                 "[索引完整性] reconcile 入队失败: lib=%s path=%s",
