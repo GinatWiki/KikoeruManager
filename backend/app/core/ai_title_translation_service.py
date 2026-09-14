@@ -103,6 +103,40 @@ def _extract_finish_reason(response: Any) -> str:
 
 
 
+def _litellm_chunk_finish_reason(chunk: Any) -> str:
+    """安全读取流式分片的 finish_reason（不同 provider 字段形态不一）。"""
+    try:
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            return ""
+        return str(getattr(choices[0], "finish_reason", "") or "")
+    except Exception:
+        return ""
+
+
+async def _consume_litellm_stream(stream: Any) -> Tuple[str, Dict[str, int], str]:
+    """消费 litellm 流式响应，返回 (文本, usage, finish_reason)。
+
+    流式下 ``timeout`` 是「两次数据块之间的停滞超时」而不是总时长上限：慢速模型
+    / 长响应不会再因为整体耗时超过 timeout 被误杀（这正是标题翻译超时失败的根因）。
+    """
+    from .ai_subtitle_match_service import _extract_litellm_stream_delta
+
+    parts: List[str] = []
+    usage: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    finish_reason = ""
+    async for chunk in stream:
+        delta, chunk_usage = _extract_litellm_stream_delta(chunk)
+        if delta:
+            parts.append(delta)
+        if any(chunk_usage.values()):
+            usage = chunk_usage
+        reason = _litellm_chunk_finish_reason(chunk)
+        if reason:
+            finish_reason = reason
+    return "".join(parts), usage, finish_reason
+
+
 def _is_azure_config(config: Dict[str, Any]) -> bool:
     base_url = _safe_text(config.get("api_base")).lower()
     api_version = _safe_text(config.get("api_version"))
@@ -230,15 +264,45 @@ class AITitleTranslationService:
         messages = self._build_messages(config, work_name)
         kwargs = self._completion_kwargs(config, messages)
         max_retries = _safe_int(config.get("max_retries"), 2)
+        # 流式优先（与连接测试 / AI 字幕配对一致）：流式下 timeout 只是「数据块之间的
+        # 停滞超时」，翻译大响应（整棵文件树）不会再被固定总时长误杀；同时关闭 litellm
+        # 自带重试，避免「单次 30s × litellm 3 次 ≈ 91s」把一次尝试放大三倍。
+        stream_kwargs = dict(kwargs)
+        stream_kwargs["stream"] = True
+        stream_kwargs["num_retries"] = 0
+        hard_timeout = max(120.0, float(kwargs.get("timeout") or 30.0) * 6)
 
 
         last_error: Optional[Exception] = None
         for attempt in range(max_retries + 1):
             try:
                 async with _temporary_proxy(config.get("proxy_url", "")):
-                    response = await litellm.acompletion(**kwargs)
-                content, usage = _extract_litellm_content(response)
-                finish_reason = _extract_finish_reason(response)
+                    try:
+                        stream = await litellm.acompletion(**stream_kwargs)
+                        if hasattr(stream, "__aiter__"):
+                            content, usage, finish_reason = await asyncio.wait_for(
+                                _consume_litellm_stream(stream), timeout=hard_timeout
+                            )
+                        else:
+                            # 服务端/代理忽略了 stream=True，直接返回完整响应：按非流式解析。
+                            content, usage = _extract_litellm_content(stream)
+                            finish_reason = _extract_finish_reason(stream)
+                    except (asyncio.TimeoutError, TimeoutError):
+                        raise
+                    except Exception as stream_exc:
+                        from .ai_subtitle_match_service import _is_stream_unsupported_error
+
+                        if not _is_stream_unsupported_error(stream_exc):
+                            raise
+                        logger.warning(
+                            "[AI标题] %s 流式不可用，回退非流式: %s", request_label, stream_exc
+                        )
+                        response = await asyncio.wait_for(
+                            litellm.acompletion(**{**kwargs, "num_retries": 0}),
+                            timeout=hard_timeout,
+                        )
+                        content, usage = _extract_litellm_content(response)
+                        finish_reason = _extract_finish_reason(response)
                 if not content:
                     raise ValueError("模型返回为空")
                 if finish_reason == "length":
