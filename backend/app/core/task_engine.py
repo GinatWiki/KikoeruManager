@@ -3435,6 +3435,17 @@ class TaskEngine:
                 # 步骤7: 归档压缩包
                 logger.debug(f"[{rjcode}] 步骤7: 归档压缩包")
                 if config.auto_process.archive and not task.skip_archive:
+                    # DLsite 断网时元数据是「残缺但看起来正常」的（HTTP 层失败一律返回
+                    # None，关联链退化成只有自己），此时归档入库会写入缺元数据的记录。
+                    # 直接暂停为等待人工：网络断着自动重试没有意义，等用户确认后重试续跑。
+                    dlsite_network_error = self._dlsite_transport_failure_reason()
+                    if dlsite_network_error:
+                        logger.warning(
+                            f"[{rjcode}] DLsite 元数据网络不可达，暂停归档等待人工重试: "
+                            f"{dlsite_network_error}"
+                        )
+                        self._mark_dlsite_network_paused(task, dlsite_network_error)
+                        return
                     task.update_progress(95, "归档压缩包")
                     await self._archive_source_file(task)
                 else:
@@ -4086,6 +4097,46 @@ class TaskEngine:
         with task._set_state_silent():
             task.status = TaskStatus.WAITING_MANUAL
             task.current_step = "等待人工: DLsite 关联链仍不完整，已停止自动重试"
+            task.completed_at = datetime.now()
+        task.mark_changed("status")
+        self._remove_waiting_retry_task(task.rjcode)
+
+    @staticmethod
+    def _dlsite_transport_failure_reason(within_seconds: float = 300.0) -> str:
+        """本轮任务期间是否发生过 DLsite 传输类失败（DNS/连接/超时）。"""
+        try:
+            from .dlsite_service import recent_dlsite_transport_failure
+
+            return recent_dlsite_transport_failure(within_seconds)
+        except Exception:
+            return ""
+
+    def _mark_dlsite_network_paused(self, task: Task, reason: str) -> None:
+        """DLsite 元数据因网络/DNS 不可达时暂停任务，等用户确认网络后手动重试。
+
+        形态与 ``_mark_dlsite_linkage_retry_exhausted`` 一致（写问题作品 + 等待人工 +
+        可用动作 RETRY/SKIP）；区别是根因在网络，重试前需要用户先确认链路恢复。
+        """
+        task.task_metadata = {
+            **(task.task_metadata or {}),
+            "retry_exhausted": True,
+            "retry_exhausted_at": datetime.now().isoformat(),
+            "available_actions": ["RETRY", "SKIP"],
+            "dlsite_network_paused": True,
+            "dlsite_network_error": str(reason or "")[:240],
+        }
+        try:
+            self._record_problem_work_for_task_failure(task, task.rjcode, reason)
+        except Exception:
+            logger.warning(
+                "[%s] DLsite 网络失败写入问题作品失败", task.rjcode or "未知", exc_info=True
+            )
+        with task._set_state_silent():
+            task.status = TaskStatus.WAITING_MANUAL
+            task.current_step = (
+                "等待人工: DLsite 元数据获取失败（网络/DNS），"
+                "请确认网络或代理恢复正常后点重试继续"
+            )
             task.completed_at = datetime.now()
         task.mark_changed("status")
         self._remove_waiting_retry_task(task.rjcode)

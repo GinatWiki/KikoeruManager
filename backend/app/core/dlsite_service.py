@@ -33,6 +33,35 @@ _DLSITE_HTTP_CIRCUIT: Dict[str, Any] = {
 }
 _POSTGRES_BIGINT_MAX = 9223372036854775807
 
+# 最近一次「传输类失败」（DNS / 连接 / 超时）的快照。DLsite 的 HTTP 层对失败一律
+# 返回 None，调用方无法区分「网络不通」与「确实没有数据」——断网时关联链会退化成
+# 「只有自己」，与「本来就没有关联作品」同形。这里额外留一份可查询的痕迹，供归档
+# / 写库等关键路径判断「本轮元数据不可信」，从而暂停任务而不是带着残缺元数据入库。
+_DLSITE_TRANSPORT_FAILURE: Dict[str, Any] = {
+    "at": 0.0,
+    "error": "",
+}
+
+
+def _record_dlsite_transport_failure(error: Any) -> None:
+    _DLSITE_TRANSPORT_FAILURE["at"] = time.monotonic()
+    _DLSITE_TRANSPORT_FAILURE["error"] = str(error or "")[:240]
+
+
+def recent_dlsite_transport_failure(within_seconds: float = 180.0) -> str:
+    """最近的 DLsite 传输类失败：返回错误文本（空串表示没有）。"""
+    at = float(_DLSITE_TRANSPORT_FAILURE.get("at") or 0.0)
+    if at <= 0.0:
+        return ""
+    if time.monotonic() - at > max(1.0, float(within_seconds or 0.0)):
+        return ""
+    return str(_DLSITE_TRANSPORT_FAILURE.get("error") or "").strip() or "DLsite 请求失败"
+
+
+def clear_dlsite_transport_failure() -> None:
+    _DLSITE_TRANSPORT_FAILURE["at"] = 0.0
+    _DLSITE_TRANSPORT_FAILURE["error"] = ""
+
 
 def _dlsite_http_circuit_is_open() -> bool:
     return float(_DLSITE_HTTP_CIRCUIT.get("open_until") or 0.0) > time.monotonic()
@@ -2230,10 +2259,12 @@ class DLsiteApiService:
             logger.error("API 连接失败: %s", log_url)
             logger.error("错误详情: %s", self._format_exc(e))
             logger.error("可能原因: 1) 网络连接异常 2) DLsite 不可达 3) 代理或防火墙拦截")
+            _record_dlsite_transport_failure(e)
             return None
         except httpx.ReadTimeout as e:
             logger.error("API 读取超时: %s (超过 45 秒)", log_url)
             logger.error("错误详情: %s", self._format_exc(e))
+            _record_dlsite_transport_failure(e)
             return None
         except Exception as e:
             logger.error("API 请求异常: %s", log_url)
@@ -2241,6 +2272,8 @@ class DLsiteApiService:
             logger.error("错误详情: %s", self._format_exc(e))
             import traceback
             logger.debug(traceback.format_exc())
+            if isinstance(e, (httpx.TimeoutException, httpx.NetworkError, httpx.ProtocolError)):
+                _record_dlsite_transport_failure(e)
             return None
     
     async def get_translation_info(self, rjcode: str) -> TranslationInfo:
