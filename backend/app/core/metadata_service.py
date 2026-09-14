@@ -50,7 +50,10 @@ def _record_dlsite_metadata_success() -> None:
 def _record_dlsite_metadata_failure(error: Any) -> None:
     failures = int(_DLSITE_METADATA_CIRCUIT.get("failures") or 0) + 1
     _DLSITE_METADATA_CIRCUIT["failures"] = failures
-    _DLSITE_METADATA_CIRCUIT["last_error"] = str(error or "")[:240]
+    error_text = str(error or "").strip()
+    if not error_text:
+        error_text = type(error).__name__ if error is not None else "unknown"
+    _DLSITE_METADATA_CIRCUIT["last_error"] = error_text[:240]
     if failures >= _DLSITE_METADATA_CIRCUIT_FAILURE_THRESHOLD:
         _DLSITE_METADATA_CIRCUIT["open_until"] = time.monotonic() + _DLSITE_METADATA_CIRCUIT_OPEN_SECONDS
         logger.warning(
@@ -123,6 +126,7 @@ class WorkMetadata:
             'verified_parent_workno': self.verified_parent_workno,
             'verified_parent_child_relation': self.verified_parent_child_relation,
             'dlsite_circuit_open': self.dlsite_circuit_open,
+            'rename_skipped_reason': getattr(self, 'rename_skipped_reason', ''),
             'ai_title': self.ai_title,
             'ai_title_checked_at': self.ai_title_checked_at.isoformat() if self.ai_title_checked_at else None,
         }
@@ -321,6 +325,22 @@ class MetadataService:
             logger.warning("[%s] 所有元数据链路都失败，降级为最小元数据", rjcode)
             _record_dlsite_metadata_failure(last_error or "metadata_not_found")
             metadata = self._build_minimal_metadata(rjcode, path)
+            # 网络性失败（连接超时/DNS/连不上）与「作品真的不存在」必须区分开：
+            # 前者是用户环境问题（换节点/配代理后可重试），后者才是数据侧终态。
+            # 把最近一次 DLsite 传输失败透传给上层（api-rename 用它给出可执行提示，
+            # task_engine._dlsite_transport_failure_reason 已有同类消费）。
+            from .dlsite_service import recent_dlsite_transport_failure
+
+            transport_error = recent_dlsite_transport_failure(within_seconds=180.0)
+            if transport_error:
+                metadata.metadata_verification_reason = (
+                    f"DLsite 网络不可达: {transport_error}"
+                )
+                metadata.rename_skipped_reason = (
+                    "DLsite 网络不可达（连接超时/DNS失败），请检查网络或代理后重试"
+                )
+            else:
+                metadata.rename_skipped_reason = "所有元数据源均未找到该作品"
         else:
             _record_dlsite_metadata_success()
 

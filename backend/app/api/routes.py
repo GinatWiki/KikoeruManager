@@ -429,7 +429,19 @@ def _api_rename_metadata_skip_reason(metadata: Dict[str, Any], rjcode: str) -> s
     source = str(metadata.get("metadata_source") or "").strip().lower()
     if source == "minimal":
         if metadata.get("dlsite_circuit_open"):
-            return "DLsite 元数据短熔断中，已跳过重命名"
+            return "DLsite 元数据短熔断中，已跳过重命名（等 1 分钟后重试）"
+        # 区分「网络不可达」与「作品不存在」：网络问题给用户可执行的修复指引，
+        # 不要笼统报「元数据不可用」让用户以为是软件坏了（issue #10）。
+        skipped = str(metadata.get("rename_skipped_reason") or "").strip()
+        if "网络不可达" in skipped:
+            transport = str(metadata.get("metadata_verification_reason") or "").strip()
+            detail = f"（{transport}）" if transport else ""
+            return (
+                "DLsite 连接失败，无法获取元数据——请先解决网络问题"
+                "（配置元数据代理或使用日本节点），然后重试"
+            ) + detail
+        if skipped:
+            return skipped
         return "DLsite 元数据不可用，已跳过重命名"
 
     attach_dlsite_metadata_verification(metadata, rjcode)

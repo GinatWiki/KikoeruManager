@@ -522,11 +522,30 @@ def test_local_inventory_reads_prefer_usable_index_snapshot(monkeypatch, tmp_pat
     assert subtitles_item["size_status"] == "stale"
     assert subtitles_item["size_via_index"] is True
 
+    # 1) 名字一致目录（Circle：磁盘与快照子项同名）仍严格优先索引，不允许扫盘
+    real_list_local_files = manager._list_local_files
+
     def fail_disk_listing(*_args, **_kwargs):
-        raise AssertionError("本地普通浏览应优先走索引，不能先扫磁盘")
+        raise AssertionError("名字一致目录应优先走索引，不能扫磁盘")
 
     monkeypatch.setattr(manager, "_list_local_files", fail_disk_listing)
-    indexed_list_result = asyncio.run(
+    circle_list_result = asyncio.run(
+        manager.list_files(
+            library.id,
+            page=1,
+            page_size=20,
+            current_path=str(circle_dir),
+            sort_by="name",
+            sort_order="asc",
+        )
+    )
+    assert circle_list_result["browse_via_index"] is True
+    assert [item["name"] for item in circle_list_result["files"]] == ["cover.jpg", "RJ01000001"]
+
+    # 2) 换名目录（RJ：快照 old-track.mp3，磁盘已是 track.mp3，-1+1 计数守恒）：
+    # v2.6.41 名字级 diff 探测应回退磁盘扫描，本次响应即真实内容，不再等轮询自纠
+    monkeypatch.setattr(manager, "_list_local_files", real_list_local_files)
+    renamed_list_result = asyncio.run(
         manager.list_files(
             library.id,
             page=1,
@@ -536,9 +555,9 @@ def test_local_inventory_reads_prefer_usable_index_snapshot(monkeypatch, tmp_pat
             sort_order="asc",
         )
     )
-    assert indexed_list_result["browse_via_index"] is True
-    assert [item["name"] for item in indexed_list_result["files"]] == ["subtitles"]
-    assert indexed_list_result["total"] == 1
+    assert renamed_list_result.get("browse_via_index") is not True
+    assert [item["name"] for item in renamed_list_result["files"]] == ["subtitles", "track.mp3"]
+    assert renamed_list_result["total"] == 2
 
     result = asyncio.run(manager.folder_contents(library.id, str(circle_dir), recursive=False))
 
@@ -2425,9 +2444,10 @@ def test_batch_api_rename_skips_minimal_metadata_without_batch_renaming(monkeypa
     assert "DLsite 元数据短熔断中" in response["results"][0]["error"]
     assert response["results"][0]["metadata_source"] == "minimal"
     assert response["results"][0]["metadata_verification_status"] == "unverified"
+    # 熔断开启时 reason 使用可执行诊断文案（issue #10）：告知等待熔断窗口结束
     assert (
         response["results"][0]["metadata_verification_reason"]
-        == "元数据来源缺少可验证的结构化证据"
+        == "DLsite 元数据短熔断中，已跳过重命名（等 1 分钟后重试）"
     )
     assert captured["metadata_task_rjcode"] == "RJ01572763"
     assert captured["metadata_task_metadata"] == {

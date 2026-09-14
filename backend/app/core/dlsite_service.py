@@ -45,7 +45,11 @@ _DLSITE_TRANSPORT_FAILURE: Dict[str, Any] = {
 
 def _record_dlsite_transport_failure(error: Any) -> None:
     _DLSITE_TRANSPORT_FAILURE["at"] = time.monotonic()
-    _DLSITE_TRANSPORT_FAILURE["error"] = str(error or "")[:240]
+    error_text = str(error or "").strip()
+    if not error_text:
+        # 与 _record_dlsite_http_failure 同理：裸 str() 为空时兜底取类型名
+        error_text = type(error).__name__ if error is not None else "unknown"
+    _DLSITE_TRANSPORT_FAILURE["error"] = error_text[:240]
 
 
 def recent_dlsite_transport_failure(within_seconds: float = 180.0) -> str:
@@ -80,7 +84,13 @@ def _record_dlsite_http_success() -> None:
 def _record_dlsite_http_failure(error: Any) -> None:
     failures = int(_DLSITE_HTTP_CIRCUIT.get("failures") or 0) + 1
     _DLSITE_HTTP_CIRCUIT["failures"] = failures
-    _DLSITE_HTTP_CIRCUIT["last_error"] = str(error or "")[:240]
+    error_text = str(error or "").strip()
+    if not error_text:
+        # httpx 的 ConnectTimeout/ConnectError 在裸 str() 下可能为空串
+        # （信息都在 __cause__ 链里），熔断日志会打出 last_error= 空值，
+        # 排障时无法定位。兜底取类型名，保证日志始终有可读原因。
+        error_text = type(error).__name__ if error is not None else "unknown"
+    _DLSITE_HTTP_CIRCUIT["last_error"] = error_text[:240]
     if failures >= _DLSITE_HTTP_CIRCUIT_FAILURE_THRESHOLD:
         _DLSITE_HTTP_CIRCUIT["open_until"] = time.monotonic() + _DLSITE_HTTP_CIRCUIT_OPEN_SECONDS
         logger.warning(
