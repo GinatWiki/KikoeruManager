@@ -4754,6 +4754,135 @@ async def test_resolve_source_urls_skips_transfer_when_all_complete(monkeypatch,
 
 
 @pytest.mark.asyncio
+async def test_copy_pikpak_share_files_isolates_unrestorable_file(monkeypatch, tmp_path):
+    """整批转存被 File is not in share 拒绝时，逐文件重试并只标记真正失效的条目。"""
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    calls = []
+    share_files = [
+        {"id": "file-a", "name": "RJ1.7z.001", "size": 10},
+        {"id": "file-b", "name": "RJ1.7z.002", "size": 10},
+    ]
+
+    class Client:
+        pass
+
+    async def fake_parent_id(_client, create=False, account=None):
+        return "dest-1"
+
+    async def fake_restore(_client, *, share_id, pass_code_token, file_ids, parent_id):
+        calls.append(list(file_ids))
+        if len(file_ids) > 1 or file_ids == ["file-b"]:
+            raise RuntimeError("File is not in share")
+        return {"file_id_map": {"file-a": "copy-a"}}
+
+    async def fake_match(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_pikpak_transfer_parent_id", fake_parent_id)
+    monkeypatch.setattr(service, "_restore_pikpak_share_files", fake_restore)
+    monkeypatch.setattr(service, "_match_pikpak_restored_files_from_listing", fake_match)
+
+    failures = []
+    id_map = await service._copy_pikpak_share_files(
+        Client(),
+        ["file-a", "file-b"],
+        share_files,
+        share_id="share-1",
+        transfer_failures=failures,
+    )
+
+    assert calls[0] == ["file-a", "file-b"]
+    assert ["file-a"] in calls
+    assert ["file-b"] in calls
+    assert id_map.get("file-a") == "copy-a"
+    assert len(failures) == 1
+    assert failures[0]["file_id"] == "file-b"
+    assert failures[0]["name"] == "RJ1.7z.002"
+    assert "无法转存" in failures[0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_start_download_task_continues_after_unrestorable_share_file(monkeypatch, tmp_path):
+    """分享侧已失效的单个条目不再中止整份下载：其余文件照常下载，失败项保留在明细里。"""
+    bind_config(monkeypatch, tmp_path)
+    service = HttpDownloadService()
+    file_size = 1024
+
+    async def fake_preview_urls(urls, target_subdir="", conflict_policy="", *, materialize_sources=False, selected_items=None):
+        return {
+            "items": [
+                {
+                    "ok": True,
+                    "source": "pikpak",
+                    "url": "https://dl.test/RJ1.7z.002",
+                    "masked_url": "https://dl.test/RJ1.7z.002",
+                    "filename": "RJ1.7z.002",
+                    "relative_path": "RJ1.7z.002",
+                    "final_path": str(tmp_path / "downloads" / "RJ1.7z.002"),
+                    "target_dir": str(tmp_path / "downloads"),
+                    "size_bytes": file_size,
+                    "file_id": "file-b",
+                    "download_file_id": "copy-b",
+                },
+                {
+                    "ok": False,
+                    "source": "pikpak",
+                    "url": "https://mypikpak.com/s/share",
+                    "masked_url": "https://mypikpak.com/s/***",
+                    "reason": "RJ1.7z.001: 该文件已无法转存（PikPak 返回 File is not in share）",
+                    "name": "RJ1.7z.001",
+                    "filename": "RJ1.7z.001",
+                    "file_id": "file-a",
+                    "pikpak_transfer_failed": True,
+                },
+            ],
+            "resolved_urls": ["https://dl.test/RJ1.7z.002"],
+            "source_items": [],
+            "source_modes": ["pikpak"],
+        }
+
+    async def fake_rpc(method, params):
+        if method == "aria2.addUri":
+            return "gid-1"
+        if method == "aria2.tellStatus":
+            return {
+                "gid": params[0],
+                "status": "complete",
+                "totalLength": str(file_size),
+                "completedLength": str(file_size),
+                "downloadSpeed": "0",
+                "errorMessage": "",
+                "files": [],
+            }
+        if method in ("aria2.tellActive", "aria2.tellWaiting", "aria2.tellStopped"):
+            return []
+        if method in ("aria2.remove", "aria2.removeDownloadResult"):
+            return "ok"
+        raise AssertionError(f"unexpected rpc: {method}")
+
+    monkeypatch.setattr(service, "preview_urls", fake_preview_urls)
+    monkeypatch.setattr(service, "_rpc_call", fake_rpc)
+    monkeypatch.setattr(service, "_remove_existing_gids_for_target", lambda _target: asyncio.sleep(0))
+
+    task = Task(
+        task_type=TaskType.HTTP_DOWNLOAD,
+        source_path="mypikpak.com",
+        metadata={"urls": ["https://mypikpak.com/s/share"], "selected_items": []},
+    )
+
+    result = await service.start_download_task(task)
+
+    assert result["status"] == "partial_failed"
+    assert result["partial_success"] is True
+    assert [row["name"] for row in result["downloaded_files"]] == ["RJ1.7z.002"]
+    assert any(
+        "RJ1.7z.001" in str(row.get("reason") or row.get("failure_reason") or "")
+        for row in result["failed_files"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_download_transferit_item_uses_library_download(monkeypatch, tmp_path):
     bind_config(monkeypatch, tmp_path)
     service = HttpDownloadService()

@@ -483,11 +483,40 @@ class HttpDownloadService:
             return HttpDownloadError(f"{prefix}: 触发 PikPak 验证/验证码，当前后端不能自动处理，请稍后重试或换账号；如果这是手机号账号，试试在号码前补所属国家码，例如 +86。原始错误: {text}")
         if any(marker in lowered for marker in ("vip", "privilege", "permission", "forbidden", "403")) or any(marker in text for marker in ("会员", "权限", "无权")):
             return HttpDownloadError(f"{prefix}: 账号权限不足或文件需要会员能力。原始错误: {text}")
+        if "not in share" in lowered:
+            # 注意：必须排在下面的通用「share/not found」分支之前，否则会被误译成
+            # 「分享不存在、已过期或提取码不对」——那会让用户以为是整个分享失效。
+            return HttpDownloadError(
+                f"{prefix}: 分享内该文件已不可用（PikPak 返回 File is not in share），"
+                f"通常是分享内该条目已失效或被移除，重试无法恢复。原始错误: {text}"
+            )
         if any(marker in lowered for marker in ("not found", "expired", "deleted", "share")) or any(marker in text for marker in ("不存在", "过期", "删除", "分享")):
             return HttpDownloadError(f"{prefix}: 分享不存在、已过期或提取码不对。原始错误: {text}")
         if any(marker in lowered for marker in ("timeout", "timed out", "connection", "network")) or any(marker in text for marker in ("超时", "网络", "连接")):
             return HttpDownloadError(f"{prefix}: 连接 PikPak 超时或网络不可用，请检查代理/网络。原始错误: {text}")
         return HttpDownloadError(f"{prefix}: {text or value.__class__.__name__}")
+
+    def _is_pikpak_permanent_transfer_error(self, value: Any) -> bool:
+        """是否属于「分享内该条目已不可转存」——重试也无法解决的永久类错误。
+
+        PikPak 的 share/restore 在同一批次里混合了不同分享目录的文件时可能整批
+        返回 `File is not in share`；逐文件重试可以绕开批处理问题，也能精确定位
+        真正失效的条目。
+        """
+        text = self._sanitize_error(value).lower()
+        return any(marker in text for marker in (
+            "not in share",
+            "file not found",
+            "not exist",
+        ))
+
+    def _pikpak_permanent_transfer_reason(self, value: Any) -> str:
+        detail = self._sanitize_error(value)
+        return (
+            "该文件已无法转存（PikPak 返回 "
+            f"{detail or '未知错误'}）：通常是分享内该条目已失效或被移除，"
+            "重试不会恢复；其余文件已继续下载。"
+        )
 
     def _is_pikpak_token_error(self, value: Any) -> bool:
         text = self._sanitize_error(value).lower()
@@ -3632,6 +3661,7 @@ class HttpDownloadService:
         account: Optional[PikPakAccount] = None,
         share_id: str = "",
         pass_code_token: str = "",
+        transfer_failures: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, str]:
         id_map = {str(item): str(item) for item in file_ids if str(item or "").strip()}
         if not file_ids:
@@ -3687,6 +3717,19 @@ class HttpDownloadService:
                 parent_id=parent_id or "",
             )
         except Exception as exc:
+            if len(file_ids) > 1 and self._is_pikpak_permanent_transfer_error(exc):
+                # 整批转存被服务端以「File is not in share」拒绝时（见 v2.6.38 说明），
+                # 逐个文件重试：能转存的照常转存，只把真正失效的条目标记出来。
+                return await self._copy_pikpak_share_files_isolated(
+                    client,
+                    file_ids,
+                    share_files,
+                    account=account,
+                    share_id=share_id,
+                    pass_code_token=pass_code_token,
+                    transfer_failures=transfer_failures,
+                    batch_error=exc,
+                )
             raise self._pikpak_error(exc, "转存分享文件") from exc
         try:
             restore_keys = list(result.keys()) if isinstance(result, dict) else type(result).__name__
@@ -3795,6 +3838,68 @@ class HttpDownloadService:
                 )
         return id_map
 
+    async def _copy_pikpak_share_files_isolated(
+        self,
+        client,
+        file_ids: List[str],
+        share_files: Optional[List[Dict[str, Any]]] = None,
+        *,
+        account: Optional[PikPakAccount] = None,
+        share_id: str = "",
+        pass_code_token: str = "",
+        transfer_failures: Optional[List[Dict[str, Any]]] = None,
+        batch_error: Any = None,
+    ) -> Dict[str, str]:
+        """整批转存失败时逐个文件重试，隔离出真正无法转存的条目。
+
+        PikPak 的 `share/restore` 在一批里混合了不同分享目录的文件时可能整批返回
+        `File is not in share`；逐个文件重试既可以绕开该批处理问题（历史记录里
+        子目录文件单独转存全部成功），也能精确指出哪个条目真的失效、不再拖垮整份
+        分享的下载。
+        """
+        names_by_id = {
+            self._pikpak_file_id(item): str(item.get("name") or item.get("file_name") or "")
+            for item in list(share_files or [])
+            if self._pikpak_file_id(item)
+        }
+        logger.warning(
+            "[PikPak] 整批转存失败，改为逐文件重试以隔离失效条目: files=%s error=%s",
+            [names_by_id.get(str(fid)) or str(fid) for fid in file_ids],
+            self._sanitize_error(batch_error),
+        )
+        merged: Dict[str, str] = {}
+        for raw_file_id in file_ids:
+            file_id = str(raw_file_id or "").strip()
+            if not file_id:
+                continue
+            try:
+                single_map = await self._copy_pikpak_share_files(
+                    client,
+                    [file_id],
+                    share_files,
+                    account=account,
+                    share_id=share_id,
+                    pass_code_token=pass_code_token,
+                    transfer_failures=transfer_failures,
+                )
+                merged.update(single_map)
+            except Exception as exc:
+                if not self._is_pikpak_permanent_transfer_error(exc):
+                    raise
+                name = names_by_id.get(file_id) or file_id
+                logger.warning(
+                    "[PikPak] 分享内条目已无法转存，跳过该文件: file=%s error=%s",
+                    name,
+                    self._sanitize_error(exc),
+                )
+                if transfer_failures is not None:
+                    transfer_failures.append({
+                        "file_id": file_id,
+                        "name": name,
+                        "reason": self._pikpak_permanent_transfer_reason(exc),
+                    })
+        return merged
+
     async def _copy_pikpak_share_files_multi(
         self,
         collector_client,
@@ -3804,6 +3909,7 @@ class HttpDownloadService:
         share_link: str = "",
         share_id: str = "",
         pass_code_token: str = "",
+        transfer_failures: Optional[List[Dict[str, Any]]] = None,
     ) -> tuple[Dict[str, str], Dict[str, PikPakAccount], Dict[str, Any]]:
         source_id_map = {str(item): str(item) for item in file_ids if str(item or "").strip()}
         account_by_source: Dict[str, PikPakAccount] = {}
@@ -3864,6 +3970,7 @@ class HttpDownloadService:
                         account=accounts[0],
                         share_id=share_id or (self._pikpak_share_id_from_url(share_link) if share_link else ""),
                         pass_code_token=pass_code_token,
+                        transfer_failures=transfer_failures,
                     )
                     clients_handed_off = True
                     return id_map, {file_id: accounts[0] for file_id in file_ids}, {
@@ -3918,6 +4025,7 @@ class HttpDownloadService:
                         account=account,
                         share_id=account_share_id,
                         pass_code_token=account_token,
+                        transfer_failures=transfer_failures,
                     )
                     copied_ids = [
                         str(id_map[file_id])
@@ -4587,6 +4695,7 @@ class HttpDownloadService:
                 for raw_url in pikpak_links:
                     try:
                         download_clients: Dict[str, Any] = {}
+                        transfer_failures: List[Dict[str, Any]] = []
                         info, files = await self._collect_pikpak_share_files(client, raw_url)
                         if not files:
                             failed.append({"ok": False, "url": raw_url, "masked_url": self._mask_url(raw_url), "reason": "PikPak 分享中没有可下载文件", "source": "pikpak"})
@@ -4648,6 +4757,7 @@ class HttpDownloadService:
                                 share_link=raw_url,
                                 share_id=share_id,
                                 pass_code_token=pass_code_token,
+                                transfer_failures=transfer_failures,
                             )
                             download_clients.update(reusable_clients)
                             for account in account_by_source.values():
@@ -4655,6 +4765,39 @@ class HttpDownloadService:
                                     # 转存阶段已经校验过 token/账号；直链解析复用同一认证
                                     # 状态，避免每个账号再次调用 user_info/login。
                                     download_clients[account.id] = await self._pikpak_client(account=account, verify_token=False)
+                            if transfer_failures:
+                                # 逐文件隔离后确认失效的条目：只把它们标成失败行，
+                                # 不再让单个坏条目拖垮整份分享的下载（v2.6.38）。
+                                failed_ids = {
+                                    str(item.get("file_id") or "").strip()
+                                    for item in transfer_failures
+                                    if str(item.get("file_id") or "").strip()
+                                }
+                                for item in transfer_failures:
+                                    name = str(item.get("name") or item.get("file_id") or "").strip()
+                                    reason = str(item.get("reason") or "").strip()
+                                    failed.append({
+                                        "ok": False,
+                                        "url": raw_url,
+                                        "masked_url": self._mask_url(raw_url),
+                                        "reason": f"{name}: {reason}" if name and reason else (reason or name),
+                                        "source": "pikpak",
+                                        "name": name,
+                                        "filename": name,
+                                        "file_id": item.get("file_id"),
+                                        "share_id": share_id,
+                                        "pikpak_transfer_failed": True,
+                                    })
+                                files = [
+                                    item for item in files
+                                    if str(item.get("id") or item.get("file_id") or "").strip() not in failed_ids
+                                ]
+                                if not files:
+                                    logger.warning(
+                                        "[PikPak] 分享内待转存文件全部无法转存，跳过直链解析: %s",
+                                        self._mask_url(raw_url),
+                                    )
+                                    continue
                         configured_link_limit = max(
                             1,
                             min(
@@ -6476,6 +6619,9 @@ class HttpDownloadService:
         share_failed = [
             item for item in failed_items
             if str(item.get("source") or "") in _SHARE_PREVIEW_ONLY_SOURCES
+            # 分享侧已确认失效的单个条目（逐文件隔离得出，重试无法恢复）不再中止
+            # 整份下载：继续下载其余文件，缺失项照常出现在失败明细里（v2.6.38）。
+            and not item.get("pikpak_transfer_failed")
         ]
         if share_failed:
             # 直链解析可能在转存成功后失败；把这些失败行写入任务元数据，
