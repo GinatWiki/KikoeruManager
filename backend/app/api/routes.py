@@ -23223,8 +23223,6 @@ async def get_duplicate_groups(
         )
         # 设置里勾选「查重排除」（exclude_dedup）的库存不参与仓库查重
         excluded_library_ids = _duplicate_excluded_library_ids()
-        if excluded_library_ids:
-            base_q = base_q.filter(~LibraryIndexEntry.library_id.in_(excluded_library_ids))
         # 版本根目录行自身（目录行 size / file_count 是递归汇总值，直接取用避免嵌套目录重复计数）；
         # 散放 RJ 文件没有目录行，大小和文件数按自身计 1。
         root_row_cond = and_(rj_pos > 0, tail_slash.is_(None))
@@ -23253,6 +23251,10 @@ async def get_duplicate_groups(
             .filter(LibraryIndexEntry.rjcode.isnot(None))
             .filter(LibraryIndexEntry.rjcode != "")
         )
+        # 排除库过滤必须在 base_q 定义之后（afa4086 曾把它插到定义之前，
+        # 勾选「查重排除」后列表接口直接 UnboundLocalError 500）
+        if excluded_library_ids:
+            base_q = base_q.filter(~LibraryIndexEntry.library_id.in_(excluded_library_ids))
 
         # 排除噪声散文件：RJ 只在文件名（未命中目录组件）、且父路径嵌在其它作品目录内
         # （如 @folder-icon 图标、img/classic 宣传图），与 _duplicate_is_noise_entry 同口径
