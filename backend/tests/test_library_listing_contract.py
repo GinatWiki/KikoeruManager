@@ -114,7 +114,9 @@ def test_listing_verify_mode_echoes_but_equals_index():
         library=_fake_library(), relative_path="sub", cursor="", mode="verify", get_service=lambda: svc
     )
     assert data["mode"] == "verify"
-    assert data["source"] == "verify"  # 本阶段 verify 等价于 index，仅回显
+    # verify 对 FakeEntry stat 真实磁盘（absolute_path 为空 → 拼库根），OSError 回落快照
+    assert data["source"] == "verify"
+    assert data["verify_failed"] is True
     assert data["items"][0]["relative_path"] == "sub/x"
     assert data["items"][0]["source"] == "verify"
 
